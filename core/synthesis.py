@@ -4,11 +4,11 @@ Multi-collection RAG retrieval + combined overview/synthesis in one LLM call.
 
 Changes from original:
   - ambient_log is always included in retrieval (lowest priority, separate label)
-  - web_knowledge included — results from epistemic_synthesis searches
-    labelled with truth_confidence so the LLM knows how reliable they are
   - Temporal query detection: "earlier today", "this morning" etc. trigger
     time-filtered retrieval from ambient_log before standard semantic search
   - Topic cluster surfacing: synthesis includes related topics when available
+  - Personality context: known traits/interests for current_host injected
+    into synthesis prompt when available
 """
 
 import re
@@ -19,10 +19,6 @@ import chromadb
 
 DISTANCE_THRESHOLD = 2.0
 AMBIENT_COLLECTION = "ambient_log"
-WEB_COLLECTION = "web_knowledge"
-
-# Personality collections — never retrieved as memory
-from core.personality_growth import PERSONALITY_COLLECTIONS
 
 # Temporal signal patterns — trigger time-filtered ambient retrieval
 _TEMPORAL_PATTERNS = re.compile(
@@ -33,6 +29,21 @@ _TEMPORAL_PATTERNS = re.compile(
     r"i mentioned|you heard|did (i|you) (say|mention|talk))\b",
     re.IGNORECASE,
 )
+
+
+_PERSONAL_QUERY_PATTERN = re.compile(
+    r"\b(what (do i|does .* )(like|hate|enjoy|prefer|think|believe|care)|"
+    r"(my|.+'s) (preference|taste|interest|opinion|feeling|view)|"
+    r"(do i|does .*) (like|hate|enjoy|prefer)|"
+    r"what (am i|is .* ) into|"
+    r"tell me about (my|.*'s) (personality|interests|preferences|values))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_personal_query(query: str) -> bool:
+    """Is this query explicitly asking about someone's personality/preferences?"""
+    return bool(_PERSONAL_QUERY_PATTERN.search(query))
 
 
 def _is_temporal_query(query: str) -> bool:
@@ -54,10 +65,7 @@ def _get_collection_store(name: str) -> Optional[RAGStore]:
 def _get_all_collections() -> list[str]:
     try:
         client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
-        all_names = [c.name for c in client.list_collections()]
-        # Filter out personality collections — those are injected separately
-        excluded = set(PERSONALITY_COLLECTIONS) | {AMBIENT_COLLECTION, WEB_COLLECTION}
-        return [n for n in all_names if n not in excluded]
+        return [c.name for c in client.list_collections()]
     except Exception:
         return ["main"]
 
@@ -65,6 +73,7 @@ def _get_all_collections() -> list[str]:
 def _extract_topics_from_chunks(chunks: list[dict]) -> list[str]:
     """
     Pull all unique topic tags from retrieved chunks' metadata.
+    Used to surface related topics in the synthesis output.
     """
     all_topics = set()
     for chunk in chunks:
@@ -78,16 +87,19 @@ def _extract_topics_from_chunks(chunks: list[dict]) -> list[str]:
     return sorted(all_topics)
 
 
-def _confidence_label(confidence: float) -> str:
-    """Human-readable confidence label for web knowledge chunks."""
-    if confidence >= 0.85:
-        return "well-established"
-    elif confidence >= 0.60:
-        return "generally agreed"
-    elif confidence >= 0.30:
-        return "contested"
-    else:
-        return "uncertain"
+def _get_personality_block(current_host: Optional[str]) -> str:
+    """
+    Pull stored personality signals for the current host and format
+    as a context block for the synthesis prompt.
+    Returns empty string if no signals or personality module unavailable.
+    """
+    if not current_host:
+        return ""
+    try:
+        from voice.personality_tool import get_personality_context
+        return get_personality_context(current_host)
+    except Exception:
+        return ""
 
 
 async def retrieve_and_synthesize(
@@ -99,19 +111,13 @@ async def retrieve_and_synthesize(
     llm=None,
 ) -> str:
     """
-    Query all collections including ambient_log and web_knowledge,
-    synthesize into one context block.
+    Query all collections including ambient_log, synthesize into one context block.
 
-    Priority ordering:
-      1. Host collection
-      2. Fronter collections
-      3. main + other personal collections
-      4. web_knowledge (labelled with confidence level)
-      5. ambient_log (lowest priority, time-labelled)
+    Temporal queries ("earlier today", "what were we talking about") get
+    additional time-filtered retrieval from ambient_log.
 
-    Temporal queries get additional time-filtered ambient retrieval.
-    Web knowledge chunks are labelled with their truth_confidence so
-    the synthesis LLM knows how much weight to give them.
+    Personality signals for current_host are injected into the prompt
+    so responses naturally reflect what's known about the person.
     """
     all_known = _get_all_collections()
     is_temporal = _is_temporal_query(query)
@@ -119,7 +125,7 @@ async def retrieve_and_synthesize(
     if is_temporal:
         print(f"[Synthesis] Temporal query detected: '{query[:60]}'")
 
-    # Priority ordering: host → fronters → everything else
+    # Priority ordering: host → fronters → everything else → ambient last
     priority = []
     if current_host:
         h = current_host.lower().strip()
@@ -131,12 +137,13 @@ async def retrieve_and_synthesize(
             if name and name not in priority:
                 priority.append(name)
 
-    non_priority = [c for c in all_known if c not in priority]
-    collections_to_search = priority + non_priority
+    # Everything else except ambient (ambient added explicitly at end)
+    non_ambient = [c for c in all_known if c not in priority and c != AMBIENT_COLLECTION]
+    collections_to_search = priority + non_ambient
     if "main" not in collections_to_search:
         collections_to_search.append("main")
 
-    # ── Standard semantic retrieval across personal collections ──────────────
+    # ── Standard semantic retrieval across all non-ambient collections ────────
     all_chunks = []
     for collection_name in collections_to_search:
         store = _get_collection_store(collection_name)
@@ -145,6 +152,10 @@ async def retrieve_and_synthesize(
         try:
             results = store.retrieve(query, n_results=n_per_collection)
             for r in results:
+                # Skip personality signals from general retrieval —
+                # they're handled separately via _get_personality_block
+                if r.get("metadata", {}).get("type") == "personality_signal":
+                    continue
                 all_chunks.append({
                     "collection": collection_name,
                     "text": r["text"],
@@ -155,37 +166,12 @@ async def retrieve_and_synthesize(
         except Exception as e:
             print(f"[Synthesis] Error querying '{collection_name}': {e}")
 
-    # ── Web knowledge retrieval ───────────────────────────────────────────────
-    web_store = _get_collection_store(WEB_COLLECTION)
-    if web_store is not None:
-        try:
-            web_results = web_store.retrieve(query, n_results=4)
-            for r in web_results:
-                meta = r.get("metadata", {})
-                confidence = float(meta.get("truth_confidence", 0.5))
-                consensus_level = meta.get("consensus_level", "unknown")
-                retrieved_at = meta.get("retrieved_at", "")
-                label = (
-                    f"web [{_confidence_label(confidence)}]"
-                    + (f" retrieved {retrieved_at[:10]}" if retrieved_at else "")
-                )
-                all_chunks.append({
-                    "collection": label,
-                    "text": r["text"],
-                    "distance": r["distance"],
-                    "metadata": meta,
-                    "source": "web",
-                    "truth_confidence": confidence,
-                    "consensus_level": consensus_level,
-                })
-        except Exception as e:
-            print(f"[Synthesis] Error querying web_knowledge: {e}")
-
     # ── Ambient retrieval ─────────────────────────────────────────────────────
     ambient_store = _get_collection_store(AMBIENT_COLLECTION)
     if ambient_store is not None:
         try:
             if is_temporal:
+                # Time-filtered retrieval: past 8 hours
                 ambient_results = ambient_store.retrieve_recent(
                     query=query,
                     hours_back=8,
@@ -193,12 +179,20 @@ async def retrieve_and_synthesize(
                 )
                 print(f"[Synthesis] Temporal ambient results: {len(ambient_results)}")
             else:
+                # Standard semantic retrieval from ambient
                 ambient_results = ambient_store.retrieve(query, n_results=4)
 
             for r in ambient_results:
                 meta = r.get("metadata", {})
                 time_label = meta.get("time", "")
-                label = f"ambient_log ({time_label})" if time_label else AMBIENT_COLLECTION
+                # Include speaker attribution in label if available
+                speaker = meta.get("speaker", "")
+                if speaker and time_label:
+                    label = f"ambient @ {time_label}, {speaker}"
+                elif time_label:
+                    label = f"ambient @ {time_label}"
+                else:
+                    label = AMBIENT_COLLECTION
                 all_chunks.append({
                     "collection": label,
                     "text": r["text"],
@@ -222,34 +216,33 @@ async def retrieve_and_synthesize(
 
     relevant = relevant[:12]
 
-    print(
-        f"[Synthesis] Found {len(relevant)} relevant chunks across "
-        f"{len({c['collection'] for c in relevant})} collections "
-        f"({'temporal' if is_temporal else 'semantic'})"
-    )
+    print(f"[Synthesis] Found {len(relevant)} relevant chunks across "
+          f"{len({c['collection'] for c in relevant})} collections "
+          f"({'temporal' if is_temporal else 'semantic'})")
 
-    # ── Extract related topics ────────────────────────────────────────────────
+    # ── Extract related topics for synthesis context ───────────────────────────
     related_topics = _extract_topics_from_chunks(relevant)
     topics_hint = ""
     if related_topics:
         topics_hint = f"\nRelated topics found: {', '.join(related_topics[:8])}"
 
-    # ── Build chunk text with attribution ─────────────────────────────────────
+    # ── Personality context — only for direct personal queries ───────────────
+    # Personality signals are NOT injected on every synthesis call.
+    # They surface actively via conflict_detector when situationally relevant.
+    # The only exception: queries explicitly about a person's preferences/traits.
+    personality_block = ""
+    if current_host and _is_personal_query(query):
+        personality_context = _get_personality_block(current_host)
+        if personality_context:
+            personality_block = f"\n\n[Personality & interests]\n{personality_context}"
+            print(f"[Synthesis] Personality context injected for '{current_host}' (personal query)")
+
+    # ── Build chunk text with attribution and time info ───────────────────────
     chunk_lines = []
     for c in relevant:
         meta = c.get("metadata", {})
-        time_str = meta.get("time", "")
         collection_label = c["collection"]
-
-        if c["source"] == "ambient" and time_str:
-            prefix = f"[ambient @ {time_str}]"
-        elif c["source"] == "web":
-            confidence = c.get("truth_confidence", 0.5)
-            prefix = f"[web — {_confidence_label(confidence)}]"
-        else:
-            prefix = f"[{collection_label}]"
-
-        chunk_lines.append(f"{prefix} {c['text']}")
+        chunk_lines.append(f"[{collection_label}] {c['text']}")
     chunk_text = "\n\n".join(chunk_lines)
 
     # ── History block ─────────────────────────────────────────────────────────
@@ -265,27 +258,25 @@ async def retrieve_and_synthesize(
         "and include specific times if available."
         if is_temporal else ""
     )
-    web_note = (
-        "\nNote: Web chunks are labelled with confidence — "
-        "'well-established' = sources agree, 'contested' = sources disagree. "
-        "Reflect this uncertainty naturally in your synthesis."
-        if any(c["source"] == "web" for c in relevant) else ""
-    )
 
     prompt = [
         {
             "role": "user",
             "content": (
                 f"You have {chunk_count} knowledge chunks from these sources: {collection_list}."
-                f"{history_block}{topics_hint}{temporal_note}{web_note}\n\n"
+                f"{history_block}{personality_block}{topics_hint}{temporal_note}\n\n"
                 f"READ ALL OF THESE CHUNKS carefully before writing anything:\n\n"
                 f"{chunk_text}\n\n"
                 f"Current query: {query}\n\n"
-                f"Write a single cohesive paragraph combining all relevant information. "
+                f"Now write a single cohesive paragraph that combines information from "
+                f"ALL the chunks above that are relevant to the query. "
                 f"Do not just summarize the first chunk — weave together everything relevant. "
-                f"Attribute naturally where perspectives differ. "
-                f"For web chunks marked 'contested', reflect that uncertainty. "
-                f"For ambient chunks, include time naturally if relevant. "
+                f"Attribute naturally where perspectives differ (e.g. 'Jonah mentioned...', 'Oren noted...'). "
+                f"For ambient chunks, include speaker and time naturally if relevant "
+                f"(e.g. 'Earlier this morning Alice mentioned...'). "
+                f"If personality/interest context is present, use it to colour your response "
+                f"naturally — don't list traits, just let them inform the answer. "
+                f"If multiple chunks say similar things, merge them into one clear statement. "
                 f"If chunks contradict, note both perspectives. "
                 f"No bullet points. No headers. Flowing prose only. "
                 f"3-6 sentences maximum."
@@ -299,7 +290,8 @@ async def retrieve_and_synthesize(
             system_prompt=(
                 "You produce concise, attributed context summaries in flowing prose. "
                 "Never use bullet points or headers. Never invent information not present in the chunks. "
-                "Reflect uncertainty honestly — don't present contested claims as settled facts."
+                "For ambient memory chunks, preserve time and speaker references naturally. "
+                "Use personality context to inform tone and relevance, not to list facts."
             ),
             max_new_tokens=300,
             temperature=0.3,
