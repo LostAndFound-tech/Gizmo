@@ -157,7 +157,7 @@ async def continue_onboarding(
         return response.strip()
     except Exception as e:
         print(f"[Personality] Onboarding generation failed: {e}")
-        return "What kinds of things do you like to talk about?"
+        return f"What kinds of things do you like to talk about? {e}"
 
 
 async def seed_personality_from_onboarding(
