@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gizmo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f0f0f;
+    color: #e0e0e0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid #222;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #1a1a2e;
+    border: 1px solid #333;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+  }
+
+  header h1 { font-size: 16px; font-weight: 500; }
+
+  #status {
+    margin-left: auto;
+    font-size: 12px;
+    color: #555;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  #status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #555;
+    transition: background 0.3s;
+  }
+
+  #status-dot.connected { background: #4caf50; }
+  #status-dot.thinking  { background: #ff9800; }
+
+  #mood-badge {
+    font-size: 11px;
+    color: #666;
+    margin-left: 8px;
+  }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    scroll-behavior: smooth;
+  }
+
+  .msg {
+    display: flex;
+    flex-direction: column;
+    max-width: 75%;
+    gap: 4px;
+  }
+
+  .msg.user  { align-self: flex-end; align-items: flex-end; }
+  .msg.gizmo { align-self: flex-start; align-items: flex-start; }
+
+  .bubble {
+    padding: 10px 14px;
+    border-radius: 16px;
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .msg.user  .bubble { background: #1a3a5c; color: #d0e8ff; border-bottom-right-radius: 4px; }
+  .msg.gizmo .bubble { background: #1a1a1a; color: #e0e0e0; border: 1px solid #2a2a2a; border-bottom-left-radius: 4px; }
+
+  .msg-meta {
+    font-size: 11px;
+    color: #444;
+    padding: 0 4px;
+  }
+
+  .typing {
+    display: flex;
+    gap: 4px;
+    padding: 12px 14px;
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 16px;
+    border-bottom-left-radius: 4px;
+    width: fit-content;
+  }
+
+  .typing span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #555;
+    animation: bounce 1.2s infinite;
+  }
+
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); }
+    30% { transform: translateY(-6px); }
+  }
+
+  #input-area {
+    padding: 16px 24px;
+    border-top: 1px solid #222;
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+
+  #input-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  #name-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  #name-row label { font-size: 12px; color: #555; }
+
+  #fronter-input {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    color: #e0e0e0;
+    padding: 4px 10px;
+    font-size: 12px;
+    width: 120px;
+    outline: none;
+  }
+
+  #fronter-input:focus { border-color: #444; }
+
+  #message-input {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    color: #e0e0e0;
+    padding: 10px 14px;
+    font-size: 14px;
+    resize: none;
+    outline: none;
+    min-height: 44px;
+    max-height: 120px;
+    font-family: inherit;
+    line-height: 1.5;
+    transition: border-color 0.2s;
+  }
+
+  #message-input:focus { border-color: #444; }
+  #message-input::placeholder { color: #444; }
+
+  #send-btn {
+    background: #1a3a5c;
+    border: none;
+    border-radius: 10px;
+    color: #7ab8e8;
+    width: 44px;
+    height: 44px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+    flex-shrink: 0;
+  }
+
+  #send-btn:hover:not(:disabled) { background: #1e4a78; }
+  #send-btn:disabled { opacity: 0.4; cursor: default; }
+
+  #send-btn svg { width: 18px; height: 18px; }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="avatar">⚙</div>
+  <h1>Gizmo</h1>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">connecting...</span>
+    <span id="mood-badge"></span>
+  </div>
+</header>
+
+<div id="messages"></div>
+
+<div id="input-area">
+  <div id="input-wrap">
+    <div id="name-row">
+      <label for="fronter-input">fronting:</label>
+      <input id="fronter-input" type="text" placeholder="your name" autocomplete="off">
+    </div>
+    <textarea
+      id="message-input"
+      placeholder="say something..."
+      rows="1"
+      autocomplete="off"
+    ></textarea>
+  </div>
+  <button id="send-btn" disabled title="Send">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="22" y1="2" x2="11" y2="13"></line>
+      <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+    </svg>
+  </button>
+</div>
+
+<script>
+  const messagesEl = document.getElementById('messages');
+  const inputEl    = document.getElementById('message-input');
+  const sendBtn    = document.getElementById('send-btn');
+  const statusDot  = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  const moodBadge  = document.getElementById('mood-badge');
+  const fronterEl  = document.getElementById('fronter-input');
+
+  const SESSION_ID = crypto.randomUUID();
+  const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+
+  let ws = null;
+  let currentBubble = null;
+  let typingEl = null;
+  let reconnectTimer = null;
+
+  function connect() {
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      setStatus('connected', 'connected');
+      sendBtn.disabled = false;
+      clearTimeout(reconnectTimer);
+    };
+
+    ws.onclose = () => {
+      setStatus('', 'reconnecting...');
+      sendBtn.disabled = true;
+      currentBubble = null;
+      removeTyping();
+      reconnectTimer = setTimeout(connect, 3000);
+    };
+
+    ws.onerror = () => {
+      setStatus('', 'error');
+    };
+
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === 'token') {
+        if (!currentBubble) {
+          removeTyping();
+          currentBubble = addMessage('gizmo', '');
+        }
+        currentBubble.textContent += msg.data;
+        scrollBottom();
+      }
+
+      else if (msg.type === 'done') {
+        currentBubble = null;
+        removeTyping();
+        setStatus('connected', 'connected');
+        sendBtn.disabled = false;
+        if (msg.mood && msg.mood.emotion && msg.mood.emotion !== 'Neutral') {
+          moodBadge.textContent = `${msg.mood.emotion.toLowerCase()} ${Math.round(msg.mood.intensity * 100)}%`;
+        } else {
+          moodBadge.textContent = '';
+        }
+      }
+
+      else if (msg.type === 'error') {
+        removeTyping();
+        currentBubble = null;
+        addMessage('gizmo', `⚠ ${msg.data}`);
+        setStatus('connected', 'connected');
+        sendBtn.disabled = false;
+      }
+    };
+  }
+
+  function send() {
+    const text = inputEl.value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const name = fronterEl.value.trim();
+    addMessage('user', text, name || null);
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    sendBtn.disabled = true;
+    setStatus('thinking', 'thinking...');
+    showTyping();
+
+    ws.send(JSON.stringify({
+      message: text,
+      session_id: SESSION_ID,
+      context: name ? { current_host: name, fronters: [name] } : {},
+    }));
+  }
+
+  function addMessage(role, text, label) {
+    const wrap = document.createElement('div');
+    wrap.className = `msg ${role}`;
+
+    if (label && role === 'user') {
+      const meta = document.createElement('div');
+      meta.className = 'msg-meta';
+      meta.textContent = label;
+      wrap.appendChild(meta);
+    }
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    wrap.appendChild(bubble);
+
+    messagesEl.appendChild(wrap);
+    scrollBottom();
+    return bubble;
+  }
+
+  function showTyping() {
+    if (typingEl) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'msg gizmo';
+    const t = document.createElement('div');
+    t.className = 'typing';
+    t.innerHTML = '<span></span><span></span><span></span>';
+    wrap.appendChild(t);
+    messagesEl.appendChild(wrap);
+    typingEl = wrap;
+    scrollBottom();
+  }
+
+  function removeTyping() {
+    if (typingEl) { typingEl.remove(); typingEl = null; }
+  }
+
+  function scrollBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function setStatus(dotClass, text) {
+    statusDot.className = dotClass;
+    statusText.textContent = text;
+  }
+
+  sendBtn.addEventListener('click', send);
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  });
+
+  connect();
+</script>
+</body>
+</html>

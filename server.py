@@ -1,98 +1,84 @@
 """
 server.py
-Gizmo WebSocket server for Render deployment.
-
-Clients connect, send JSON messages, receive streaming token responses.
+Gizmo server for Render deployment.
+Uses aiohttp to handle both HTTP health checks and WebSocket on the same port.
 
 Message format (client → server):
     {
-        "message": "hey gizmo what do you think about...",
-        "context": {                        # optional
-            "current_host": "alice",
-            "fronters": ["alice", "bob"]
-        },
-        "session_id": "abc123"             # optional, defaults to connection id
+        "message": "hey gizmo...",
+        "context": {"current_host": "alice", "fronters": ["alice"]},
+        "session_id": "abc123"
     }
 
 Message format (server → client):
-    {"type": "token",   "data": "..."}     # streaming token
-    {"type": "done",    "data": ""}        # response complete
-    {"type": "error",   "data": "..."}     # something went wrong
-    {"type": "mood",    "data": {...}}      # current mood state (sent with done)
-
-Run locally:
-    python server.py
-
-Deploy on Render:
-    - Runtime: Python 3.11
-    - Build command: pip install -r requirements.txt
-    - Start command: python server.py
-    - Persistent disk: mount at /data (needed for ChromaDB)
-    - Environment variables: see .env.example
+    {"type": "token",   "data": "..."}
+    {"type": "done",    "data": ""}
+    {"type": "error",   "data": "..."}
+    {"type": "mood",    "data": {...}}
 """
 
 import asyncio
 import json
 import os
 import uuid
-import websockets
-from websockets.server import WebSocketServerProtocol
 
-from core.agent import agent, build_system_prompt, TOOL_REGISTRY
+from aiohttp import web, WSMsgType
+
+from core.agent import agent
 from core.llm import llm
-from memory.history import get_session, ConversationHistory
+from memory.history import get_session
 
 HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "8765"))
 
 
-async def handle_client(websocket: WebSocketServerProtocol, path: str):
-    """Handle one WebSocket client connection."""
+async def health(request):
+    return web.Response(text="OK")
+
+
+async def chat_ui(request):
+    here = os.path.dirname(os.path.abspath(__file__))
+    return web.FileResponse(os.path.join(here, "chat.html"))
+
+
+async def websocket_handler(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
     conn_id = str(uuid.uuid4())[:8]
     print(f"[Server] Client connected: {conn_id}")
 
     try:
-        async for raw in websocket:
-            await handle_message(websocket, raw, conn_id)
-
-    except websockets.exceptions.ConnectionClosedOK:
-        pass
-    except websockets.exceptions.ConnectionClosedError as e:
-        print(f"[Server] Client {conn_id} disconnected unexpectedly: {e}")
-    except Exception as e:
-        print(f"[Server] Client {conn_id} error: {e}")
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                await handle_message(ws, msg.data, conn_id)
+            elif msg.type == WSMsgType.ERROR:
+                print(f"[Server] WS error: {ws.exception()}")
     finally:
         print(f"[Server] Client disconnected: {conn_id}")
 
+    return ws
 
-async def handle_message(
-    websocket: WebSocketServerProtocol,
-    raw: str,
-    conn_id: str,
-):
-    """Parse and handle one incoming message."""
+
+async def handle_message(ws, raw: str, conn_id: str):
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        await send(websocket, "error", "Invalid JSON")
+        await send(ws, "error", "Invalid JSON")
         return
 
     message = data.get("message", "").strip()
     if not message:
-        await send(websocket, "error", "Empty message")
+        await send(ws, "error", "Empty message")
         return
 
     context = data.get("context") or {}
     session_id = data.get("session_id") or conn_id
-
-    # Ensure context has at least empty fronters
     context.setdefault("fronters", [])
 
     history = get_session(session_id)
-
     print(f"[Server] [{session_id[:8]}] {context.get('current_host', '?')}: {message[:60]}")
 
-    # Stream response tokens
     try:
         async for chunk in agent.run(
             user_message=message,
@@ -101,14 +87,13 @@ async def handle_message(
             use_rag=True,
             context=context,
         ):
-            await send(websocket, "token", chunk)
+            await send(ws, "token", chunk)
 
     except Exception as e:
         print(f"[Server] Agent error: {e}")
-        await send(websocket, "error", str(e))
+        await send(ws, "error", str(e))
         return
 
-    # Send completion signal with current mood
     mood_data = {}
     try:
         from voice.mood import get_current_mood
@@ -116,45 +101,20 @@ async def handle_message(
     except Exception:
         pass
 
-    await send(websocket, "done", "", extra={"mood": mood_data} if mood_data else {})
+    await send(ws, "done", "", extra={"mood": mood_data} if mood_data else {})
 
 
-async def send(
-    websocket: WebSocketServerProtocol,
-    msg_type: str,
-    data: str,
-    extra: dict = None,
-):
-    """Send a typed message to the client."""
+async def send(ws, msg_type: str, data: str, extra: dict = None):
     payload = {"type": msg_type, "data": data}
     if extra:
         payload.update(extra)
     try:
-        await websocket.send(json.dumps(payload))
+        await ws.send_str(json.dumps(payload))
     except Exception as e:
         print(f"[Server] Send error: {e}")
 
 
-async def main():
-    print(f"[Server] Gizmo starting on {HOST}:{PORT}")
-
-    # Start background services
-    await _start_background_services()
-
-    async with websockets.serve(
-        handle_client,
-        HOST,
-        PORT,
-        ping_interval=20,
-        ping_timeout=10,
-        max_size=1_000_000,
-    ):
-        print(f"[Server] Ready. Listening on ws://{HOST}:{PORT}")
-        await asyncio.Future()  # run forever
-
-
-async def _start_background_services():
-    """Start archiver and reminder checker."""
+async def start_background_services():
     loop = asyncio.get_event_loop()
 
     try:
@@ -162,23 +122,19 @@ async def _start_background_services():
         start_archiver(llm, loop=loop)
         print("[Server] Archiver started")
     except Exception as e:
-        print(f"[Server] Archiver failed to start: {e}")
+        print(f"[Server] Archiver failed: {e}")
 
     try:
         from ambient.reminders import start_reminder_checker
-        from asyncio import Queue
-        reminder_queue = Queue()
+        reminder_queue = asyncio.Queue()
         start_reminder_checker(reminder_queue, loop=loop)
-        # Drain reminder queue into a simple printer for now
-        # (no TTS on Render — just log them)
-        asyncio.ensure_future(_drain_reminder_queue(reminder_queue))
+        asyncio.ensure_future(_drain_reminders(reminder_queue))
         print("[Server] Reminder checker started")
     except Exception as e:
-        print(f"[Server] Reminder checker failed to start: {e}")
+        print(f"[Server] Reminder checker failed: {e}")
 
 
-async def _drain_reminder_queue(queue: asyncio.Queue):
-    """Log reminders — replace with TTS/push notification when ready."""
+async def _drain_reminders(queue: asyncio.Queue):
     while True:
         try:
             item = await queue.get()
@@ -187,5 +143,20 @@ async def _drain_reminder_queue(queue: asyncio.Queue):
             print(f"[Server] Reminder drain error: {e}")
 
 
+async def on_startup(app):
+    await start_background_services()
+    print(f"[Server] Gizmo ready on port {PORT}")
+
+
+def create_app():
+    app = web.Application()
+    app.router.add_get("/health", health)
+    app.router.add_get("/", chat_ui)
+    app.router.add_get("/ws", websocket_handler)
+    app.on_startup.append(on_startup)
+    return app
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    app = create_app()
+    web.run_app(app, host=HOST, port=PORT)
