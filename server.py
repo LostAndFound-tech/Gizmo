@@ -1,5 +1,6 @@
 """
-server.py - Gizmo server using websockets library with built-in HTTP fallback.
+server.py - Gizmo server
+Binds port first, then starts background services.
 """
 
 import asyncio
@@ -21,7 +22,6 @@ CHAT_HTML = Path(__file__).parent / "chat.html"
 
 
 async def handler(websocket):
-    """Handle both HTTP and WebSocket on the same port."""
     conn_id = str(uuid.uuid4())[:8]
     print(f"[Server] Client connected: {conn_id}")
 
@@ -79,16 +79,14 @@ async def handler(websocket):
         print(f"[Server] Client disconnected: {conn_id}")
 
 
-async def http_handler(path, request_headers):
-    """Serve chat UI for HTTP requests, let WebSocket upgrades through."""
-    if request_headers.get("Upgrade", "").lower() == "websocket":
-        return None  # let websockets handle it
+async def http_handler(connection, request):
+    path = request.path
     if path in ("/", "/index.html"):
         html = CHAT_HTML.read_text()
-        return (200, [("Content-Type", "text/html")], html.encode())
+        return connection.respond(200, html, headers={"Content-Type": "text/html"})
     if path == "/health":
-        return (200, [("Content-Type", "text/plain")], b"OK")
-    return (404, [], b"Not found")
+        return connection.respond(200, "OK", headers={"Content-Type": "text/plain"})
+    return None
 
 
 async def start_background_services():
@@ -119,8 +117,7 @@ async def _drain_reminders(queue):
 
 
 async def main():
-    await start_background_services()
-    print(f"[Server] Gizmo starting on {HOST}:{PORT}")
+    # Bind port FIRST so Render knows we're alive
     async with serve(
         handler,
         HOST,
@@ -131,6 +128,8 @@ async def main():
         max_size=1_000_000,
     ):
         print(f"[Server] Ready at http://{HOST}:{PORT}")
+        # Start background services after port is bound
+        await start_background_services()
         await asyncio.Future()
 
 
