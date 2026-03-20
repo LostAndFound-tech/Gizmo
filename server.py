@@ -79,13 +79,12 @@ async def handler(websocket):
         print(f"[Server] Client disconnected: {conn_id}")
 
 
-async def http_handler(connection, request):
-    path = request.path
+async def http_handler(path, request_headers):
     if path in ("/", "/index.html"):
         html = CHAT_HTML.read_text()
-        return connection.respond(200, html, headers={"Content-Type": "text/html"})
+        return (200, [("Content-Type", "text/html")], html.encode())
     if path == "/health":
-        return connection.respond(200, "OK", headers={"Content-Type": "text/plain"})
+        return (200, [("Content-Type", "text/plain")], b"OK")
     return None
 
 
