@@ -128,7 +128,7 @@ async def continue_onboarding(
     # After enough turns, wrap up
     if turn_count >= 5:
         return None
-
+    print("hello, world")
     prompt = conversation + [
         {
             "role": "user",
