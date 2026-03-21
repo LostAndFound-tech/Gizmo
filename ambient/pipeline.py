@@ -27,7 +27,7 @@ from typing import Optional
 from ambient.listener import listen
 from ambient.transcriber import transcribe
 from ambient.tagger import tag
-from ambient.reminders import store_reminder, start_reminder_checker
+from ambient.reminders import store_reminder, start_reminder_checker, set_llm
 
 AMBIENT_COLLECTION = "ambient_log"
 
@@ -71,10 +71,17 @@ async def _ingest_ambient_chunk(
 
     try:
         store = RAGStore(collection_name=AMBIENT_COLLECTION)
-        store.ingest_texts(
-            [summary],
-            metadatas=[metadata],
-        )
+        docs = [summary]
+        metas = [metadata]
+
+        # Also ingest raw transcript as a separately embedded doc so specific
+        # details (names, objects, actions) are searchable — not just the summary
+        if raw_transcript and raw_transcript.strip():
+            raw_meta = {**metadata, "source": "ambient_mic_raw", "type": "ambient_raw"}
+            docs.append(raw_transcript[:1000])
+            metas.append(raw_meta)
+
+        store.ingest_texts(docs, metadatas=metas)
         print(f"[Pipeline] Ingested ambient chunk | topics: {topics}")
     except Exception as e:
         print(f"[Pipeline] Ingest failed: {e}")
@@ -158,6 +165,7 @@ def start_ambient(
         return
 
     loop = loop or asyncio.get_event_loop()
+    set_llm(llm)  # give reminder detection access to the shared LLM
     _ambient_task = asyncio.ensure_future(
         _ambient_loop(llm, context_fn=context_fn, device_index=device_index),
         loop=loop,

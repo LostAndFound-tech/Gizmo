@@ -34,20 +34,75 @@ from typing import Optional
 REMINDERS_COLLECTION = "reminders"
 CHECK_INTERVAL = 30  # seconds between checks
 
-# Patterns that signal reminder intent — quick pre-filter before LLM call
+# Kept as a fast pre-filter for the most explicit cases only —
+# catches obvious phrases without an LLM call. If this misses,
+# detect_reminder_intent() falls through to an LLM check.
 _REMINDER_PATTERN = re.compile(
     r"\b(remind me|reminder|don't let me forget|make sure i|"
-    r"tell me (at|when|to)|note (that|to)|remember to)\b",
+    r"tell me (at|when|to)|note (that|to)|remember to|set a timer)\b",
     re.IGNORECASE,
 )
 
+# Module-level LLM reference — set by the pipeline on startup
+_llm = None
 
-def detect_reminder_intent(transcript: str) -> bool:
+
+def set_llm(llm) -> None:
+    """Called by the pipeline so reminder detection can use the shared LLM."""
+    global _llm
+    _llm = llm
+
+
+async def detect_reminder_intent(transcript: str) -> bool:
     """
-    Quick heuristic check — does this transcript contain reminder intent?
-    Called before the LLM to avoid unnecessary API calls.
+    Two-stage check for reminder/timer intent.
+
+    Stage 1: fast regex for explicit trigger phrases — no LLM cost.
+    Stage 2: if regex misses, ask the LLM with a tight yes/no prompt.
+             Catches natural phrasing like "I put a pizza in for 20 minutes"
+             or "laundry's running for another 45" without pattern maintenance.
+
+    Returns True if either stage fires.
     """
-    return bool(_REMINDER_PATTERN.search(transcript))
+    # Stage 1 — free
+    if _REMINDER_PATTERN.search(transcript):
+        return True
+
+    # Stage 2 — LLM fallback
+    if _llm is None:
+        return False
+
+    try:
+        prompt = [
+            {
+                "role": "user",
+                "content": (
+                    f"Does this statement imply something time-bound that a person "
+                    f"might want to be notified about when the time is up? "
+                    f"Examples that should return YES: "
+                    f"'I put a pizza in for 20 minutes', 'laundry's running for 45', "
+                    f"'bread needs another half hour', 'I started the timer for 10 minutes'. "
+                    f"Examples that should return NO: "
+                    f"'I had pizza yesterday', 'I do laundry on Sundays', 'that took forever'. "
+                    f"Respond with only YES or NO.\n\n"
+                    f"Statement: \"{transcript}\""
+                )
+            }
+        ]
+        result = await _llm.generate(
+            prompt,
+            system_prompt="You detect time-bound activity intent. Respond only YES or NO.",
+            max_new_tokens=5,
+            temperature=0.0,
+        )
+        answer = result.strip().upper()
+        detected = answer.startswith("YES")
+        if detected:
+            print(f"[Reminders] LLM detected implicit timer intent: '{transcript[:60]}'")
+        return detected
+    except Exception as e:
+        print(f"[Reminders] Intent detection LLM call failed: {e}")
+        return False
 
 
 async def parse_reminder(

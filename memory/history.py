@@ -39,6 +39,27 @@ class ConversationHistory:
         messages.append({"role": "user", "content": new_user_message})
         return messages
 
+    def as_messages_with_timestamps(self, new_user_message: str) -> list[dict]:
+        """
+        Messages list with inline timestamps so the LLM can reason about
+        elapsed time. Format: '[HH:MM] message content'
+        The current message gets 'now' as its timestamp.
+        """
+        import datetime
+        messages = []
+        for m in self._messages:
+            ts = m.get("timestamp")
+            if ts:
+                label = datetime.datetime.fromtimestamp(ts).strftime("%H:%M")
+                content = f"[{label}] {m['content']}"
+            else:
+                content = m["content"]
+            messages.append({"role": m["role"], "content": content})
+
+        now_label = datetime.datetime.now().strftime("%H:%M")
+        messages.append({"role": "user", "content": f"[{now_label}] {new_user_message}"})
+        return messages
+
     def as_list(self) -> list[dict]:
         """Full message list including timestamps and context snapshots."""
         return list(self._messages)

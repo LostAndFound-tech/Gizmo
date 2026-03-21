@@ -9,8 +9,6 @@ Flow:
   - Slices history into WINDOW_SIZE message windows
   - For each window: identifies who was present, summarizes, ingests
   - Archives go into each fronter's collection + main
-  - After archiving: personality_growth.observe() extracts observations
-    from the full session and feeds the personality growth system
   - Session marked as archived to avoid re-processing
 """
 
@@ -19,9 +17,9 @@ import time
 from datetime import datetime
 from typing import Optional
 
-INACTIVITY_THRESHOLD = 60   # seconds of inactivity before archiving
-WINDOW_SIZE = 4             # messages per chunk
-CHECK_INTERVAL = 60         # check every 60 seconds
+INACTIVITY_THRESHOLD = 60   # 15 minutes in seconds
+WINDOW_SIZE = 4                   # messages per chunk
+CHECK_INTERVAL = 60               # check every 60 seconds
 
 
 async def _summarize_window(
@@ -79,7 +77,6 @@ async def _summarize_window(
 async def _archive_session(session_id: str, history, llm) -> None:
     """
     Archive a single session — slice, summarize, ingest.
-    After archiving, runs personality_growth.observe() on the full session.
     """
     from core.rag import RAGStore
 
@@ -99,11 +96,6 @@ async def _archive_session(session_id: str, history, llm) -> None:
     session_date = datetime.fromtimestamp(
         messages[0].get("timestamp", time.time())
     ).strftime("%Y-%m-%d")
-
-    # Determine who was present across the whole session
-    full_presence = history.get_fronters_for_window(messages)
-    session_fronters = full_presence["fronters"]
-    session_host = next(iter(full_presence["hosts"]), None)
 
     for i, window in enumerate(windows):
         # Who was present during this window?
@@ -133,14 +125,27 @@ async def _archive_session(session_id: str, history, llm) -> None:
             "fronters_present": ", ".join(sorted(fronters)) if fronters else "unknown",
         }
 
+        # Raw window text — embedded separately so specific details are searchable
+        raw_window = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Gizmo'}: {m['content']}"
+            for m in window
+            if m["role"] in ("user", "assistant")
+        ).strip()
+
         # Ingest into every relevant collection
         for collection_name in collections:
             try:
                 store = RAGStore(collection_name=collection_name)
-                store.ingest_texts(
-                    [summary],
-                    metadatas=[{**metadata, "collection": collection_name}],
-                )
+                docs = [summary]
+                metas = [{**metadata, "collection": collection_name}]
+
+                # Ingest raw window alongside summary so retrieval isn't
+                # limited to what survived summarization
+                if raw_window:
+                    docs.append(raw_window)
+                    metas.append({**metadata, "collection": collection_name, "type": "archived_raw"})
+
+                store.ingest_texts(docs, metadatas=metas)
                 print(f"[Archiver] → ingested window {i} into '{collection_name}'")
             except Exception as e:
                 print(f"[Archiver] Failed to ingest into '{collection_name}': {e}")
@@ -149,27 +154,7 @@ async def _archive_session(session_id: str, history, llm) -> None:
         # Small pause between windows to avoid hammering the LLM
         await asyncio.sleep(1)
 
-    print(
-        f"[Archiver] Session {session_id[:8]} archived — "
-        f"{archived_count} chunks across {len(full_presence['collections'])} collections"
-    )
-
-    # ── Personality observation ───────────────────────────────────────────────
-    # Run after archiving so observe() has the full session to work from.
-    # Non-fatal — a failed observation doesn't undo the archive.
-    try:
-        from core.personality_growth import observe
-        obs_count = await observe(
-            session_id=session_id,
-            history=history,
-            current_host=session_host,
-            fronters=list(session_fronters),
-            llm=llm,
-        )
-        print(f"[Archiver] Personality observe() — {obs_count} observations stored")
-    except Exception as e:
-        print(f"[Archiver] Personality observe() failed (non-fatal): {e}")
-
+    print(f"[Archiver] Session {session_id[:8]} archived — {archived_count} chunks across {len(collections)} collections")
     history.archived = True
 
 

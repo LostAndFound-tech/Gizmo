@@ -64,7 +64,7 @@ async def tag(
     Reminder parsing runs concurrently with topic tagging — no added latency.
     """
     directed = bool(GIZMO_TRIGGERS.search(transcript))
-    has_reminder = detect_reminder_intent(transcript)
+    has_reminder = await detect_reminder_intent(transcript)
 
     fronter_hint = ""
     if context:
