@@ -17,6 +17,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from core.curiosity import decay_all as curiosity_decay
+
 INACTIVITY_THRESHOLD = 60   # 15 minutes in seconds
 WINDOW_SIZE = 4                   # messages per chunk
 CHECK_INTERVAL = 60               # check every 60 seconds
@@ -115,6 +117,24 @@ async def _archive_session(session_id: str, history, llm) -> None:
         if not summary:
             continue
 
+        # Extract entities from this window and write to entity store
+        try:
+            from core.entity_extract import extract_from_window, write_extraction
+            extracted = await extract_from_window(
+                messages=window,
+                fronters=fronters,
+                session_id=session_id,
+                llm=llm,
+            )
+            if extracted:
+                write_extraction(
+                    extracted=extracted,
+                    current_host=next(iter(fronters), None) if fronters else None,
+                    session_id=session_id,
+                )
+        except Exception as e:
+            print(f"[Archiver] Entity extraction failed for window {i} (non-fatal): {e}")
+
         # Build metadata
         metadata = {
             "source": f"conversation:{session_id[:8]}",
@@ -184,10 +204,9 @@ async def archiver_loop(llm) -> None:
 
         # Decay interest graph once per archiver cycle
         try:
-            from core.curiosity import decay_all as curiosity_decay
             await curiosity_decay()
         except Exception as e:
-            print(f"[Archiver] Curiosity decay failed (non-fatal): {e}")
+            print(f"[Archiver] Curiosity decay failed: {e}")
 
 
 def start_archiver(llm, loop: asyncio.AbstractEventLoop) -> None:

@@ -175,6 +175,13 @@ async def http_handler(path, request_headers):
 
 
 async def start_background_services():
+    # Initialize entity store DB on startup
+    try:
+        from core.entity_store import init_db
+        init_db()
+        print("[Server] Entity store initialized")
+    except Exception as e:
+        print(f"[Server] Entity store init failed: {e}")
     loop = asyncio.get_event_loop()
     try:
         from memory.archiver import start_archiver

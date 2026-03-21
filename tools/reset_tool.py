@@ -63,15 +63,20 @@ class FactoryResetTool(BaseTool):
         errors = []
 
         # 1. Nuke the entire ChromaDB persist directory from disk
-        #    delete_collection() only removes from the index — files stay on disk
-        #    and come back on next client connection. rmtree is the only real wipe.
         r = _nuke_chroma_dir()
         if r["success"]:
             results.append(f"ChromaDB: deleted {r['path']} from disk")
         else:
             errors.append(f"ChromaDB nuke failed: {r['error']}")
 
-        # 2. Wipe in-memory conversation history
+        # 2. Wipe entity store (SQLite)
+        r = _wipe_entity_store()
+        if r["success"]:
+            results.append("Entity store: wiped")
+        else:
+            errors.append(f"Entity store wipe failed: {r['error']}")
+
+        # 3. Wipe in-memory conversation history
         r = _wipe_history()
         if r["success"]:
             results.append(f"History: cleared {r['sessions_cleared']} sessions")
@@ -106,6 +111,16 @@ class FactoryResetTool(BaseTool):
 
 
 # ── Wipe helpers ──────────────────────────────────────────────────────────────
+
+def _wipe_entity_store() -> dict:
+    try:
+        from core.entity_store import wipe_all
+        wipe_all()
+        return {"success": True}
+    except Exception as e:
+        print(f"[Reset] Entity store wipe error: {e}")
+        return {"success": False, "error": str(e)}
+
 
 def _nuke_chroma_dir() -> dict:
     """

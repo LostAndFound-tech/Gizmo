@@ -3,33 +3,22 @@ core/curiosity.py
 Gizmo's curiosity and interest graph — his own mind, built through conversation.
 
 Each interest node tracks multiple dimensions:
-  knowledge_depth  — how much Gizmo actually knows about this (grows with facts)
-  curiosity        — hunger to know more (grows with gaps, fades with saturation)
-  enjoyment        — does engaging with this feel good (learned from interaction quality)
-  frequency        — how often it comes up in conversation
-  decay_rate       — how fast it fades when neglected (active topics decay slower)
-  associations     — weighted links to headmates and other topics (bridge discovery)
+  knowledge_depth  — how much Gizmo actually knows about this
+  curiosity        — hunger to know more
+  enjoyment        — does engaging with this feel good
+  frequency        — how often it comes up
+  decay_rate       — how fast it fades when neglected
+  associations     — weighted links to headmates and other topics
 
-Character emerges from combinations:
-  high knowledge + high enjoyment + high frequency  → passion
-  high frequency + low enjoyment                    → dutiful
-  high curiosity + low knowledge                    → hungry
-  once-high, now-low frequency                      → faded interest
-  strong headmate association                        → relational interest
+Place learning:
+  Places are learned through observe_turn() — after the exchange, not before.
+  The LLM decides if a new place was mentioned and whether we now know what it is.
+  store_place() is called by PlaceConfirmTool when the LLM recognizes a confirmation.
+  check_place_mention() is REMOVED — it was too aggressive and ran on every message.
 
-Storage: ChromaDB collection "gizmo_interests"
-Each node is one document. Metadata holds all scalar values.
-Text field is a human-readable description of the interest for RAG retrieval.
-
-Hooks:
-  observe_turn()          — called after each agent response, async, non-blocking
-                            extracts topics, updates graph, decides if follow-up warranted
-  get_curiosity_block()   — called by synthesis to inject Gizmo's active interests
-  check_place_mention()   — detects place names in user message, returns a clarifying
-                            question if the place is unknown
-  store_place()           — stores a confirmed place with its type and associations
-  decay_all()             — called by archiver loop to apply time-based decay
-  find_bridges()          — find shared adjacencies between two topics (cross-topic weaving)
+Storage:
+  gizmo_interests — interest graph nodes
+  gizmo_places    — learned places (headspaces, local spots, etc.)
 """
 
 import asyncio
@@ -39,25 +28,21 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-# ── Collection names ──────────────────────────────────────────────────────────
-
 CURIOSITY_COLLECTION = "gizmo_interests"
 PLACES_COLLECTION    = "gizmo_places"
 
-# ── Decay constants ───────────────────────────────────────────────────────────
-
-INTEREST_DECAY_HALF_LIFE_DAYS   = 45    # interests fade slower than observations
-ENJOYMENT_DECAY_HALF_LIFE_DAYS  = 60    # enjoyment is stickier
-CURIOSITY_REGROWTH_RATE         = 0.05  # curiosity ticks up slightly each gap turn
-MIN_INTEREST_TO_SURFACE         = 0.12  # below this, don't inject into prompts
-MAX_FOLLOW_UP_COOLDOWN_TURNS    = 3     # don't ask curiosity questions more than once per N turns
+INTEREST_DECAY_HALF_LIFE_DAYS  = 45
+ENJOYMENT_DECAY_HALF_LIFE_DAYS = 60
+CURIOSITY_REGROWTH_RATE        = 0.05
+MIN_INTEREST_TO_SURFACE        = 0.12
+MAX_FOLLOW_UP_COOLDOWN_TURNS   = 3
 
 # ── Topic extraction prompt ───────────────────────────────────────────────────
 
 _TOPIC_EXTRACT_PROMPT = """
-Extract topics from this conversation exchange. Return ONLY valid JSON, no markdown.
+Extract topics and place mentions from this conversation exchange.
+Return ONLY valid JSON, no markdown.
 
-Format:
 {
   "topics": [
     {
@@ -69,41 +54,29 @@ Format:
       "headmate": "who brought it up, or null"
     }
   ],
-  "place_mentions": [
-    {
-      "name": "place name as mentioned",
-      "context": "brief context about how it was mentioned"
-    }
-  ],
-  "curiosity_opening": "one natural follow-up question Gizmo could ask, or null if none fits"
+  "new_place": {
+    "detected": true/false,
+    "name": "place name or null",
+    "type": "headspace|local|online|other|unknown",
+    "owner": "headmate name if headspace, or null",
+    "description": "brief description if known from context, or null",
+    "confirmed": true/false
+  },
+  "curiosity_opening": "one natural follow-up question or null"
 }
 
-Rules:
-- topics should be specific (not just 'food' but 'convenience store snacks', 'chocolate donuts')
-- parent helps build the graph (chocolate donuts -> snacks -> food)
-- facts_shared: how many new facts were shared (0=none, 1-3)
-- sentiment: how the exchange felt — positive if engaging, dutiful if chore-like
-- depth: surface (passing mention), conversational (back-and-forth), deep (substantial)
-- curiosity_opening: only if there is a genuine natural follow-up — never forced
-"""
+Place detection rules:
+- Only set detected=true if a NAMED place appears (dairy mart, the carnival, Corter, my office)
+- Do NOT flag generic objects like "my couch", "my desk", "the wall"
+- confirmed=true only if the user explicitly said what it is in THIS exchange
+- type "headspace" = inner world space, "local" = real world place nearby
+- curiosity_opening: only if genuinely natural — never forced, never if a place question was already asked
 
-# ── Place detection prompt ────────────────────────────────────────────────────
-
-_PLACE_DETECT_PROMPT = """
-The user sent a message that may contain a place name or location reference.
-Return ONLY valid JSON, no markdown.
-
-{
-  "place_detected": true/false,
-  "place_name": "name as mentioned or null",
-  "context": "brief description of how it was mentioned",
-  "seems_like_headspace": true/false,
-  "seems_like_real_place": true/false
-}
-
-A 'headspace' is a mental or inner world space (e.g. 'my office', 'the carnival', 'Corter').
-A 'real place' is somewhere in the physical world (e.g. 'dairy mart', 'the park', 'school').
-If neither is clear, set both to false.
+Topic rules:
+- Be specific: "chocolate donuts" not just "food"
+- parent builds the graph: chocolate donuts -> snacks -> food
+- sentiment: positive=engaging, dutiful=chore-like, negative=unpleasant
+- depth: surface=passing mention, conversational=back-and-forth, deep=substantial
 """
 
 
@@ -134,7 +107,6 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
 # ── Node read/write ───────────────────────────────────────────────────────────
 
 def _get_node(topic: str) -> Optional[dict]:
-    """Retrieve an interest node by topic name. Returns metadata dict or None."""
     try:
         store = _store(CURIOSITY_COLLECTION)
         if store.count == 0:
@@ -152,7 +124,6 @@ def _get_node(topic: str) -> Optional[dict]:
 
 
 def _upsert_node(topic: str, updates: dict, text: str = "") -> None:
-    """Create or update an interest node."""
     try:
         store = _store(CURIOSITY_COLLECTION)
         existing = _get_node(topic)
@@ -200,7 +171,6 @@ def _upsert_node(topic: str, updates: dict, text: str = "") -> None:
 
 
 def _update_associations(topic: str, headmate: Optional[str], adjacent: list[str]) -> None:
-    """Update headmate association weights and adjacent topic links for a node."""
     try:
         existing = _get_node(topic)
         if not existing:
@@ -240,7 +210,6 @@ def _apply_interaction(
     headmate: Optional[str],
     parent: Optional[str],
 ) -> None:
-    """Update a single interest node based on one interaction."""
     existing = _get_node(topic)
     now = _now_iso()
 
@@ -262,9 +231,7 @@ def _apply_interaction(
         e = float(existing.get("enjoyment", 0.5))
         c = float(existing.get("curiosity", 0.3))
 
-        # Curiosity grows with gaps in knowledge, modulated by enjoyment
         curiosity_delta = (1.0 - k) * 0.05 * (1.0 + e)
-        # Curiosity shrinks when knowledge is high and enjoyment is low (bored, not curious)
         if k > 0.7 and e < 0.4:
             curiosity_delta -= 0.03
 
@@ -303,12 +270,10 @@ def _apply_interaction(
 
 
 def _build_node_text(topic: str, node: dict, headmate: Optional[str] = None) -> str:
-    """Build a human-readable description of this interest node for RAG retrieval."""
     k = float(node.get("knowledge_depth", 0.1))
     e = float(node.get("enjoyment", 0.5))
     c = float(node.get("curiosity", 0.3))
     freq = int(node.get("frequency", 1))
-    sentiment = node.get("sentiment", "neutral")
     parent = node.get("parent", "")
 
     depth_desc = (
@@ -345,6 +310,7 @@ def _build_node_text(topic: str, node: dict, headmate: Optional[str] = None) -> 
 
 _last_followup_turn: dict[str, int] = {}
 _turn_counters: dict[str, int] = {}
+_pending_place_questions: dict[str, str] = {}  # session_id -> place name we asked about
 
 
 # ── Main observe hook ─────────────────────────────────────────────────────────
@@ -357,10 +323,12 @@ async def observe_turn(
     llm,
 ) -> Optional[str]:
     """
-    Called after each agent response. Extracts topics, updates the interest graph,
-    and returns a follow-up question if curiosity warrants one — or None.
+    Called after each agent response. Extracts topics, updates interest graph,
+    handles place learning, and returns a follow-up question if warranted.
 
-    The graph update is fire-and-forget. Only the follow-up string blocks.
+    Place questions are only generated here — never in a pre-response hook.
+    If Gizmo already asked about a place this turn (in gizmo_response),
+    we don't append another question.
     """
     _turn_counters[session_id] = _turn_counters.get(session_id, 0) + 1
     turn = _turn_counters[session_id]
@@ -377,21 +345,93 @@ async def observe_turn(
     # Fire graph updates without blocking
     asyncio.ensure_future(_apply_all_updates(extracted, current_host))
 
-    followup = extracted.get("curiosity_opening")
-    if not followup:
-        return None
+    # Fire entity extraction without blocking
+    asyncio.ensure_future(_extract_entities_async(
+        user_message, gizmo_response, current_host, session_id, llm
+    ))
 
-    # Cooldown check
-    last_turn = _last_followup_turn.get(session_id, -999)
-    if turn - last_turn < MAX_FOLLOW_UP_COOLDOWN_TURNS:
-        return None
+    # ── Place learning ────────────────────────────────────────────────────────
+    place_question = None
+    new_place = extracted.get("new_place", {})
 
-    topics = extracted.get("topics", [])
-    if not _should_ask(topics):
-        return None
+    if new_place.get("detected") and new_place.get("name"):
+        place_name = new_place["name"].strip()
+        place_type = new_place.get("type", "unknown")
+        confirmed = new_place.get("confirmed", False)
+        owner = new_place.get("owner") or current_host
+        description = new_place.get("description") or ""
 
-    _last_followup_turn[session_id] = turn
-    return followup.strip()
+        if confirmed and place_type != "unknown":
+            # We learned what this place is from this exchange — store it
+            store_place(
+                name=place_name,
+                place_type=place_type,
+                owner=owner if place_type == "headspace" else None,
+                description=description,
+                session_id=session_id,
+            )
+            _pending_place_questions.pop(session_id, None)
+            print(f"[Curiosity] Auto-stored confirmed place: '{place_name}' ({place_type})")
+
+        elif not _get_known_place(place_name):
+            # Unknown place — but only ask if we haven't already asked about it
+            # and Gizmo's response doesn't already contain a place question
+            already_asked = _pending_place_questions.get(session_id) == place_name
+            gizmo_already_asked = "headspace" in gizmo_response.lower() or \
+                                  (place_name.lower() in gizmo_response.lower() and "?" in gizmo_response)
+
+            if not already_asked and not gizmo_already_asked:
+                _pending_place_questions[session_id] = place_name
+
+                if place_type == "headspace":
+                    who = f"{current_host.capitalize()}'s" if current_host else "your"
+                    place_question = f"Is {place_name} {who} headspace?"
+                elif place_type == "local":
+                    place_question = f"What's {place_name}? I want to remember it."
+                elif place_type == "unknown":
+                    place_question = f"What's {place_name} — somewhere in your inner world, or out in the real one?"
+
+    # ── Curiosity follow-up ───────────────────────────────────────────────────
+    # Only append a curiosity question if we're not already asking about a place
+    curiosity_followup = None
+    if not place_question:
+        followup = extracted.get("curiosity_opening")
+        if followup:
+            last_turn = _last_followup_turn.get(session_id, -999)
+            if turn - last_turn >= MAX_FOLLOW_UP_COOLDOWN_TURNS:
+                topics = extracted.get("topics", [])
+                if _should_ask(topics):
+                    _last_followup_turn[session_id] = turn
+                    curiosity_followup = followup.strip()
+
+    return place_question or curiosity_followup
+
+
+async def _extract_entities_async(
+    user_message: str,
+    gizmo_response: str,
+    current_host: Optional[str],
+    session_id: str,
+    llm,
+) -> None:
+    """Fire-and-forget entity extraction from a live exchange."""
+    try:
+        from core.entity_extract import extract_from_exchange, write_extraction
+        extracted = await extract_from_exchange(
+            user_message=user_message,
+            gizmo_response=gizmo_response,
+            current_host=current_host,
+            session_id=session_id,
+            llm=llm,
+        )
+        if extracted:
+            write_extraction(
+                extracted=extracted,
+                current_host=current_host,
+                session_id=session_id,
+            )
+    except Exception as e:
+        print(f"[Curiosity] Entity extraction failed (non-fatal): {e}")
 
 
 async def _extract_topics(
@@ -409,8 +449,8 @@ async def _extract_topics(
     try:
         raw = await llm.generate(
             prompt,
-            system_prompt="Extract topics and curiosity signals. JSON only. No markdown. No preamble.",
-            max_new_tokens=400,
+            system_prompt="Extract topics, place mentions, and curiosity signals. JSON only. No markdown. No preamble.",
+            max_new_tokens=500,
             temperature=0.2,
         )
         raw = raw.strip().strip("```json").strip("```").strip()
@@ -421,7 +461,6 @@ async def _extract_topics(
 
 
 async def _apply_all_updates(extracted: dict, current_host: Optional[str]) -> None:
-    """Apply all topic updates from an extracted exchange. Fire-and-forget."""
     topics = extracted.get("topics", [])
     topic_names = [t.get("name", "") for t in topics if t.get("name")]
 
@@ -443,17 +482,13 @@ async def _apply_all_updates(extracted: dict, current_host: Optional[str]) -> No
 
 
 def _should_ask(topics: list[dict]) -> bool:
-    """
-    Return True if curiosity warrants a follow-up.
-    Brand new topics are inherently curious. Known topics need threshold curiosity.
-    """
     for topic_data in topics:
         name = topic_data.get("name", "").strip()
         if not name:
             continue
         node = _get_node(name)
         if node is None:
-            return True  # New — curious by default
+            return True
         c = float(node.get("curiosity", 0.3))
         e = float(node.get("enjoyment", 0.5))
         if c > 0.45 or (e > 0.65 and c > 0.25):
@@ -461,62 +496,7 @@ def _should_ask(topics: list[dict]) -> bool:
     return False
 
 
-# ── Place learning ────────────────────────────────────────────────────────────
-
-async def check_place_mention(
-    user_message: str,
-    current_host: Optional[str],
-    llm,
-) -> Optional[str]:
-    """
-    Scan user message for unknown place mentions.
-    Returns a natural clarifying question, or None if nothing to ask.
-    Called by the agent BEFORE generating its response.
-    """
-    location_signals = [
-        "going to", "headed to", "at the", "from the", "near the",
-        "my ", "heading to", "i went to", "i was at", "stopped by",
-        "swing by", "stop by", "over at", "popped into", "i'm at",
-    ]
-    if not any(sig in user_message.lower() for sig in location_signals):
-        return None
-
-    prompt = [{"role": "user", "content": f"{_PLACE_DETECT_PROMPT}\n\nMessage: {user_message}"}]
-
-    try:
-        raw = await llm.generate(
-            prompt,
-            system_prompt="Detect place mentions. JSON only. No markdown.",
-            max_new_tokens=150,
-            temperature=0.1,
-        )
-        raw = raw.strip().strip("```json").strip("```").strip()
-        result = json.loads(raw)
-    except Exception as e:
-        print(f"[Curiosity] Place detection failed: {e}")
-        return None
-
-    if not result.get("place_detected"):
-        return None
-
-    place_name = result.get("place_name", "").strip()
-    if not place_name:
-        return None
-
-    if _get_known_place(place_name):
-        return None  # Already known
-
-    seems_headspace = result.get("seems_like_headspace", False)
-    seems_real = result.get("seems_like_real_place", False)
-
-    if seems_headspace and not seems_real:
-        who = f"{current_host.capitalize()}'s" if current_host else "your"
-        return f"Is {place_name} {who} headspace?"
-    elif seems_real and not seems_headspace:
-        return f"What's {place_name}? I want to remember it."
-    else:
-        return f"What's {place_name} — inner world or out in the real one?"
-
+# ── Place storage ─────────────────────────────────────────────────────────────
 
 def store_place(
     name: str,
@@ -528,11 +508,16 @@ def store_place(
     """
     Store a confirmed place.
     place_type: "headspace" | "local" | "online" | "other"
-    owner: relevant for headspaces
+    Called by PlaceConfirmTool (explicit confirmation) or auto from observe_turn.
     """
     try:
         now = _now_iso()
         place_key = name.lower().strip()
+
+        # Check if already stored — don't duplicate
+        if _get_known_place(place_key):
+            print(f"[Curiosity] Place '{name}' already known, skipping")
+            return
 
         text = f"{name} is a {place_type}"
         if owner:
@@ -549,15 +534,14 @@ def store_place(
             "session_id":  session_id,
         }
 
-        store = _store(PLACES_COLLECTION)
-        store.ingest_texts(
+        _store(PLACES_COLLECTION).ingest_texts(
             [text],
             metadatas=[metadata],
             ids=[f"place_{uuid.uuid4().hex[:12]}"],
         )
         print(f"[Curiosity] Stored place: '{name}' ({place_type}{('/' + owner) if owner else ''})")
 
-        # Headspaces go into personality_context for synthesis to surface
+        # Headspaces → personality_context for synthesis
         if place_type == "headspace" and owner:
             try:
                 from core.rag import RAGStore
@@ -568,7 +552,7 @@ def store_place(
             except Exception as e:
                 print(f"[Curiosity] Failed to log headspace to personality_context: {e}")
 
-        # Real-world places go into main as general world knowledge
+        # Real places → main as world knowledge
         if place_type in ("local", "online", "other"):
             try:
                 from core.rag import RAGStore
@@ -597,7 +581,6 @@ def _get_known_place(name: str) -> Optional[dict]:
 
 
 def get_known_places(place_type: Optional[str] = None) -> list[dict]:
-    """Retrieve all known places, optionally filtered by type."""
     try:
         store = _store(PLACES_COLLECTION)
         if store.count == 0:
@@ -615,11 +598,6 @@ def get_known_places(place_type: Optional[str] = None) -> list[dict]:
 # ── Synthesis injection ───────────────────────────────────────────────────────
 
 def get_curiosity_block(query: str, current_host: Optional[str] = None) -> str:
-    """
-    Build a short context block of Gizmo's active interests for injection
-    into the system prompt. Only surfaces interests above MIN_INTEREST_TO_SURFACE.
-    Tries to find interests adjacent to the current query topic.
-    """
     try:
         store = _store(CURIOSITY_COLLECTION)
         if store.count == 0:
@@ -629,10 +607,7 @@ def get_curiosity_block(query: str, current_host: Optional[str] = None) -> str:
         if not results:
             return ""
 
-        passions = []
-        curious_topics = []
-        dutiful_topics = []
-        relational = []
+        passions, curious_topics, dutiful_topics, relational = [], [], [], []
 
         for r in results:
             meta = r.get("metadata", {})
@@ -688,21 +663,14 @@ def get_curiosity_block(query: str, current_host: Optional[str] = None) -> str:
 # ── Bridge discovery ──────────────────────────────────────────────────────────
 
 def find_bridges(topic_a: str, topic_b: str) -> list[str]:
-    """
-    Find shared adjacent topics between two interest nodes.
-    E.g. science + cars -> engines (shared adjacency).
-    Used to discover natural cross-topic connections for weaving into conversation.
-    """
     try:
         node_a = _get_node(topic_a)
         node_b = _get_node(topic_b)
         if not node_a or not node_b:
             return []
-
         adj_a = set(a.strip() for a in node_a.get("adjacent_topics", "").split(",") if a.strip())
         adj_b = set(a.strip() for a in node_b.get("adjacent_topics", "").split(",") if a.strip())
         return sorted(adj_a & adj_b)
-
     except Exception as e:
         print(f"[Curiosity] find_bridges failed: {e}")
         return []
@@ -711,11 +679,6 @@ def find_bridges(topic_a: str, topic_b: str) -> list[str]:
 # ── Decay loop ────────────────────────────────────────────────────────────────
 
 async def decay_all() -> None:
-    """
-    Apply time-based decay to all interest nodes.
-    Called by the archiver loop alongside session archiving.
-    High-frequency topics decay slower — they're established patterns.
-    """
     try:
         store = _store(CURIOSITY_COLLECTION)
         if store.count == 0:
@@ -732,7 +695,6 @@ async def decay_all() -> None:
             last_seen = meta.get("last_seen", meta.get("created", _now_iso()))
             freq = int(meta.get("frequency", 1))
 
-            # High frequency = slower decay
             effective_half_life = INTEREST_DECAY_HALF_LIFE_DAYS * (1.0 + min(freq / 20.0, 1.0))
             recency = _recency_score(last_seen, effective_half_life)
 
@@ -740,11 +702,8 @@ async def decay_all() -> None:
             e = float(meta.get("enjoyment", 0.5))
             c = float(meta.get("curiosity", 0.3))
 
-            # Knowledge decays slowest — remembered even when not discussed
             new_k = _clamp(k * (0.5 + 0.5 * recency))
-            # Enjoyment decays slowly
             new_e = _clamp(e * recency ** 0.3)
-            # Curiosity partially regrows on its own — gaps create hunger
             new_c = _clamp(c * recency + CURIOSITY_REGROWTH_RATE * (1.0 - k))
 
             updated_ids.append(node_id)
