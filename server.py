@@ -44,6 +44,10 @@ async def handler(websocket):
     print(f"[Server] Client connected: {conn_id}")
     _connected.add(websocket)
 
+    # We need context to greet properly — wait for first message to get fronter/session
+    # then decide if a greeting should fire. Track whether we've greeted this connection.
+    _greeted = False
+
     try:
         async for raw in websocket:
             try:
@@ -66,6 +70,28 @@ async def handler(websocket):
                 from core.timezone import set_timezone
                 set_timezone(tz)
             history = get_session(session_id)
+
+            # ── Return greeting ───────────────────────────────────────────────
+            # Fire once per connection if session was inactive long enough.
+            # Greeting replaces the normal response for the first message.
+            nonlocal_greeted = _greeted  # capture for closure
+            if not _greeted:
+                _greeted = True
+                from core.greeter import should_greet, build_greeting
+                if should_greet(history):
+                    fronter = context.get("current_host", "")
+                    print(f"[Server] Firing return greeting for {fronter or 'unknown'}")
+                    try:
+                        greeting = await build_greeting(
+                            fronter=fronter,
+                            session_id=session_id,
+                            llm=llm,
+                        )
+                        await websocket.send(json.dumps({"type": "token", "data": greeting}))
+                        await websocket.send(json.dumps({"type": "done", "data": ""}))
+                        # Still process their first message normally after greeting
+                    except Exception as e:
+                        print(f"[Server] Greeting failed: {e}")
 
             print(f"[Server] [{session_id[:8]}] {context.get('current_host', '?')}: {message[:60]}")
 
