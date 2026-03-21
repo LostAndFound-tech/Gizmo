@@ -240,19 +240,7 @@ class Agent:
         # 1. Detect host/fronter changes
         changes = _detect_changes(session_id, context)
 
-        # 1b. Place learning — check if user mentioned an unknown place
-        place_question = None
-        try:
-            place_question = await check_place_mention(
-                user_message,
-                current_host=(context or {}).get("current_host"),
-                llm=llm,
-            )
-        except Exception as e:
-            print(f"[Agent] Place check failed (non-fatal): {e}")
-
         # 2. Build a lightweight history summary for the synthesis call
-        # Just the last 6 messages as plain text — cheap, no LLM call
         history_summary = None
         recent = history.as_list()[-6:]
         if len(recent) >= 4:
@@ -439,11 +427,6 @@ class Agent:
                         response_text = response_text.rstrip() + "\n\n" + followup
                 except Exception as e:
                     print(f"[Agent] observe_turn failed (non-fatal): {e}")
-
-                # ── Place question injection ──────────────────────────────
-                if place_question:
-                    response_text = response_text.rstrip() + "\n\n" + place_question
-                    place_question = None
 
                 response_text = self._strip_tool_calls(response_text)
                 for chunk in self._chunk_string(response_text):
