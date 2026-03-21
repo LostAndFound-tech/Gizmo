@@ -254,7 +254,8 @@
   const fronterEl  = document.getElementById('fronter-input');
 
   const SESSION_ID = crypto.randomUUID();
-  const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+  const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+  const CLIENT_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   let ws = null;
   let currentBubble = null;
@@ -331,7 +332,9 @@
     ws.send(JSON.stringify({
       message: text,
       session_id: SESSION_ID,
-      context: name ? { current_host: name, fronters: [name] } : {},
+      context: name
+        ? { current_host: name, fronters: [name], timezone: CLIENT_TZ }
+        : { timezone: CLIENT_TZ },
     }));
   }
 

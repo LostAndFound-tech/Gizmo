@@ -44,16 +44,21 @@ class ConversationHistory:
         Messages list with inline timestamps so the LLM can reason about
         elapsed time. Format: '[HH:MM] message content'
         The current message gets 'now' as its timestamp.
+        Strips any pre-existing [HH:MM] prefix to avoid stacking on re-render.
         """
         import datetime
+        import re
+        _ts_prefix = re.compile(r'^\[\d{2}:\d{2}\]\s*')
+
         messages = []
         for m in self._messages:
             ts = m.get("timestamp")
+            clean = _ts_prefix.sub("", m['content'])
             if ts:
                 label = datetime.datetime.fromtimestamp(ts).strftime("%H:%M")
-                content = f"[{label}] {m['content']}"
+                content = f"[{label}] {clean}"
             else:
-                content = m["content"]
+                content = clean
             messages.append({"role": m["role"], "content": content})
 
         now_label = datetime.datetime.now().strftime("%H:%M")
