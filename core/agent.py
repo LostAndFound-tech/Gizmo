@@ -21,6 +21,7 @@ from core.llm import llm
 from core.rag import rag
 from core.synthesis import retrieve_and_synthesize
 from core.curiosity import observe_turn, get_curiosity_block
+from core.entity_query import build_entity_block
 from core.wellness import detect_distress, log_wellness_event, build_checkin_prompt
 from core.protocols import (
     get_active_protocol, trigger_protocol, advance_protocol,
@@ -142,6 +143,7 @@ def build_system_prompt(
     context: Optional[dict] = None,
     changes: Optional[dict] = None,
     curiosity_block: str = "",
+    entity_block: str = "",
 ) -> str:
     from core.timezone import tz_now
     personality = _load_personality()
@@ -153,6 +155,7 @@ def build_system_prompt(
 
     overview_block = f"\n\n[Conversation so far]\n{overview}" if overview else ""
     rag_block = f"\n\n[Relevant knowledge]\n{rag_synthesis}" if rag_synthesis else ""
+    entity_section = f"\n\n{entity_block}" if entity_block else ""
 
     # Situational context
     context_block = ""
@@ -196,7 +199,7 @@ To use a tool, respond with ONLY this JSON format (no extra text):
 {{"tool": "tool_name", "args": {{"arg1": "value1"}}}}
 
 After receiving a tool result, continue reasoning and provide a final response.
-If no tool is needed, respond directly.{overview_block}{rag_block}{context_block}{change_block}{curiosity_section}
+If no tool is needed, respond directly.{overview_block}{rag_block}{entity_section}{context_block}{change_block}{curiosity_section}
 
 The person in "current_host" is who you are speaking WITH right now — address them as "you" directly.
 Be concise. Be accurate. When uncertain, say so.
@@ -212,7 +215,10 @@ CRITICAL — KNOWLEDGE BASE RULES:
 - If [Relevant knowledge] contains an answer, USE IT. Do not say "I don't know" or "we haven't discussed that."
 - Do not contradict it. Do not invent details beyond it.
 - If [Relevant knowledge] is empty, then you genuinely have no memory of it — say so.
-- Never answer from your own training data when [Relevant knowledge] is provided."""
+- Never answer from your own training data when [Relevant knowledge] is provided.
+- The [Known facts] block contains verified records from the entity store. These are EXACT facts.
+  Answer questions about specific entities ONLY from what appears in [Known facts].
+  If a detail is not in [Known facts], say you don't have that detail yet — never guess or invent it."""
 
 
 # ── Agent Loop ────────────────────────────────────────────────────────────────
@@ -284,6 +290,15 @@ class Agent:
         except Exception:
             pass
 
+        entity_block = ""
+        try:
+            entity_block = build_entity_block(
+                user_message,
+                current_host=(context or {}).get("current_host"),
+            )
+        except Exception as e:
+            print(f"[Agent] Entity block failed (non-fatal): {e}")
+
         system_prompt = build_system_prompt(
             TOOL_REGISTRY,
             rag_synthesis=rag_synthesis,
@@ -291,6 +306,7 @@ class Agent:
             context=context,
             changes=changes,
             curiosity_block=curiosity_block,
+            entity_block=entity_block,
         )
 
         # 5. Build messages from history — with timestamps for elapsed time reasoning
