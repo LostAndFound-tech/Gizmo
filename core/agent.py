@@ -32,7 +32,7 @@ from tools.example_tool import EchoTool
 from tools.switch_host import SwitchHostTool
 from tools.correction_tool import CorrectionTool
 from tools.place_confirm_tool import PlaceConfirmTool
-
+from tools.reset_tool import FactoryResetTool
 # ── Tool Registry ─────────────────────────────────────────────────────────────
 TOOL_REGISTRY: dict[str, BaseTool] = {
     tool.name: tool
@@ -41,6 +41,7 @@ TOOL_REGISTRY: dict[str, BaseTool] = {
         SwitchHostTool(),
         CorrectionTool(),
         PlaceConfirmTool(),
+        FactoryResetTool(),
     ]
 }
 

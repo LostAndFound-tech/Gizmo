@@ -71,6 +71,36 @@ async def handler(websocket):
                 set_timezone(tz)
             history = get_session(session_id)
 
+            # ── Nuclear reset — intercept before agent, bypass LLM entirely ──
+            if message.strip() == "sudo reset yourself motherfucker":
+                print(f"[Server] Nuclear reset triggered by {context.get('current_host', 'unknown')}")
+                try:
+                    from tools.reset_tool import FactoryResetTool
+                    reset = FactoryResetTool()
+                    result = await reset.run(
+                        passphrase="sudo reset yourself motherfucker",
+                        session_id=session_id,
+                    )
+                    print(f"[Server] Reset result: {result.output}")
+                except Exception as e:
+                    print(f"[Server] Reset failed: {e}")
+
+                # Tell client to reload — clears the UI completely
+                await websocket.send(json.dumps({"type": "reload"}))
+
+                # Push onboarding opening after client reconnects
+                async def _push_onboarding():
+                    await asyncio.sleep(2.0)
+                    try:
+                        from core.personality_growth import run_onboarding
+                        opening = await run_onboarding(llm)
+                        await _push_to_all(opening)
+                    except Exception as e:
+                        print(f"[Server] Onboarding push failed: {e}")
+
+                asyncio.ensure_future(_push_onboarding())
+                continue
+
             # ── Return greeting ───────────────────────────────────────────────
             # Fire once per connection if session was inactive long enough.
             # Greeting replaces the normal response for the first message.

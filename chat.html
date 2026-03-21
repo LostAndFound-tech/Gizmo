@@ -156,11 +156,7 @@
     gap: 6px;
   }
 
-  .name-field label {
-    font-size: 11px;
-    color: #555;
-    white-space: nowrap;
-  }
+  .name-field label { font-size: 11px; color: #555; white-space: nowrap; }
 
   .name-field input {
     background: #1a1a1a;
@@ -270,14 +266,14 @@
 </div>
 
 <script>
-  const messagesEl  = document.getElementById('messages');
-  const inputEl     = document.getElementById('message-input');
-  const sendBtn     = document.getElementById('send-btn');
-  const statusDot   = document.getElementById('status-dot');
-  const statusText  = document.getElementById('status-text');
-  const moodBadge   = document.getElementById('mood-badge');
-  const hostEl      = document.getElementById('host-input');
-  const frontersEl  = document.getElementById('fronters-input');
+  const messagesEl = document.getElementById('messages');
+  const inputEl    = document.getElementById('message-input');
+  const sendBtn    = document.getElementById('send-btn');
+  const statusDot  = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  const moodBadge  = document.getElementById('mood-badge');
+  const hostEl     = document.getElementById('host-input');
+  const frontersEl = document.getElementById('fronters-input');
 
   const SESSION_ID = crypto.randomUUID();
   const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
@@ -322,15 +318,14 @@
       }
 
       else if (msg.type === 'context_update') {
-        // Server pushed a host/fronter change (e.g. from switch_host tool)
-        if (msg.current_host !== undefined) {
-          hostEl.value = msg.current_host || '';
-        }
+        if (msg.current_host !== undefined) hostEl.value = msg.current_host || '';
         if (msg.fronters !== undefined) {
-          frontersEl.value = Array.isArray(msg.fronters)
-            ? msg.fronters.join(', ')
-            : '';
+          frontersEl.value = Array.isArray(msg.fronters) ? msg.fronters.join(', ') : '';
         }
+      }
+
+      else if (msg.type === 'reload') {
+        location.reload();
       }
 
       else if (msg.type === 'done') {
@@ -372,9 +367,6 @@
     setStatus('thinking', 'thinking...');
     showTyping();
 
-    // host and fronters are fully separate:
-    // current_host = who is driving and being addressed
-    // fronters = others also present — Gizmo can address them too
     const context = { timezone: CLIENT_TZ };
     if (host) context.current_host = host;
     if (frontersList.length) context.fronters = frontersList;
