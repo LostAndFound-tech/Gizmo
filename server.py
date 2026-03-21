@@ -20,28 +20,10 @@ HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "8765"))
 CHAT_HTML = Path(__file__).parent / "chat.html"
 
-# All currently connected websockets — used for server-push (reminders, timers)
-_connected: set = set()
-
-
-async def _push_to_all(message: str, msg_type: str = "token") -> None:
-    """Push a message to every connected client."""
-    if not _connected:
-        print(f"[Server] Push skipped — no clients connected: {message[:60]}")
-        return
-    payload = json.dumps({"type": msg_type, "data": message})
-    done = json.dumps({"type": "done", "data": ""})
-    for ws in list(_connected):
-        try:
-            await ws.send(payload)
-            await ws.send(done)
-        except Exception as e:
-            print(f"[Server] Push failed for client: {e}")
 
 async def handler(websocket):
     conn_id = str(uuid.uuid4())[:8]
     print(f"[Server] Client connected: {conn_id}")
-    _connected.add(websocket)
 
     try:
         async for raw in websocket:
@@ -58,6 +40,17 @@ async def handler(websocket):
             context = data.get("context") or {}
             session_id = data.get("session_id") or conn_id
             context.setdefault("fronters", [])
+
+            # Apply client timezone if provided — sets TZ for all datetime.now() calls
+            tz = context.get("timezone", "")
+            if tz and tz != os.environ.get("TZ", ""):
+                os.environ["TZ"] = tz
+                try:
+                    import time as _time
+                    _time.tzset()
+                    print(f"[Server] Timezone set to {tz}")
+                except AttributeError:
+                    pass  # tzset() not available on Windows
             history = get_session(session_id)
 
             print(f"[Server] [{session_id[:8]}] {context.get('current_host', '?')}: {message[:60]}")
@@ -94,7 +87,6 @@ async def handler(websocket):
     except Exception as e:
         print(f"[Server] Connection error: {e}")
     finally:
-        _connected.discard(websocket)
         print(f"[Server] Client disconnected: {conn_id}")
 
 
@@ -126,36 +118,10 @@ async def start_background_services():
 
 
 async def _drain_reminders(queue):
-    """
-    Drain the directed queue (reminders, timer fires) and push to all clients.
-    Runs the item through the agent so the delivery is natural, not raw text.
-    """
     while True:
         try:
             item = await queue.get()
-            transcript = item.get("transcript", "")
-            context = item.get("context") or {}
-            session_id = item.get("session_id", "server")
-
-            print(f"[Server] Delivering queued item: {transcript[:60]}")
-
-            if not _connected:
-                print("[Server] No clients connected — queued item dropped")
-                continue
-
-            history = get_session(session_id)
-            response_text = ""
-            async for chunk in agent.run(
-                user_message=transcript,
-                history=history,
-                session_id=session_id,
-                use_rag=False,   # reminders/timers don't need RAG
-                context=context,
-            ):
-                response_text += chunk
-
-            await _push_to_all(response_text)
-
+            print(f"[Server] REMINDER: {item.get('transcript', '')}")
         except Exception as e:
             print(f"[Server] Reminder drain error: {e}")
 

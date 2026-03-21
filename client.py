@@ -29,6 +29,21 @@ async def chat(host: str, name: str, session_id: str):
         print("pip install websockets")
         sys.exit(1)
 
+    # Detect local timezone
+    try:
+        import datetime
+        tz = datetime.datetime.now().astimezone().tzname()
+        # Get IANA timezone name if tzlocal is available, fall back to offset
+        try:
+            from tzlocal import get_localzone
+            tz = str(get_localzone())
+        except ImportError:
+            # Fall back to UTC offset string e.g. "UTC-06:00"
+            offset = datetime.datetime.now().astimezone().strftime("%z")
+            tz = f"UTC{offset[:3]}:{offset[3:]}" if offset else "UTC"
+    except Exception:
+        tz = "UTC"
+
     print(f"\nConnecting to Gizmo at {host}...")
     print(f"Session: {session_id[:8]} | Identity: {name or 'unset'}")
     print("Type your message and press Enter. Ctrl+C to exit.\n")
@@ -54,7 +69,8 @@ async def chat(host: str, name: str, session_id: str):
                 "context": {
                     "current_host": name,
                     "fronters": [name] if name else [],
-                } if name else {},
+                    "timezone": tz,
+                } if name else {"timezone": tz},
             }
 
             await ws.send(json.dumps(payload))
