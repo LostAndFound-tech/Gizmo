@@ -20,6 +20,10 @@ from core.llm import llm
 from core.rag import rag
 from core.synthesis import retrieve_and_synthesize
 from core.wellness import detect_distress, log_wellness_event, build_checkin_prompt
+from core.protocols import (
+    get_active_protocol, trigger_protocol, advance_protocol,
+    close_protocol, build_deflection_response, is_deflection, is_protocol_close,
+)
 from memory.history import ConversationHistory
 from tools.base_tool import BaseTool
 from tools.example_tool import EchoTool
@@ -133,9 +137,9 @@ def build_system_prompt(
     context: Optional[dict] = None,
     changes: Optional[dict] = None,
 ) -> str:
-    from datetime import datetime
+    from core.timezone import tz_now
     personality = _load_personality()
-    now_str = datetime.now().strftime("%A %Y-%m-%d %H:%M")
+    now_str = tz_now().strftime("%A %Y-%m-%d %H:%M")
 
     tool_descriptions = "\n".join(
         f"- {t.name}: {t.description}" for t in tools.values()
@@ -259,8 +263,8 @@ class Agent:
             changes=changes,
         )
 
-        # 5. Build messages from history — with timestamps for elapsed time reasoning
-        messages = history.as_messages_with_timestamps(user_message)
+        # 5. Build messages from history
+        messages = history.as_messages(user_message)
 
         # 6. Agentic loop
         tool_calls = 0
@@ -284,13 +288,59 @@ class Agent:
             if tool_call is None:
                 history.add("user", user_message, context=context)
 
-                # Wellness check — detect distress, log, append check-in
-                current_host = (context or {}).get("current_host")
+                current_host = (context or {}).get("current_host", "")
                 fronters = list((context or {}).get("fronters") or [])
+
+                # ── Protocol state check ──────────────────────────────────────
+                active_proto = get_active_protocol(session_id)
+
+                if active_proto:
+                    # We're mid-protocol — handle before normal response
+                    if is_protocol_close(user_message):
+                        # User is clearly done and okay — close it
+                        close_info = close_protocol(
+                            session_id,
+                            closed_by=current_host,
+                            original_fronter=active_proto["fronter"],
+                        )
+                        if close_info["different_fronter"]:
+                            response_text = (
+                                f"Got it, {current_host} — I'll note that "
+                                f"{close_info['original_fronter']} seemed to be doing better "
+                                f"when you took over. Take care of each other. 💙"
+                            )
+                        else:
+                            response_text = response_text  # use LLM response as-is
+                        history.add("assistant", response_text, context=context)
+                        for chunk in self._chunk_string(response_text):
+                            yield chunk
+                        return
+
+                    elif is_deflection(user_message):
+                        # Soft pushback — don't just accept "I'm fine"
+                        deflection_response = await build_deflection_response(
+                            session_id=session_id,
+                            user_message=user_message,
+                            current_host=current_host,
+                            llm=llm,
+                        )
+                        history.add("assistant", deflection_response, context=context)
+                        for chunk in self._chunk_string(deflection_response):
+                            yield chunk
+                        return
+
+                    else:
+                        # Normal response during protocol — advance to next step
+                        next_step = advance_protocol(session_id)
+                        if next_step:
+                            response_text = response_text.rstrip() + f"\n\n{next_step}"
+                        # else protocol is done, let normal response close naturally
+
+                # ── Wellness / new distress detection ─────────────────────────
                 detection = detect_distress(user_message)
-                print(f"[Wellness] Scanned message — detected: {detection['detected']}, categories: {detection['categories']}")
+                print(f"[Wellness] Scanned — detected: {detection['detected']}, categories: {detection['categories']}")
+
                 if detection["detected"]:
-                    print("[Wellness] Logging event...")
                     await log_wellness_event(
                         message=user_message,
                         detection=detection,
@@ -298,13 +348,35 @@ class Agent:
                         fronters=fronters,
                         session_id=session_id,
                     )
-                    # Only add ONE check-in regardless of how many categories matched
-                    print("[Wellness] Building check-in prompt...")
-                    checkin = await build_checkin_prompt(detection, current_host, llm)
-                    print(f"[Wellness] Check-in: {checkin[:80]}")
-                    # Strip any existing check-ins from response first
-                    response_text = re.sub(r'\n\n"Hey.*?$', '', response_text, flags=re.DOTALL|re.MULTILINE).rstrip()
-                    response_text = response_text + "\n\n" + checkin
+
+                    if not active_proto:
+                        # New distress — fire protocol research async, acknowledge now
+                        category = detection["categories"][0] if detection["categories"] else "general_distress"
+
+                        # Get push_fn from server's _push_to_all if available
+                        try:
+                            from server import _push_to_all as push_fn
+                        except Exception:
+                            async def push_fn(msg): print(f"[Protocols] Push: {msg}")
+
+                        asyncio.ensure_future(
+                            trigger_protocol(
+                                session_id=session_id,
+                                category=category,
+                                fronter=current_host,
+                                llm=llm,
+                                push_fn=push_fn,
+                            )
+                        )
+
+                        # Acknowledgment comes from the LLM response — append research note
+                        response_text = response_text.rstrip()
+                        response_text += "\n\nGive me just a moment — I want to look something up for you."
+                    else:
+                        # Already in protocol — just append the check-in
+                        checkin = await build_checkin_prompt(detection, current_host, llm)
+                        response_text = re.sub(r'\n\n"Hey.*?$', '', response_text, flags=re.DOTALL|re.MULTILINE).rstrip()
+                        response_text = response_text + "\n\n" + checkin
 
                 history.add("assistant", response_text, context=context)
                 response_text = self._strip_tool_calls(response_text)

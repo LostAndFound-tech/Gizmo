@@ -41,16 +41,11 @@ async def handler(websocket):
             session_id = data.get("session_id") or conn_id
             context.setdefault("fronters", [])
 
-            # Apply client timezone if provided — sets TZ for all datetime.now() calls
+            # Apply client timezone if provided
             tz = context.get("timezone", "")
-            if tz and tz != os.environ.get("TZ", ""):
-                os.environ["TZ"] = tz
-                try:
-                    import time as _time
-                    _time.tzset()
-                    print(f"[Server] Timezone set to {tz}")
-                except AttributeError:
-                    pass  # tzset() not available on Windows
+            if tz:
+                from core.timezone import set_timezone
+                set_timezone(tz)
             history = get_session(session_id)
 
             print(f"[Server] [{session_id[:8]}] {context.get('current_host', '?')}: {message[:60]}")

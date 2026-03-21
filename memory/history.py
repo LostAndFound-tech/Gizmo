@@ -46,8 +46,8 @@ class ConversationHistory:
         The current message gets 'now' as its timestamp.
         Strips any pre-existing [HH:MM] prefix to avoid stacking on re-render.
         """
-        import datetime
         import re
+        from core.timezone import tz_now
         _ts_prefix = re.compile(r'^\[\d{2}:\d{2}\]\s*')
 
         messages = []
@@ -55,13 +55,15 @@ class ConversationHistory:
             ts = m.get("timestamp")
             clean = _ts_prefix.sub("", m['content'])
             if ts:
-                label = datetime.datetime.fromtimestamp(ts).strftime("%H:%M")
+                from datetime import datetime
+                from core.timezone import get_timezone
+                label = datetime.fromtimestamp(ts, tz=get_timezone()).strftime("%H:%M")
                 content = f"[{label}] {clean}"
             else:
                 content = clean
             messages.append({"role": m["role"], "content": content})
 
-        now_label = datetime.datetime.now().strftime("%H:%M")
+        now_label = tz_now().strftime("%H:%M")
         messages.append({"role": "user", "content": f"[{now_label}] {new_user_message}"})
         return messages
 
