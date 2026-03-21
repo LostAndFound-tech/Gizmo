@@ -254,7 +254,7 @@
   const fronterEl  = document.getElementById('fronter-input');
 
   const SESSION_ID = crypto.randomUUID();
-  const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+  const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
   const CLIENT_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   let ws = null;

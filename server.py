@@ -86,6 +86,8 @@ async def handler(websocket):
 
 
 async def http_handler(path, request_headers):
+    if path == "/ws":
+        return None  # pass through to WebSocket handler
     if path in ("/", "/index.html"):
         html = CHAT_HTML.read_text()
         return (200, [("Content-Type", "text/html")], html.encode())
