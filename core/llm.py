@@ -31,6 +31,10 @@ class LLMClient:
         max_new_tokens: int = 512,
         temperature: float = 0.7,
     ) -> AsyncGenerator[str, None]:
+        """
+        Stream tokens. Accepts a proper messages list for multi-turn conversation.
+        Prepends system prompt if provided.
+        """
         full_messages = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
@@ -45,6 +49,8 @@ class LLMClient:
         )
 
         async for chunk in stream:
+            if not chunk.choices:
+                continue
             token = chunk.choices[0].delta.content
             if token:
                 yield token
@@ -56,6 +62,7 @@ class LLMClient:
         max_new_tokens: int = 512,
         temperature: float = 0.7,
     ) -> str:
+        """Non-streaming generation. Returns full response string."""
         result = ""
         async for token in self.stream(messages, system_prompt, max_new_tokens, temperature):
             result += token
