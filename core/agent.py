@@ -20,7 +20,7 @@ from typing import AsyncGenerator, Optional
 from core.llm import llm
 from core.rag import rag
 from core.synthesis import retrieve_and_synthesize
-from core.curiosity import observe_turn, check_place_mention, get_curiosity_block
+from core.curiosity import observe_turn, get_curiosity_block
 from core.wellness import detect_distress, log_wellness_event, build_checkin_prompt
 from core.protocols import (
     get_active_protocol, trigger_protocol, advance_protocol,
