@@ -11,6 +11,7 @@ Flow per request:
   6. Stream final answer, save to history
 """
 
+import asyncio
 import os
 import json
 import re
