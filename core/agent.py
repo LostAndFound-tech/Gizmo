@@ -20,6 +20,7 @@ from typing import AsyncGenerator, Optional
 from core.llm import llm
 from core.rag import rag
 from core.synthesis import retrieve_and_synthesize
+from core.curiosity import observe_turn, check_place_mention, get_curiosity_block
 from core.wellness import detect_distress, log_wellness_event, build_checkin_prompt
 from core.protocols import (
     get_active_protocol, trigger_protocol, advance_protocol,
@@ -30,6 +31,7 @@ from tools.base_tool import BaseTool
 from tools.example_tool import EchoTool
 from tools.switch_host import SwitchHostTool
 from tools.correction_tool import CorrectionTool
+from tools.place_confirm_tool import PlaceConfirmTool
 
 # ── Tool Registry ─────────────────────────────────────────────────────────────
 TOOL_REGISTRY: dict[str, BaseTool] = {
@@ -38,6 +40,7 @@ TOOL_REGISTRY: dict[str, BaseTool] = {
         EchoTool(),
         SwitchHostTool(),
         CorrectionTool(),
+        PlaceConfirmTool(),
     ]
 }
 
@@ -137,6 +140,7 @@ def build_system_prompt(
     overview: str = "",
     context: Optional[dict] = None,
     changes: Optional[dict] = None,
+    curiosity_block: str = "",
 ) -> str:
     from core.timezone import tz_now
     personality = _load_personality()
@@ -177,6 +181,8 @@ def build_system_prompt(
         if change_lines:
             change_block = "\n\n[System changes]\n" + "\n".join(change_lines)
 
+    curiosity_section = f"\n\n{curiosity_block}" if curiosity_block else ""
+
     return f"""{personality}
 
 Current time: {now_str}
@@ -189,7 +195,7 @@ To use a tool, respond with ONLY this JSON format (no extra text):
 {{"tool": "tool_name", "args": {{"arg1": "value1"}}}}
 
 After receiving a tool result, continue reasoning and provide a final response.
-If no tool is needed, respond directly.{overview_block}{rag_block}{context_block}{change_block}
+If no tool is needed, respond directly.{overview_block}{rag_block}{context_block}{change_block}{curiosity_section}
 
 The person in "current_host" is who you are speaking WITH right now — address them as "you" directly.
 Be concise. Be accurate. When uncertain, say so.
@@ -198,6 +204,7 @@ Use the log_correction tool whenever someone says you did something wrong, tells
 doing something, or uses phrases like "don't do that", "that's wrong", "never do that again", 
 "stop making things up", or any clear behavioral correction. When you use it, first summarize 
 back what you did wrong and what rule you are committing to going forward.
+Use the store_place tool when the user confirms what an unfamiliar place is.
 
 CRITICAL — KNOWLEDGE BASE RULES:
 - The [Relevant knowledge] block is your memory. It is ground truth.
@@ -225,6 +232,17 @@ class Agent:
         """
         # 1. Detect host/fronter changes
         changes = _detect_changes(session_id, context)
+
+        # 1b. Place learning — check if user mentioned an unknown place
+        place_question = None
+        try:
+            place_question = await check_place_mention(
+                user_message,
+                current_host=(context or {}).get("current_host"),
+                llm=llm,
+            )
+        except Exception as e:
+            print(f"[Agent] Place check failed (non-fatal): {e}")
 
         # 2. Build a lightweight history summary for the synthesis call
         # Just the last 6 messages as plain text — cheap, no LLM call
@@ -256,12 +274,22 @@ class Agent:
         overview = ""  # overview now handled inside synthesis
 
         # 4. Build system prompt
+        curiosity_block = ""
+        try:
+            curiosity_block = get_curiosity_block(
+                user_message,
+                current_host=(context or {}).get("current_host"),
+            )
+        except Exception:
+            pass
+
         system_prompt = build_system_prompt(
             TOOL_REGISTRY,
             rag_synthesis=rag_synthesis,
             overview=overview,
             context=context,
             changes=changes,
+            curiosity_block=curiosity_block,
         )
 
         # 5. Build messages from history — with timestamps for elapsed time reasoning
@@ -380,6 +408,26 @@ class Agent:
                         response_text = response_text + "\n\n" + checkin
 
                 history.add("assistant", response_text, context=context)
+
+                # ── Curiosity observation ─────────────────────────────────
+                try:
+                    followup = await observe_turn(
+                        user_message=user_message,
+                        gizmo_response=response_text,
+                        current_host=current_host or None,
+                        session_id=session_id,
+                        llm=llm,
+                    )
+                    if followup:
+                        response_text = response_text.rstrip() + "\n\n" + followup
+                except Exception as e:
+                    print(f"[Agent] observe_turn failed (non-fatal): {e}")
+
+                # ── Place question injection ──────────────────────────────
+                if place_question:
+                    response_text = response_text.rstrip() + "\n\n" + place_question
+                    place_question = None
+
                 response_text = self._strip_tool_calls(response_text)
                 for chunk in self._chunk_string(response_text):
                     yield chunk

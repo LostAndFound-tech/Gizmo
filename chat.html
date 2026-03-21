@@ -146,13 +146,23 @@
 
   #name-row {
     display: flex;
-    gap: 8px;
+    gap: 12px;
     align-items: center;
   }
 
-  #name-row label { font-size: 12px; color: #555; }
+  .name-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
 
-  #fronter-input {
+  .name-field label {
+    font-size: 11px;
+    color: #555;
+    white-space: nowrap;
+  }
+
+  .name-field input {
     background: #1a1a1a;
     border: 1px solid #2a2a2a;
     border-radius: 8px;
@@ -161,9 +171,17 @@
     font-size: 12px;
     width: 120px;
     outline: none;
+    font-family: inherit;
   }
 
-  #fronter-input:focus { border-color: #444; }
+  .name-field input:focus { border-color: #444; }
+  .name-field input::placeholder { color: #444; }
+
+  .name-divider {
+    width: 1px;
+    height: 16px;
+    background: #2a2a2a;
+  }
 
   #message-input {
     background: #1a1a1a;
@@ -226,8 +244,15 @@
 <div id="input-area">
   <div id="input-wrap">
     <div id="name-row">
-      <label for="fronter-input">fronting:</label>
-      <input id="fronter-input" type="text" placeholder="your name" autocomplete="off">
+      <div class="name-field">
+        <label for="host-input">host:</label>
+        <input id="host-input" type="text" placeholder="who's driving" autocomplete="off">
+      </div>
+      <div class="name-divider"></div>
+      <div class="name-field">
+        <label for="fronters-input">fronters:</label>
+        <input id="fronters-input" type="text" placeholder="others present" autocomplete="off">
+      </div>
     </div>
     <textarea
       id="message-input"
@@ -245,13 +270,14 @@
 </div>
 
 <script>
-  const messagesEl = document.getElementById('messages');
-  const inputEl    = document.getElementById('message-input');
-  const sendBtn    = document.getElementById('send-btn');
-  const statusDot  = document.getElementById('status-dot');
-  const statusText = document.getElementById('status-text');
-  const moodBadge  = document.getElementById('mood-badge');
-  const fronterEl  = document.getElementById('fronter-input');
+  const messagesEl  = document.getElementById('messages');
+  const inputEl     = document.getElementById('message-input');
+  const sendBtn     = document.getElementById('send-btn');
+  const statusDot   = document.getElementById('status-dot');
+  const statusText  = document.getElementById('status-text');
+  const moodBadge   = document.getElementById('mood-badge');
+  const hostEl      = document.getElementById('host-input');
+  const frontersEl  = document.getElementById('fronters-input');
 
   const SESSION_ID = crypto.randomUUID();
   const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
@@ -295,6 +321,18 @@
         scrollBottom();
       }
 
+      else if (msg.type === 'context_update') {
+        // Server pushed a host/fronter change (e.g. from switch_host tool)
+        if (msg.current_host !== undefined) {
+          hostEl.value = msg.current_host || '';
+        }
+        if (msg.fronters !== undefined) {
+          frontersEl.value = Array.isArray(msg.fronters)
+            ? msg.fronters.join(', ')
+            : '';
+        }
+      }
+
       else if (msg.type === 'done') {
         currentBubble = null;
         removeTyping();
@@ -321,20 +359,30 @@
     const text = inputEl.value.trim();
     if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-    const name = fronterEl.value.trim();
-    addMessage('user', text, name || null);
+    const host = hostEl.value.trim();
+    const frontersRaw = frontersEl.value.trim();
+    const frontersList = frontersRaw
+      ? frontersRaw.split(',').map(f => f.trim()).filter(Boolean)
+      : [];
+
+    addMessage('user', text, host || null);
     inputEl.value = '';
     inputEl.style.height = 'auto';
     sendBtn.disabled = true;
     setStatus('thinking', 'thinking...');
     showTyping();
 
+    // host and fronters are fully separate:
+    // current_host = who is driving and being addressed
+    // fronters = others also present — Gizmo can address them too
+    const context = { timezone: CLIENT_TZ };
+    if (host) context.current_host = host;
+    if (frontersList.length) context.fronters = frontersList;
+
     ws.send(JSON.stringify({
       message: text,
       session_id: SESSION_ID,
-      context: name
-        ? { current_host: name, fronters: [name], timezone: CLIENT_TZ }
-        : { timezone: CLIENT_TZ },
+      context,
     }));
   }
 

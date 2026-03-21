@@ -182,6 +182,13 @@ async def archiver_loop(llm) -> None:
                 except Exception as e:
                     print(f"[Archiver] Error archiving {session_id[:8]}: {e}")
 
+        # Decay interest graph once per archiver cycle
+        try:
+            from core.curiosity import decay_all as curiosity_decay
+            await curiosity_decay()
+        except Exception as e:
+            print(f"[Archiver] Curiosity decay failed (non-fatal): {e}")
+
 
 def start_archiver(llm, loop: asyncio.AbstractEventLoop) -> None:
     """Schedule the archiver loop on the running event loop."""
