@@ -264,8 +264,8 @@ class Agent:
             changes=changes,
         )
 
-        # 5. Build messages from history
-        messages = history.as_messages(user_message)
+        # 5. Build messages from history — with timestamps for elapsed time reasoning
+        messages = history.as_messages_with_timestamps(user_message)
 
         # 6. Agentic loop
         tool_calls = 0
