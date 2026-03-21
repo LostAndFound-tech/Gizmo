@@ -1,11 +1,51 @@
 """
 server.py - Gizmo server
 Binds port first, then starts background services.
+
+IMPORTANT: ChromaDB health check runs at the very top before any imports
+that might instantiate a RAGStore. This is necessary because rag.py creates
+a module-level RAGStore() singleton which calls PersistentClient immediately
+on import. If ChromaDB's schema is broken, we must fix it before that happens.
 """
+
+# ── ChromaDB health check — MUST be before all other imports ─────────────────
+import os
+import shutil as _shutil
+import sqlite3 as _sq
+
+_chroma_path = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
+_chroma_sqlite = os.path.join(_chroma_path, "chroma.sqlite3")
+_needs_reinit = not os.path.exists(_chroma_sqlite)
+
+if not _needs_reinit:
+    try:
+        _con = _sq.connect(_chroma_sqlite)
+        _tables = [r[0] for r in _con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        _con.close()
+        if "collections" not in _tables or "acquire_write" not in _tables:
+            _needs_reinit = True
+            print(f"[Server] ChromaDB schema incomplete — reinitializing")
+    except Exception as _e:
+        _needs_reinit = True
+        print(f"[Server] ChromaDB validation failed ({_e}) — reinitializing")
+
+if _needs_reinit:
+    print(f"[Server] Reinitializing ChromaDB at {_chroma_path}")
+    if os.path.exists(_chroma_path):
+        _shutil.rmtree(_chroma_path)
+    os.makedirs(_chroma_path, exist_ok=True)
+    import chromadb as _cdb
+    _cdb.PersistentClient(path=_chroma_path)
+    print("[Server] ChromaDB reinitialized cleanly")
+else:
+    print("[Server] ChromaDB healthy")
+
+# ── Now safe to import everything else ───────────────────────────────────────
 
 import asyncio
 import json
-import os
 import uuid
 from pathlib import Path
 
@@ -20,7 +60,6 @@ HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "8765"))
 CHAT_HTML = Path(__file__).parent / "chat.html"
 
-# All currently connected websockets — used for server-push (reminders, timers)
 _connected: set = set()
 
 
@@ -44,8 +83,6 @@ async def handler(websocket):
     print(f"[Server] Client connected: {conn_id}")
     _connected.add(websocket)
 
-    # We need context to greet properly — wait for first message to get fronter/session
-    # then decide if a greeting should fire. Track whether we've greeted this connection.
     _greeted = False
 
     try:
@@ -85,10 +122,8 @@ async def handler(websocket):
                 except Exception as e:
                     print(f"[Server] Reset failed: {e}")
 
-                # Tell client to reload — clears the UI completely
                 await websocket.send(json.dumps({"type": "reload"}))
 
-                # Push onboarding opening after client reconnects
                 async def _push_onboarding():
                     await asyncio.sleep(2.0)
                     try:
@@ -102,9 +137,6 @@ async def handler(websocket):
                 continue
 
             # ── Return greeting ───────────────────────────────────────────────
-            # Fire once per connection if session was inactive long enough.
-            # Greeting replaces the normal response for the first message.
-            nonlocal_greeted = _greeted  # capture for closure
             if not _greeted:
                 _greeted = True
                 from core.greeter import should_greet, build_greeting
@@ -119,7 +151,6 @@ async def handler(websocket):
                         )
                         await websocket.send(json.dumps({"type": "token", "data": greeting}))
                         await websocket.send(json.dumps({"type": "done", "data": ""}))
-                        # Still process their first message normally after greeting
                     except Exception as e:
                         print(f"[Server] Greeting failed: {e}")
 
@@ -165,7 +196,7 @@ async def handler(websocket):
 
 async def http_handler(path, request_headers):
     if path == "/ws":
-        return None  # pass through to WebSocket handler
+        return None
     if path in ("/", "/index.html"):
         html = CHAT_HTML.read_text()
         return (200, [("Content-Type", "text/html")], html.encode())
@@ -175,13 +206,14 @@ async def http_handler(path, request_headers):
 
 
 async def start_background_services():
-    # Initialize entity store DB on startup
+    # Entity store init
     try:
         from core.entity_store import init_db
         init_db()
         print("[Server] Entity store initialized")
     except Exception as e:
         print(f"[Server] Entity store init failed: {e}")
+
     loop = asyncio.get_event_loop()
     try:
         from memory.archiver import start_archiver
@@ -200,10 +232,6 @@ async def start_background_services():
 
 
 async def _drain_reminders(queue):
-    """
-    Drain the directed queue (reminders, timer fires) and push to all clients.
-    Runs the item through the agent so delivery is natural, not raw text.
-    """
     while True:
         try:
             item = await queue.get()
@@ -235,7 +263,6 @@ async def _drain_reminders(queue):
 
 
 async def main():
-    # Bind port FIRST so Render knows we're alive
     async with serve(
         handler,
         HOST,
@@ -246,7 +273,6 @@ async def main():
         max_size=1_000_000,
     ):
         print(f"[Server] Ready at http://{HOST}:{PORT}")
-        # Start background services after port is bound
         await start_background_services()
         await asyncio.Future()
 

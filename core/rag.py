@@ -282,5 +282,19 @@ class RAGStore:
         return self.collection.count()
 
 
-# Singleton
-rag = RAGStore()
+# Lazy singleton — not instantiated at import time
+# Use get_rag() instead of importing rag directly
+_rag_instance = None
+
+def get_rag() -> "RAGStore":
+    global _rag_instance
+    if _rag_instance is None:
+        _rag_instance = RAGStore()
+    return _rag_instance
+
+# Backwards compatibility — rag still importable but now lazy
+class _LazyRAG:
+    def __getattr__(self, name):
+        return getattr(get_rag(), name)
+
+rag = _LazyRAG()
