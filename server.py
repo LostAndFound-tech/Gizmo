@@ -80,8 +80,10 @@ async def handler(websocket):
                     await websocket.send(json.dumps({"type": "token", "data": chunk}))
 
             except Exception as e:
-                print(f"[Server] Agent error: {e}")
-                await websocket.send(json.dumps({"type": "error", "data": str(e)}))
+                import traceback
+                tb = traceback.format_exc()
+                print(f"[Server] Agent error: {e}\n{tb}")
+                await websocket.send(json.dumps({"type": "error", "data": f"{e}\n\n{tb}"}))
                 continue
 
             mood_data = {}
