@@ -1,17 +1,23 @@
 """
 tools/reset_tool.py
-Factory reset tool. FULL wipe — no survivors.
+Scorched earth factory reset. NOTHING survives. No exceptions.
 
-Deletes:
-  - Entire ChromaDB persist directory (not just collections)
-  - All in-memory conversation history and session state
-  - personality.txt replaced with a blank slate (single default line)
-  - Overview cache and last-context dicts in agent
+"sudo reset yourself motherfucker" — full and complete wipe:
+  - Entire ChromaDB persist directory deleted with shutil.rmtree (not just collections)
+  - In-memory conversation history and session state
+  - Overview cache
+  - Agent last-context tracking
+
+After reset:
+  - is_cold_start() returns True
+  - Onboarding fires on next conversation turn
+  - Gizmo remembers nothing
+
+NOTE: This tool is also intercepted directly at the server level in server.py
+before it reaches the agent, so the LLM never sees the passphrase.
+The tool exists so the reset logic lives in one place and can be called cleanly.
 
 EXACT PASSPHRASE REQUIRED: "sudo reset yourself motherfucker"
-No context awareness. No RAG. No personality injection. Exact string match only.
-
-To register: add FactoryResetTool() to TOOL_REGISTRY in core/agent.py
 """
 
 import os
@@ -20,9 +26,6 @@ from datetime import datetime
 from tools.base_tool import BaseTool, ToolResult
 
 RESET_PASSPHRASE = "sudo reset yourself motherfucker"
-
-PERSONALITY_FILE = os.path.join(os.path.dirname(__file__), "..", "personality.txt")
-PERSONALITY_DEFAULT = "You are a helpful, capable assistant.\n"
 
 
 class FactoryResetTool(BaseTool):
@@ -33,17 +36,18 @@ class FactoryResetTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Full factory reset. Nukes EVERYTHING: ChromaDB persist directory, "
-            "all conversation history, all session state, overview cache, "
-            "agent context tracking, and replaces personality.txt with a blank slate. "
-            "ONLY triggers on the exact passphrase: 'sudo reset yourself motherfucker'. "
-            "No other phrasing. No context awareness. Debug use only. "
-            "Args: passphrase (str) — must match exactly."
+            "Scorched earth reset. Wipes EVERYTHING — entire ChromaDB directory, "
+            "all history, all session state, all context. Nothing is preserved. "
+            "Onboarding re-runs automatically on the next turn. "
+            "ONLY triggers on the EXACT passphrase: 'sudo reset yourself motherfucker'. "
+            "No other phrasing activates this tool. "
+            "Args: passphrase (str) — must match exactly, character for character."
         )
 
     async def run(
         self,
         passphrase: str = "",
+        session_id: str = "",
         **kwargs,
     ) -> ToolResult:
         if passphrase.strip() != RESET_PASSPHRASE:
@@ -58,14 +62,16 @@ class FactoryResetTool(BaseTool):
         results = []
         errors = []
 
-        # 1. Nuke ChromaDB persist directory entirely
+        # 1. Nuke the entire ChromaDB persist directory from disk
+        #    delete_collection() only removes from the index — files stay on disk
+        #    and come back on next client connection. rmtree is the only real wipe.
         r = _nuke_chroma_dir()
         if r["success"]:
-            results.append(f"ChromaDB: deleted persist directory ({r['path']})")
+            results.append(f"ChromaDB: deleted {r['path']} from disk")
         else:
             errors.append(f"ChromaDB nuke failed: {r['error']}")
 
-        # 2. Wipe all in-memory conversation history
+        # 2. Wipe in-memory conversation history
         r = _wipe_history()
         if r["success"]:
             results.append(f"History: cleared {r['sessions_cleared']} sessions")
@@ -86,17 +92,11 @@ class FactoryResetTool(BaseTool):
         else:
             errors.append(f"Agent context wipe failed: {r['error']}")
 
-        # 5. Replace personality.txt with blank slate
-        r = _reset_personality()
-        if r["success"]:
-            results.append("personality.txt: reset to blank slate")
-        else:
-            errors.append(f"Personality reset failed: {r['error']}")
-
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        summary_lines = [f"[Factory Reset @ {timestamp}]"] + results
+        summary_lines = [f"[Scorched Earth Reset @ {timestamp}]"] + results
         if errors:
             summary_lines += ["ERRORS:"] + errors
+        summary_lines.append("Everything is gone. Onboarding fires on next turn.")
 
         return ToolResult(
             success=len(errors) == 0,
@@ -108,13 +108,23 @@ class FactoryResetTool(BaseTool):
 # ── Wipe helpers ──────────────────────────────────────────────────────────────
 
 def _nuke_chroma_dir() -> dict:
+    """
+    Delete the entire ChromaDB persist directory from disk.
+    This is the only reliable wipe — delete_collection() leaves files on disk
+    and ChromaDB will reload them from the persist dir on next connection.
+    """
     try:
         from core.rag import CHROMA_PERSIST_DIR
+
         if os.path.exists(CHROMA_PERSIST_DIR):
             shutil.rmtree(CHROMA_PERSIST_DIR)
             print(f"[Reset] ChromaDB: nuked {CHROMA_PERSIST_DIR}")
         else:
             print(f"[Reset] ChromaDB: directory didn't exist, nothing to delete")
+
+        # Recreate empty directory so RAGStore doesn't error on next init
+        os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+
         return {"success": True, "path": CHROMA_PERSIST_DIR}
     except Exception as e:
         print(f"[Reset] ChromaDB nuke error: {e}")
@@ -156,15 +166,4 @@ def _wipe_agent_context() -> dict:
         return {"success": True}
     except Exception as e:
         print(f"[Reset] Agent context wipe error: {e}")
-        return {"success": False, "error": str(e)}
-
-
-def _reset_personality() -> dict:
-    try:
-        with open(PERSONALITY_FILE, "w", encoding="utf-8") as f:
-            f.write(PERSONALITY_DEFAULT)
-        print("[Reset] personality.txt: reset to blank slate")
-        return {"success": True}
-    except Exception as e:
-        print(f"[Reset] Personality reset error: {e}")
         return {"success": False, "error": str(e)}
