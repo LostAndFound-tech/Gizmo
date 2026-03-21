@@ -19,9 +19,9 @@ from typing import Optional
 
 from core.curiosity import decay_all as curiosity_decay
 
-INACTIVITY_THRESHOLD = 60   # 15 minutes in seconds
+INACTIVITY_THRESHOLD = 20   # archive after 20 seconds of inactivity
 WINDOW_SIZE = 4                   # messages per chunk
-CHECK_INTERVAL = 60               # check every 60 seconds
+CHECK_INTERVAL = 15               # check every 15 seconds
 
 
 async def _summarize_window(
