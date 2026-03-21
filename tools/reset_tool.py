@@ -124,21 +124,23 @@ def _wipe_entity_store() -> dict:
 
 def _nuke_chroma_dir() -> dict:
     """
-    Delete the entire ChromaDB persist directory from disk.
-    This is the only reliable wipe — delete_collection() leaves files on disk
-    and ChromaDB will reload them from the persist dir on next connection.
+    Delete the entire ChromaDB persist directory and reinitialize it cleanly.
+    Just rmtree + makedirs isn't enough — ChromaDB needs to write its internal
+    SQLite schema (collections, acquire_write tables) before any RAGStore can work.
+    We force that by creating a PersistentClient immediately after recreating the dir.
     """
     try:
         from core.rag import CHROMA_PERSIST_DIR
+        import chromadb
 
         if os.path.exists(CHROMA_PERSIST_DIR):
             shutil.rmtree(CHROMA_PERSIST_DIR)
             print(f"[Reset] ChromaDB: nuked {CHROMA_PERSIST_DIR}")
-        else:
-            print(f"[Reset] ChromaDB: directory didn't exist, nothing to delete")
 
-        # Recreate empty directory so RAGStore doesn't error on next init
+        # Recreate directory and force ChromaDB to write fresh schema
         os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+        chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+        print(f"[Reset] ChromaDB: reinitialized at {CHROMA_PERSIST_DIR}")
 
         return {"success": True, "path": CHROMA_PERSIST_DIR}
     except Exception as e:
