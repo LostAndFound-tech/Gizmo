@@ -263,7 +263,7 @@ class SwitchHostTool(BaseTool):
 
         # Push UI update via server if reachable
         try:
-            from server import _connected
+            from core.push import _connected
             import json as _json
             payload = _json.dumps({
                 "type":         "context_update",

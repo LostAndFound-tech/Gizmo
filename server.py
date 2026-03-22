@@ -63,27 +63,11 @@ from websockets.server import serve
 from core.agent import agent
 from core.llm import llm
 from memory.history import get_session
+from core.push import _connected, _push_to_all
 
 HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "8765"))
 CHAT_HTML = Path(__file__).parent / "chat.html"
-
-_connected: set = set()
-
-
-async def _push_to_all(message: str) -> None:
-    """Push a message to every connected client."""
-    if not _connected:
-        print(f"[Server] Push skipped — no clients connected: {message[:60]}")
-        return
-    payload = json.dumps({"type": "token", "data": message})
-    done = json.dumps({"type": "done", "data": ""})
-    for ws in list(_connected):
-        try:
-            await ws.send(payload)
-            await ws.send(done)
-        except Exception as e:
-            print(f"[Server] Push failed for client: {e}")
 
 
 async def handler(websocket):

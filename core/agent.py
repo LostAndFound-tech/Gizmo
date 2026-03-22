@@ -389,7 +389,7 @@ class Agent:
 
                         # Get push_fn from server's _push_to_all if available
                         try:
-                            from server import _push_to_all as push_fn
+                            from core.push import _push_to_all as push_fn
                         except Exception:
                             async def push_fn(msg): print(f"[Protocols] Push: {msg}")
 
