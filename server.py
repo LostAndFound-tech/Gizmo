@@ -38,6 +38,14 @@ if _needs_reinit:
     os.makedirs(_chroma_path, exist_ok=True)
     import chromadb as _cdb
     _cdb.PersistentClient(path=_chroma_path)
+    # Ensure writable by all render processes
+    _sqlite = os.path.join(_chroma_path, "chroma.sqlite3")
+    try:
+        os.chmod(_chroma_path, 0o775)
+        if os.path.exists(_sqlite):
+            os.chmod(_sqlite, 0o664)
+    except Exception as _ce:
+        print(f"[Server] ChromaDB chmod failed (non-fatal): {_ce}")
     print("[Server] ChromaDB reinitialized cleanly")
 else:
     print("[Server] ChromaDB healthy")
