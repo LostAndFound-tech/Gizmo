@@ -35,6 +35,8 @@ from tools.correction_tool import CorrectionTool
 from tools.place_confirm_tool import PlaceConfirmTool
 from tools.reset_tool import FactoryResetTool
 from tools.search_tool import SearchTool
+from tools.teach_tool import TeachTool
+from tools.save_lesson_tool import SaveLessonTool
 # ── Tool Registry ─────────────────────────────────────────────────────────────
 TOOL_REGISTRY: dict[str, BaseTool] = {
     tool.name: tool
@@ -44,6 +46,8 @@ TOOL_REGISTRY: dict[str, BaseTool] = {
         PlaceConfirmTool(),
         FactoryResetTool(),
         SearchTool(),
+        TeachTool(),
+        SaveLessonTool()
     ]
 }
 
