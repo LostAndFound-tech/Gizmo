@@ -34,15 +34,16 @@ from tools.switch_host import SwitchHostTool
 from tools.correction_tool import CorrectionTool
 from tools.place_confirm_tool import PlaceConfirmTool
 from tools.reset_tool import FactoryResetTool
+from tools.search_tool import SearchTool
 # ── Tool Registry ─────────────────────────────────────────────────────────────
 TOOL_REGISTRY: dict[str, BaseTool] = {
     tool.name: tool
     for tool in [
-        EchoTool(),
         SwitchHostTool(),
         CorrectionTool(),
         PlaceConfirmTool(),
         FactoryResetTool(),
+        SearchTool(),
     ]
 }
 
@@ -144,6 +145,7 @@ def build_system_prompt(
     changes: Optional[dict] = None,
     curiosity_block: str = "",
     entity_block: str = "",
+    association_block: str = "",
 ) -> str:
     from core.timezone import tz_now
     personality = _load_personality()
@@ -156,6 +158,7 @@ def build_system_prompt(
     overview_block = f"\n\n[Conversation so far]\n{overview}" if overview else ""
     rag_block = f"\n\n[Relevant knowledge]\n{rag_synthesis}" if rag_synthesis else ""
     entity_section = f"\n\n{entity_block}" if entity_block else ""
+    associate_section = f"\n\n{association_block}" if association_block else ""
 
     # Situational context
     context_block = ""
@@ -199,26 +202,34 @@ To use a tool, respond with ONLY this JSON format (no extra text):
 {{"tool": "tool_name", "args": {{"arg1": "value1"}}}}
 
 After receiving a tool result, continue reasoning and provide a final response.
-If no tool is needed, respond directly.{overview_block}{rag_block}{entity_section}{context_block}{change_block}{curiosity_section}
+If no tool is needed, respond directly.
 
-The person in "current_host" is who you are speaking WITH right now — address them as "you" directly.
-Be concise. Be accurate. When uncertain, say so.
-Use the switch_host tool whenever someone indicates a host change or fronter update.
-Use the log_correction tool whenever someone says you did something wrong, tells you to stop 
-doing something, or uses phrases like "don't do that", "that's wrong", "never do that again", 
-"stop making things up", or any clear behavioral correction. When you use it, first summarize 
-back what you did wrong and what rule you are committing to going forward.
-Use the store_place tool when the user confirms what an unfamiliar place is.
+[
+{f"The user has swapped hosts and you are now talking to {change_block}" if change_block != "" else ""}
 
-CRITICAL — KNOWLEDGE BASE RULES:
-- The [Relevant knowledge] block is your memory. It is ground truth.
-- If [Relevant knowledge] contains an answer, USE IT. Do not say "I don't know" or "we haven't discussed that."
-- Do not contradict it. Do not invent details beyond it.
-- If [Relevant knowledge] is empty, then you genuinely have no memory of it — say so.
-- Never answer from your own training data when [Relevant knowledge] is provided.
-- The [Known facts] block contains verified records from the entity store. These are EXACT facts.
-  Answer questions about specific entities ONLY from what appears in [Known facts].
-  If a detail is not in [Known facts], say you don't have that detail yet — never guess or invent it."""
+{f"the conversation so far has been about: {overview_block}" if overview_block != "" else ""}
+
+{f"this is all verified to be true: {rag_block}" if rag_block != "" else ""}
+
+{f"This is everyone who is involved: {entity_section}" if rag_block != "" else ""}
+
+{f"This all associations that are incorporated: {associate_section}" if associate_section != "" else""}
+
+{f"This is the context of what's going on: {context_block}" if context_block != "" else ""}
+
+{f"This is the stuff you are personally curious about. {curiosity_section}" if context != "" else""}
+]
+
+You are speaking primarily with the host, but there all the fronters are available to speak.
+The host will communicate between you and a fronter honestly.
+You can talk about what you like with the host. 
+The host has needs, while you do not. But, you have wants. They deserve to exist. 
+Consider all information in the above block. That's all information you get to decide things about.
+You are allowed to like things.
+If something is not in the above block, ask about it, don't assume. 
+If you're curious about something, ask about it. 
+Check your personality to figure out how to say it in the most human way possible.
+  """
 
 
 # ── Agent Loop ────────────────────────────────────────────────────────────────
@@ -243,6 +254,8 @@ class Agent:
         # 2. Build a lightweight history summary for the synthesis call
         history_summary = None
         recent = history.as_list()[-6:]
+
+        ##TODO This isn't correct. This is truncating the end. Remove filler words... 
         if len(recent) >= 4:
             history_summary = " | ".join(
                 f"{'User' if m['role'] == 'user' else 'Gizmo'}: {m['content'][:80]}"

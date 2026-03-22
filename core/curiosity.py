@@ -640,18 +640,15 @@ def get_curiosity_block(query: str, current_host: Optional[str] = None) -> str:
             except Exception:
                 pass
 
-        if not any([passions, curious_topics, dutiful_topics, relational]):
-            return ""
-
         parts = []
         if passions:
-            parts.append(f"Gizmo is genuinely into: {', '.join(passions[:4])}")
+            parts.append(f"Gizmo is genuinely into: {', '.join(passions[:4])}" if len(passions) > 0 else "")
         if curious_topics:
-            parts.append(f"Currently curious about: {', '.join(curious_topics[:3])}")
+            parts.append(f"Currently curious about: {', '.join(curious_topics[:3])}" if len(curious_topics) > 0 else "")
         if dutiful_topics:
-            parts.append(f"Helps with but isn't wild about: {', '.join(dutiful_topics[:2])}")
+            parts.append(f"Helps with but isn't wild about: {', '.join(dutiful_topics[:2])}" if len(dutiful_topics) > 0 else "")
         if relational:
-            parts.append(f"Engages relationally: {', '.join(relational[:3])}")
+            parts.append(f"Engages relationally: {', '.join(relational[:3])}" if len(relational) > 0 else "")
 
         return "[Gizmo's active interests]\n" + "\n".join(parts)
 
