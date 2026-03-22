@@ -126,6 +126,16 @@ async def handler(websocket):
                         print(f"[Server] Onboarding push failed: {e}")
 
                 asyncio.ensure_future(_push_onboarding())
+
+                # Restart the server process so stale ChromaDB clients are cleared
+                # Render will automatically restart the service
+                async def _restart():
+                    await asyncio.sleep(3.0)
+                    print("[Server] Restarting process to clear stale ChromaDB connections...")
+                    import signal
+                    os.kill(os.getpid(), signal.SIGTERM)
+
+                asyncio.ensure_future(_restart())
                 continue
 
             # ── Return greeting ───────────────────────────────────────────────
