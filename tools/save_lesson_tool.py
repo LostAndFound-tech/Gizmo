@@ -1,0 +1,338 @@
+"""
+tools/save_lesson_tool.py
+Commits an active teaching session to disk.
+
+Called when:
+  - User says "save this", "save it", "we're done"         → saves as final
+  - User says "save as WIP", "we'll come back to this"     → saves as checkpoint
+
+For existing tools:  rewrites the file in-place, preserves imports and class structure.
+For new tools:       generates the file from scratch via Tool Forge's template.
+
+After saving:
+  - Live-registers the updated tool into TOOL_REGISTRY
+  - Closes the lesson in lesson_state
+  - Reports exactly what changed
+
+Args:
+  is_wip (bool)       — True if saving mid-lesson ("we'll come back to this")
+  session_id (str)    — current session
+"""
+
+import re
+import ast
+import sys
+import importlib.util
+from pathlib import Path
+
+from tools.base_tool import BaseTool, ToolResult
+
+_TOOLS_DIR = Path(__file__).parent
+_GENERATED_DIR = _TOOLS_DIR / "generated"
+
+# ── Source rewriting ──────────────────────────────────────────────────────────
+
+def _rewrite_description(source: str, new_description: str) -> str:
+    """Replace the description return value in a tool source file."""
+    escaped = new_description.replace('"', '\\"')
+    # Handle multi-line return (...)
+    new_source = re.sub(
+        r'(def description.*?return\s*\().*?(\))',
+        lambda m: m.group(1) + f'\n            "{escaped}"\n        ' + m.group(2),
+        source,
+        flags=re.DOTALL,
+    )
+    if new_source == source:
+        # Fallback: single-line return
+        new_source = re.sub(
+            r'(def description.*?return\s*)(".*?")',
+            lambda m: m.group(1) + f'"{escaped}"',
+            source,
+            flags=re.DOTALL,
+        )
+    return new_source
+
+
+def _rewrite_run_body(source: str, behavior: str, tool_name: str) -> str:
+    """
+    Regenerate the run() body from the behavior spec.
+    Preserves the method signature; replaces only the body.
+    """
+    llm_keywords = {"generat", "llm", "respond", "write", "story", "tell",
+                    "explain", "summar", "translat", "compos", "craft",
+                    "describ", "answer", "creat"}
+    is_llm_tool = any(kw in behavior.lower() for kw in llm_keywords)
+
+    escaped = behavior.replace('"', '\\"').replace("'", "\\'")
+
+    if is_llm_tool:
+        new_body = (
+            f'        from core.llm import llm as _llm\n'
+            f'        prompt = (\n'
+            f'            "You are Gizmo. {escaped}\\n\\n"\n'
+            f'            + "\\n".join(f"{{k}}: {{v}}" for k, v in kwargs.items() if v)\n'
+            f'        )\n'
+            f'        result = await _llm.generate([{{"role": "user", "content": prompt}}])\n'
+            f'        return ToolResult(success=True, output=result)\n'
+        )
+    else:
+        new_body = f'        return ToolResult(success=True, output="{escaped}")\n'
+
+    # Replace the run() body while preserving the signature line
+    new_source = re.sub(
+        r'(async def run\(self.*?\):[ \t]*\n)(.+?)(\n    (?:@|def |async def |\Z))',
+        lambda m: m.group(1) + new_body + m.group(3),
+        source,
+        flags=re.DOTALL,
+    )
+
+    # If regex didn't match (simple file), append the body after signature
+    if new_source == source:
+        new_source = re.sub(
+            r'(async def run\(self.*?\):)(.*?)(\n(?=    (?:def |async def |@|\Z)))',
+            lambda m: m.group(1) + '\n' + new_body,
+            source,
+            flags=re.DOTALL,
+        )
+
+    return new_source
+
+
+def _generate_new_file(lesson: dict) -> str:
+    """Build a complete tool file from scratch from lesson data."""
+    tool_name = lesson["tool_name"]
+    cls_name = "".join(w.capitalize() for w in tool_name.split("_")) + "Tool"
+    description = lesson["description"]
+    behavior = lesson["behavior"]
+
+    escaped_desc = description.replace('"', '\\"')
+
+    llm_keywords = {"generat", "llm", "respond", "write", "story", "tell",
+                    "explain", "summar", "translat", "compos", "craft",
+                    "describ", "answer", "creat"}
+    is_llm_tool = any(kw in behavior.lower() for kw in llm_keywords)
+    escaped_beh = behavior.replace('"', '\\"').replace("'", "\\'")
+
+    if is_llm_tool:
+        run_body = (
+            f'        from core.llm import llm as _llm\n'
+            f'        prompt = (\n'
+            f'            "You are Gizmo. {escaped_beh}\\n\\n"\n'
+            f'            + "\\n".join(f"{{k}}: {{v}}" for k, v in kwargs.items() if v)\n'
+            f'        )\n'
+            f'        result = await _llm.generate([{{"role": "user", "content": prompt}}])\n'
+            f'        return ToolResult(success=True, output=result)\n'
+        )
+    else:
+        run_body = f'        return ToolResult(success=True, output="{escaped_beh}")\n'
+
+    wip_note = "# ⚠️  WIP — lesson not complete\n" if lesson.get("is_wip") else ""
+
+    return f'''"""
+tools/generated/{tool_name}.py
+{wip_note}Auto-generated by Teach + Save Lesson.
+Lesson rounds: {len(lesson.get("rounds", []))}
+"""
+
+from tools.base_tool import BaseTool, ToolResult
+
+
+class {cls_name}(BaseTool):
+
+    @property
+    def name(self) -> str:
+        return "{tool_name}"
+
+    @property
+    def description(self) -> str:
+        return (
+            "{escaped_desc}"
+        )
+
+    async def run(self, session_id: str = "", **kwargs) -> ToolResult:
+{run_body}
+'''
+
+
+def _validate_syntax(source: str) -> tuple[bool, str]:
+    try:
+        ast.parse(source)
+        return True, ""
+    except SyntaxError as e:
+        return False, str(e)
+
+
+def _live_register(filepath: Path, tool_name: str) -> tuple[bool, str]:
+    try:
+        from tools.base_tool import BaseTool as _BaseTool
+        module_key = f"tools.generated.{tool_name}"
+        # Force reload
+        if module_key in sys.modules:
+            del sys.modules[module_key]
+        spec = importlib.util.spec_from_file_location(module_key, filepath)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_key] = module
+        spec.loader.exec_module(module)
+
+        tool_class = None
+        for attr in dir(module):
+            obj = getattr(module, attr)
+            if isinstance(obj, type) and issubclass(obj, _BaseTool) and obj is not _BaseTool:
+                tool_class = obj
+                break
+
+        if not tool_class:
+            return False, "No BaseTool subclass found after rewrite."
+
+        instance = tool_class()
+        from core import agent as agent_module
+        agent_module.TOOL_REGISTRY[instance.name] = instance
+        return True, instance.name
+
+    except Exception as e:
+        return False, str(e)
+
+
+# ── The Tool ──────────────────────────────────────────────────────────────────
+
+class SaveLessonTool(BaseTool):
+
+    @property
+    def name(self) -> str:
+        return "save_lesson"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Saves the current teaching session — commits the tool to disk and live-registers it. "
+            "TRIGGERS: 'save this', 'save it', 'we're done', 'lock it in', "
+            "'save as WIP', 'we'll come back to this', 'save for now'. "
+            "Only call this when there is an active lesson (teach tool was used). "
+            "Args: "
+            "is_wip (bool) — True if saving a work-in-progress. "
+            "session_id (str) — current session."
+        )
+
+    async def run(
+        self,
+        is_wip: bool = False,
+        session_id: str = "",
+        **kwargs,
+    ) -> ToolResult:
+
+        from tools.lesson_state import get_lesson, close_lesson
+
+        lesson = get_lesson(session_id)
+        if not lesson:
+            return ToolResult(
+                success=False,
+                output=(
+                    "No active lesson to save. "
+                    "Start one with 'let's work on [tool]'."
+                ),
+            )
+
+        lesson["is_wip"] = is_wip
+        tool_name = lesson["tool_name"]
+        source_file = lesson.get("source_file")
+
+        # ── Existing tool: rewrite in place ───────────────────────────────────
+        if source_file and Path(source_file).exists():
+            path = Path(source_file)
+            original = path.read_text(encoding="utf-8")
+            rewritten = original
+
+            if lesson.get("description"):
+                rewritten = _rewrite_description(rewritten, lesson["description"])
+            if lesson.get("behavior"):
+                rewritten = _rewrite_run_body(rewritten, lesson["behavior"], tool_name)
+
+            valid, err = _validate_syntax(rewritten)
+            if not valid:
+                return ToolResult(
+                    success=False,
+                    output=(
+                        f"Rewritten source has a syntax error: {err}\n"
+                        f"Original file is untouched. Keep working on it."
+                    ),
+                )
+
+            path.write_text(rewritten, encoding="utf-8")
+
+            # For generated tools, live-register. For core tools, flag restart.
+            is_generated = "generated" in str(path)
+            if is_generated:
+                ok, reg_result = _live_register(path, tool_name)
+                reg_note = (
+                    f"Live-registered. Active immediately."
+                    if ok else
+                    f"Saved but live-registration failed: {reg_result}. Will reload on restart."
+                )
+            else:
+                reg_note = (
+                    "⚠️  Core tool updated. Changes take effect on next restart "
+                    "(core tools can't hot-reload safely)."
+                )
+
+            close_lesson(session_id, status="saved", is_wip=is_wip)
+
+            wip_note = " (marked as WIP — we can keep working on it)" if is_wip else ""
+            return ToolResult(
+                success=True,
+                output=(
+                    f"{'WIP checkpoint saved' if is_wip else 'Saved'}: **{tool_name}**{wip_note}\n"
+                    f"File: {path}\n"
+                    f"{reg_note}\n\n"
+                    f"Description now reads:\n\"{lesson['description'][:200]}\""
+                ),
+                data={"tool_name": tool_name, "filepath": str(path), "is_wip": is_wip},
+            )
+
+        # ── New tool: generate from scratch ───────────────────────────────────
+        else:
+            if not lesson.get("description"):
+                return ToolResult(
+                    success=False,
+                    output=(
+                        "This new tool doesn't have a description yet. "
+                        "Let's finish at least the description and behavior before saving."
+                    ),
+                )
+
+            source = _generate_new_file(lesson)
+            valid, err = _validate_syntax(source)
+            if not valid:
+                return ToolResult(
+                    success=False,
+                    output=f"Generated source has a syntax error: {err}. Keep refining.",
+                )
+
+            _GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+            init = _GENERATED_DIR / "__init__.py"
+            if not init.exists():
+                init.write_text("# Auto-generated tool package\n")
+
+            filepath = _GENERATED_DIR / f"{tool_name}.py"
+            filepath.write_text(source, encoding="utf-8")
+
+            ok, reg_result = _live_register(filepath, tool_name)
+            reg_note = (
+                "Live-registered. Active immediately."
+                if ok else
+                f"Saved but live-registration failed: {reg_result}. Will reload on restart."
+            )
+
+            close_lesson(session_id, status="saved", is_wip=is_wip)
+
+            wip_note = " (WIP — we can keep teaching it)" if is_wip else ""
+            return ToolResult(
+                success=True,
+                output=(
+                    f"{'WIP checkpoint saved' if is_wip else 'New tool saved'}: **{tool_name}**{wip_note}\n"
+                    f"File: tools/generated/{tool_name}.py\n"
+                    f"{reg_note}\n\n"
+                    f"Rounds of teaching: {len(lesson.get('rounds', []))}\n"
+                    f"Description:\n\"{lesson['description'][:200]}\""
+                ),
+                data={"tool_name": tool_name, "filepath": str(filepath), "is_wip": is_wip},
+            )
