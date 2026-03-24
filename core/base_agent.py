@@ -165,11 +165,18 @@ class BaseAgent(ABC):
         user_message: str,
         history: ConversationHistory,
         session_id: str = "",
+        use_rag: bool = True,
         context: Optional[dict] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Main agent entry point. Yields response tokens for streaming.
         """
+        # Allow caller to override RAG for this turn
+        if not use_rag:
+            self._rag_override = False
+        else:
+            self._rag_override = None  # defer to should_use_rag()
+
         # Build system prompt — delegated to subclass
         system_prompt = await self.build_system_prompt(
             user_message=user_message,

@@ -534,6 +534,8 @@ class ConversationAgent(BaseAgent):
         return response_text
 
     def should_use_rag(self, user_message: str, context: Optional[dict]) -> bool:
+        if getattr(self, '_rag_override', None) is False:
+            return False
         return True
 
 
