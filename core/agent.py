@@ -130,6 +130,8 @@ def _detect_mentioned_headmates(
     mentioned = []
     for name in known:
         if name not in already and name in message_lower:
+            if name == "you":
+                pass
             mentioned.append(name)
 
     if mentioned:

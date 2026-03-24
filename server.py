@@ -60,7 +60,7 @@ from pathlib import Path
 import websockets
 from websockets.server import serve
 
-from core.agent import agent
+from core.conversation_agent import agent
 from core.llm import llm
 from memory.history import get_session
 from core.push import _connected, _push_to_all
