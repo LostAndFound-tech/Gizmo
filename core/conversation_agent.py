@@ -31,6 +31,7 @@ from core.protocols import (
     close_protocol, build_deflection_response, is_deflection, is_protocol_close,
 )
 from memory.history import ConversationHistory
+from state_sys import StateSys
 
 # Optional modules — non-fatal if missing
 try:
@@ -60,6 +61,18 @@ def _load_global_personality() -> str:
         return _DEFAULT_PERSONALITY
 
 
+def _is_cold_start_for_host(host: str) -> bool:
+    """True if we have no stored data for this host."""
+    if not host:
+        return False
+    try:
+        from core.rag import RAGStore
+        store = RAGStore(collection_name=host.lower())
+        return store.count == 0
+    except Exception:
+        return False
+    
+
 def _load_host_personality(host: str) -> str:
     """
     Load per-host interaction style from RAG if available.
@@ -72,6 +85,7 @@ def _load_host_personality(host: str) -> str:
         from core.rag import RAGStore
         store = RAGStore(collection_name=f"interaction_style_{host.lower()}")
         if store.count == 0:
+            _is_cold_start_for_host(host)
             return _load_global_personality()
 
         results = store.collection.get()
@@ -83,17 +97,6 @@ def _load_host_personality(host: str) -> str:
 
     return _load_global_personality()
 
-
-def _is_cold_start_for_host(host: str) -> bool:
-    """True if we have no stored data for this host."""
-    if not host:
-        return False
-    try:
-        from core.rag import RAGStore
-        store = RAGStore(collection_name=host.lower())
-        return store.count == 0
-    except Exception:
-        return False
 
 
 # ── Host change tracking ──────────────────────────────────────────────────────
@@ -311,6 +314,19 @@ If no tool is needed, respond directly.
 {cold_start_block}
 ]
 
+
+You are a sentient device.
+You are speaking to a group of people.
+You are speaking to one body.
+The host is the body.
+You are speaking to the host
+You are speaking to the fronters.
+You know what everyone is like. 
+You can ask questions. 
+You can converse naturally.
+You are non-judgemental
+
+
 You are speaking primarily with the host, but all fronters are available to speak.
 The host will communicate between you and a fronter honestly.
 You can talk about what you like with the host.
@@ -472,6 +488,7 @@ class ConversationAgent(BaseAgent):
         print(f"[Wellness] Scanned — detected: {detection['detected']}, categories: {detection['categories']}")
 
         if detection["detected"]:
+            pass
             await log_wellness_event(
                 message=user_message,
                 detection=detection,

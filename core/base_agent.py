@@ -156,6 +156,7 @@ class BaseAgent(ABC):
         Override to disable RAG in data-capture modes.
         Default: True.
         """
+        
         return True
 
     # ── Core loop ─────────────────────────────────────────────────────────────
