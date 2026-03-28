@@ -31,7 +31,6 @@ from core.protocols import (
     close_protocol, build_deflection_response, is_deflection, is_protocol_close,
 )
 from memory.history import ConversationHistory
-from state_sys import StateSys
 
 # Optional modules — non-fatal if missing
 try:
