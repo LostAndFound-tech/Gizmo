@@ -353,14 +353,38 @@ class Archivist:
         """
         Receive a message, classify it, detect host changes, update the
         conversation field, save to history, and return a structured brief.
+
+        Host identification and fronter presence are detected here via
+        host_tracker — context passed in is the server-side state, which
+        gets updated in-place if the message contains identification signals.
         """
         t_start = time.monotonic()
         now = time.time()
 
         ctx = context or {}
+
+        # ── Host tracker: scan message for identification signals ──────────────
+        # Do this BEFORE reading headmate/fronters from ctx, so if someone
+        # identifies themselves in this very message, the brief reflects it.
+        try:
+            from core.host_tracker import host_tracker
+            from core.ego import _get_known_headmates
+            known_headmates = _get_known_headmates()
+            tracker_changes = host_tracker.process_message(
+                session_id, message, known_headmates
+            )
+            # Pull updated context after tracker has processed the message
+            updated_ctx = host_tracker.get_context(session_id)
+            # Preserve timezone from original ctx if tracker doesn't have it
+            if not updated_ctx.get("timezone") and ctx.get("timezone"):
+                updated_ctx["timezone"] = ctx["timezone"]
+            ctx = updated_ctx
+        except Exception as e:
+            log_error("Archivist", "host_tracker processing failed", exc=e)
+
         headmate = ctx.get("current_host") or None
         fronters = list(ctx.get("fronters") or [])
-        if headmate and headmate not in fronters:
+        if headmate and headmate not in [f.lower() for f in fronters]:
             fronters.insert(0, headmate)
 
         # Detect host/fronter changes BEFORE updating stored context
@@ -373,9 +397,11 @@ class Archivist:
         question   = bool(_QUESTION_RE.search(message.strip()))
         correction = bool(_CORRECTION_RE.search(message))
 
-        # Update conversation field
+        # Update conversation field — all active fronters warm their collections
         conv_field = self._get_field(session_id)
         conv_field.update(topics=topics, participant=headmate)
+        for f in fronters:
+            conv_field.participants.add(f.lower())
         conv_field.last_register = register
         snapshot = conv_field.snapshot()
 

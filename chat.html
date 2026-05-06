@@ -58,10 +58,17 @@
   #status-dot.connected { background: #4caf50; }
   #status-dot.thinking  { background: #ff9800; }
 
+  #host-badge {
+    font-size: 11px;
+    color: #555;
+    margin-left: 8px;
+    font-style: italic;
+  }
+
   #mood-badge {
     font-size: 11px;
     color: #666;
-    margin-left: 8px;
+    margin-left: 4px;
   }
 
   #messages {
@@ -137,49 +144,8 @@
     align-items: flex-end;
   }
 
-  #input-wrap {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  #name-row {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-  }
-
-  .name-field {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .name-field label { font-size: 11px; color: #555; white-space: nowrap; }
-
-  .name-field input {
-    background: #1a1a1a;
-    border: 1px solid #2a2a2a;
-    border-radius: 8px;
-    color: #e0e0e0;
-    padding: 4px 10px;
-    font-size: 12px;
-    width: 120px;
-    outline: none;
-    font-family: inherit;
-  }
-
-  .name-field input:focus { border-color: #444; }
-  .name-field input::placeholder { color: #444; }
-
-  .name-divider {
-    width: 1px;
-    height: 16px;
-    background: #2a2a2a;
-  }
-
   #message-input {
+    flex: 1;
     background: #1a1a1a;
     border: 1px solid #2a2a2a;
     border-radius: 12px;
@@ -215,7 +181,6 @@
 
   #send-btn:hover:not(:disabled) { background: #1e4a78; }
   #send-btn:disabled { opacity: 0.4; cursor: default; }
-
   #send-btn svg { width: 18px; height: 18px; }
 
   ::-webkit-scrollbar { width: 4px; }
@@ -231,6 +196,7 @@
   <div id="status">
     <div id="status-dot"></div>
     <span id="status-text">connecting...</span>
+    <span id="host-badge"></span>
     <span id="mood-badge"></span>
   </div>
 </header>
@@ -238,25 +204,12 @@
 <div id="messages"></div>
 
 <div id="input-area">
-  <div id="input-wrap">
-    <div id="name-row">
-      <div class="name-field">
-        <label for="host-input">host:</label>
-        <input id="host-input" type="text" placeholder="who's driving" autocomplete="off">
-      </div>
-      <div class="name-divider"></div>
-      <div class="name-field">
-        <label for="fronters-input">fronters:</label>
-        <input id="fronters-input" type="text" placeholder="others present" autocomplete="off">
-      </div>
-    </div>
-    <textarea
-      id="message-input"
-      placeholder="say something..."
-      rows="1"
-      autocomplete="off"
-    ></textarea>
-  </div>
+  <textarea
+    id="message-input"
+    placeholder="say something..."
+    rows="1"
+    autocomplete="off"
+  ></textarea>
   <button id="send-btn" disabled title="Send">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -266,23 +219,23 @@
 </div>
 
 <script>
-  const messagesEl = document.getElementById('messages');
-  const inputEl    = document.getElementById('message-input');
-  const sendBtn    = document.getElementById('send-btn');
-  const statusDot  = document.getElementById('status-dot');
-  const statusText = document.getElementById('status-text');
-  const moodBadge  = document.getElementById('mood-badge');
-  const hostEl     = document.getElementById('host-input');
-  const frontersEl = document.getElementById('fronters-input');
+  const messagesEl  = document.getElementById('messages');
+  const inputEl     = document.getElementById('message-input');
+  const sendBtn     = document.getElementById('send-btn');
+  const statusDot   = document.getElementById('status-dot');
+  const statusText  = document.getElementById('status-text');
+  const hostBadge   = document.getElementById('host-badge');
+  const moodBadge   = document.getElementById('mood-badge');
 
-  const SESSION_ID = crypto.randomUUID();
-  const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
-  const CLIENT_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const SESSION_ID  = crypto.randomUUID();
+  const WS_URL      = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+  const CLIENT_TZ   = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
-  let ws = null;
-  let currentBubble = null;
-  let typingEl = null;
+  let ws             = null;
+  let currentBubble  = null;
+  let typingEl       = null;
   let reconnectTimer = null;
+  let tzSent         = false;   // send timezone once on first message
 
   function connect() {
     ws = new WebSocket(WS_URL);
@@ -317,22 +270,17 @@
         scrollBottom();
       }
 
-      else if (msg.type === 'context_update') {
-        if (msg.current_host !== undefined) hostEl.value = msg.current_host || '';
-        if (msg.fronters !== undefined) {
-          frontersEl.value = Array.isArray(msg.fronters) ? msg.fronters.join(', ') : '';
-        }
-      }
-
-      else if (msg.type === 'reload') {
-        location.reload();
-      }
-
       else if (msg.type === 'done') {
         currentBubble = null;
         removeTyping();
         setStatus('connected', 'connected');
         sendBtn.disabled = false;
+
+        // Update host badge if server reports who's fronting
+        if (msg.host) {
+          hostBadge.textContent = msg.host;
+        }
+
         if (msg.mood && msg.mood.emotion && msg.mood.emotion !== 'Neutral') {
           moodBadge.textContent = `${msg.mood.emotion.toLowerCase()} ${Math.round(msg.mood.intensity * 100)}%`;
         } else {
@@ -354,40 +302,27 @@
     const text = inputEl.value.trim();
     if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-    const host = hostEl.value.trim();
-    const frontersRaw = frontersEl.value.trim();
-    const frontersList = frontersRaw
-      ? frontersRaw.split(',').map(f => f.trim()).filter(Boolean)
-      : [];
-
-    addMessage('user', text, host || null);
+    addMessage('user', text);
     inputEl.value = '';
     inputEl.style.height = 'auto';
     sendBtn.disabled = true;
     setStatus('thinking', 'thinking...');
     showTyping();
 
-    const context = { timezone: CLIENT_TZ };
-    if (host) context.current_host = host;
-    if (frontersList.length) context.fronters = frontersList;
+    const payload = { message: text, session_id: SESSION_ID };
 
-    ws.send(JSON.stringify({
-      message: text,
-      session_id: SESSION_ID,
-      context,
-    }));
+    // Send timezone once on first message — server stores it
+    if (!tzSent) {
+      payload.timezone = CLIENT_TZ;
+      tzSent = true;
+    }
+
+    ws.send(JSON.stringify(payload));
   }
 
-  function addMessage(role, text, label) {
+  function addMessage(role, text) {
     const wrap = document.createElement('div');
     wrap.className = `msg ${role}`;
-
-    if (label && role === 'user') {
-      const meta = document.createElement('div');
-      meta.className = 'msg-meta';
-      meta.textContent = label;
-      wrap.appendChild(meta);
-    }
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';

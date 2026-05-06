@@ -291,17 +291,23 @@ def _get_mention_count(name: str) -> int:
 
 
 # ── Pending entity questions ──────────────────────────────────────────────────
-# Maps session_id → list of names being asked about
+# Maps session_id → {names: list, llm_failures: int}
 
-_pending_entity_questions: dict[str, list[str]] = {}
+_pending_entity_questions: dict[str, dict] = {}
+
+_LLM_FAILURE_LIMIT = 2  # after this many failures, skip LLM and ask directly
 
 
 # ── Heuristic confidence scoring ─────────────────────────────────────────────
 
-# Pet indicators
+# Pet indicators — includes common breed names and pet-specific descriptors
 _PET_RE = re.compile(
-    r"\b(dog|cat|bird|fish|rabbit|hamster|pet|puppy|kitten|pup|"
-    r"rescue|shelter|adopted|walks?|fetches?|barks?|meows?|purrs?)\b",
+    r"\b(dog|cat|bird|fish|rabbit|hamster|pet|puppy|kitten|pup|pooch|"
+    r"rescue|shelter|adopted|walks?|fetches?|barks?|meows?|purrs?|"
+    r"pitbull|pit bull|labrador|golden retriever|husky|poodle|beagle|"
+    r"bulldog|chihuahua|dachshund|corgi|rottweiler|doberman|"
+    r"german shepherd|border collie|tabby|siamese|persian|"
+    r"pupper|doggo|floof|woof)\b",
     re.IGNORECASE,
 )
 
@@ -734,10 +740,13 @@ class Ego:
 
         # ── Step 1: Check for pending entity question response ────────────────
         if session_id in _pending_entity_questions:
-            pending_names = _pending_entity_questions[session_id]
+            pending = _pending_entity_questions[session_id]
+            pending_names = pending["names"]
+            llm_failures  = pending.get("llm_failures", 0)
             message = brief.message
 
-            use_llm = _should_use_llm(pending_names, message)
+            # If LLM has failed too many times, skip it and ask directly
+            use_llm = _should_use_llm(pending_names, message) and llm_failures < _LLM_FAILURE_LIMIT
 
             if use_llm:
                 log_event("Ego", "ENTITY_PARSE_LLM",
@@ -747,28 +756,42 @@ class Ego:
                 )
                 parsed = await _llm_parse_entity_response(pending_names, message)
             else:
-                # Heuristic parse — single name, high confidence
-                name = pending_names[0]
-                entity_type, confidence = _heuristic_classify(name, message)
-                if entity_type is None:
-                    if _YES_RE.match(message):
-                        entity_type = "headmate"
-                    elif _NO_RE.match(message):
-                        entity_type = "external"
-                parsed = [{"name": name, "type": entity_type}] if entity_type else []
-                log_event("Ego", "ENTITY_PARSE_HEURISTIC",
-                    session=session_id[:8],
-                    name=name,
-                    type=entity_type,
-                    confidence=confidence,
-                )
+                # Heuristic parse
+                if len(pending_names) == 1:
+                    name = pending_names[0]
+                    entity_type, confidence = _heuristic_classify(name, message)
+                    if entity_type is None:
+                        if _YES_RE.match(message):
+                            entity_type = "headmate"
+                        elif _NO_RE.match(message):
+                            entity_type = "external"
+                    parsed = [{"name": name, "type": entity_type}] if entity_type else []
+                    log_event("Ego", "ENTITY_PARSE_HEURISTIC",
+                        session=session_id[:8],
+                        name=name,
+                        type=entity_type,
+                        llm_failures=llm_failures,
+                    )
+                else:
+                    parsed = []  # can't heuristic multiple names reliably
 
-            # None = LLM failed or returned empty — clear pending, ask explicitly
+            # None = LLM failed — increment counter, ask explicitly this turn
             if parsed is None:
-                del _pending_entity_questions[session_id]
+                new_failures = llm_failures + 1
+                _pending_entity_questions[session_id] = {
+                    "names": pending_names,
+                    "llm_failures": new_failures,
+                }
                 entity_question = _build_entity_question(pending_names)
-                _pending_entity_questions[session_id] = pending_names  # re-queue for next answer
                 log_event("Ego", "ENTITY_PARSE_FALLBACK_TO_QUESTION",
+                    session=session_id[:8],
+                    names=pending_names,
+                    llm_failures=new_failures,
+                )
+            elif not parsed:
+                # Empty list — heuristics couldn't classify, ask again
+                entity_question = _build_entity_question(pending_names)
+                log_event("Ego", "ENTITY_PARSE_INCONCLUSIVE",
                     session=session_id[:8],
                     names=pending_names,
                 )
@@ -794,7 +817,10 @@ class Ego:
                 # Remove resolved, keep unresolved pending
                 remaining = [n for n in pending_names if n.lower() not in resolved_names]
                 if remaining:
-                    _pending_entity_questions[session_id] = remaining
+                    _pending_entity_questions[session_id] = {
+                        "names": remaining,
+                        "llm_failures": 0,
+                    }
                     log_event("Ego", "ENTITY_QUESTION_PARTIAL",
                         session=session_id[:8],
                         resolved=list(resolved_names),
@@ -844,7 +870,10 @@ class Ego:
                         )
 
                 if names_to_ask:
-                    _pending_entity_questions[session_id] = names_to_ask
+                    _pending_entity_questions[session_id] = {
+                        "names": names_to_ask,
+                        "llm_failures": 0,
+                    }
                     entity_question = _build_entity_question(names_to_ask)
                     log_event("Ego", "ENTITY_QUESTION_QUEUED",
                         names=names_to_ask,
