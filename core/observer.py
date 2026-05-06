@@ -98,7 +98,7 @@ def _save_entity(name: str, entity_type: str, data: dict) -> None:
     try:
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{name.lower()}.json").write_text(
-            json.dumps(data, indent=2), encoding="utf-8"
+            json.dumps(data, indent=2), encoding="utf-8"#hds
         )
     except Exception as e:
         log_error("Observer", f"failed to save {entity_type} file for {name}", exc=e)

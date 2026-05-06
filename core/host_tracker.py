@@ -95,7 +95,7 @@ _DEPARTURE_PATTERNS = [
     ),
 ]
 
-# Words that look like names but aren't
+# Words that look like names in "I'm [word]" constructions but aren't
 _NOT_NAMES = {
     "I", "Me", "My", "We", "Us", "You", "It", "He", "She", "They",
     "The", "A", "An", "And", "But", "Or", "So", "Ok", "Okay",
@@ -103,6 +103,18 @@ _NOT_NAMES = {
     "Gizmo", "Just", "Still", "Here", "There", "Back", "Out",
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
     "Saturday", "Sunday", "Today", "Tomorrow", "Yesterday",
+    # Common adjectives/states that follow "I'm"
+    "Curious", "Excited", "Tired", "Happy", "Sad", "Good", "Fine",
+    "Great", "Okay", "Bad", "Bored", "Anxious", "Stressed", "Ready",
+    "Sure", "Sorry", "Glad", "Worried", "Nervous", "Scared", "Lost",
+    "Here", "Back", "Home", "Done", "Free", "Busy", "Late", "Early",
+    "Hungry", "Tired", "Sick", "Well", "Better", "Worse", "New",
+    "Old", "Young", "Big", "Small", "Right", "Wrong", "Different",
+    "Thinking", "Working", "Trying", "Going", "Coming", "Leaving",
+    "Serious", "Kidding", "Joking", "Playing", "Watching", "Listening",
+    "Confused", "Surprised", "Shocked", "Impressed", "Interested",
+    "Distressed", "Overwhelmed", "Frustrated", "Annoyed", "Angry",
+    "Positive", "Neutral", "Negative", "Elevated", "Subdued",
 }
 
 
@@ -290,17 +302,28 @@ class HostTracker:
             match = pattern.search(message)
             if match:
                 name = _clean_name(match.group(1))
-                if name and (
-                    name.lower() in known_headmates
-                    or not known_headmates  # no files yet — trust the statement
-                ):
+                if not name:
+                    continue
+
+                # Only accept if:
+                # 1. It's a known headmate, OR
+                # 2. No headmate files exist yet (cold start — trust explicit statements)
+                #    AND the original message had it capitalized (proper noun signal)
+                name_is_known = name.lower() in known_headmates
+                cold_start = not known_headmates
+                was_capitalized = bool(re.search(
+                    rf"\b{re.escape(match.group(1))}\b", message
+                ) and match.group(1)[0].isupper())
+
+                if name_is_known or (cold_start and was_capitalized):
                     changed = state.set_host(name, confidence=1.0)
                     if changed:
                         changes["host_identified"] = name
                         log_event("HostTracker", "HOST_IDENTIFIED",
                             session=session_id[:8],
                             name=name,
-                            pattern=pattern.pattern[:40],
+                            known=name_is_known,
+                            cold_start=cold_start,
                         )
                     break  # one identification per message
 
@@ -309,6 +332,7 @@ class HostTracker:
             for match in pattern.finditer(message):
                 names = _extract_names_from_match(match.group(1))
                 for name in names:
+                    # Only add as fronter if known headmate or cold start
                     if name.lower() in known_headmates or not known_headmates:
                         added = state.add_fronters([name])
                         changes["fronters_added"].extend(added)
