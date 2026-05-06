@@ -410,7 +410,35 @@ class Agent:
             response_words=len(response_text.split()),
         )
 
-        # ── 6. Drain pending insights ─────────────────────────────────────────
+        # ── 6. Reflection check ───────────────────────────────────────────────
+        # Fire if pressure gauge crossed threshold or host just switched
+        host_switched = brief.host_changed
+        try:
+            from core.emotion_tracker import emotion_tracker
+            from core.reflector import reflector
+
+            pressure_crossed = emotion_tracker.should_reflect(session_id)
+            if pressure_crossed or host_switched:
+                emotion_tracker.reset_pressure(session_id)
+                current_state  = emotion_tracker.current_state(session_id)
+                arc_summary    = emotion_tracker.ego_block(session_id)
+
+                asyncio.ensure_future(
+                    reflector.check(
+                        session_id=session_id,
+                        history=history,
+                        fronters=list(ctx.get("fronters") or []),
+                        current_state=current_state,
+                        arc_summary=arc_summary,
+                        llm=llm,
+                        push_fn=push,
+                        host_switch=host_switched,
+                    )
+                )
+        except Exception as e:
+            log_error("Agent", "reflection check failed", exc=e)
+
+        # ── 7. Drain pending insights ─────────────────────────────────────────
         await self._drain_pending(session_id)
 
     async def _drain_pending(self, session_id: str) -> None:

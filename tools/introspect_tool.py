@@ -36,12 +36,13 @@ from pathlib import Path
 from tools.base_tool import BaseTool, ToolResult
 import json
 
-_BASE_DIR        = Path(__file__).parent.parent
-_PERSONALITY_DIR = _BASE_DIR / "personality"
+import os
+
+_PERSONALITY_DIR = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
 _HEADMATES_DIR   = _PERSONALITY_DIR / "headmates"
 _EXTERNAL_DIR    = _PERSONALITY_DIR / "external"
 _PETS_DIR        = _PERSONALITY_DIR / "pets"
-_SEED_FILE       = _BASE_DIR / "personality.txt"
+_SEED_FILE       = _PERSONALITY_DIR / "personality.txt"
 _RULES_FILE      = _PERSONALITY_DIR / "rules.json"
 
 

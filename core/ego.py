@@ -47,12 +47,13 @@ if TYPE_CHECKING:
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-_BASE_DIR        = Path(__file__).parent.parent
-_PERSONALITY_DIR = _BASE_DIR / "personality"
+import os
+
+_PERSONALITY_DIR = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
 _HEADMATES_DIR   = _PERSONALITY_DIR / "headmates"
 _EXTERNAL_DIR    = _PERSONALITY_DIR / "external"
 _PETS_DIR        = _PERSONALITY_DIR / "pets"
-_SEED_FILE       = _BASE_DIR / "personality.txt"
+_SEED_FILE       = _PERSONALITY_DIR / "personality.txt"
 _RULES_FILE      = _PERSONALITY_DIR / "rules.json"
 
 _EXTERNAL_MENTION_THRESHOLD = 2   # mentions before asking about unknown name
@@ -682,6 +683,10 @@ KNOWLEDGE RULES:
             f"  {entity_question}\n"
             f"  Keep it casual. One sentence. Don't make it a big deal."
         )
+
+    # Emotion arc — real-time read of the session's emotional state
+    if brief.emotion_arc_block:
+        prompt += f"\n\n{brief.emotion_arc_block}"
 
     # New entities confirmed
     if new_entities:

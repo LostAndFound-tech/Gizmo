@@ -38,8 +38,9 @@ from typing import Optional
 
 from core.log import log, log_event, log_error
 
-_BASE_DIR        = Path(__file__).parent.parent
-_PERSONALITY_DIR = _BASE_DIR / "personality"
+import os
+
+_PERSONALITY_DIR = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
 _HEADMATES_DIR   = _PERSONALITY_DIR / "headmates"
 _EXTERNAL_DIR    = _PERSONALITY_DIR / "external"
 _PETS_DIR        = _PERSONALITY_DIR / "pets"
@@ -98,7 +99,7 @@ def _save_entity(name: str, entity_type: str, data: dict) -> None:
     try:
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{name.lower()}.json").write_text(
-            json.dumps(data, indent=2), encoding="utf-8"#hds
+            json.dumps(data, indent=2), encoding="utf-8"
         )
     except Exception as e:
         log_error("Observer", f"failed to save {entity_type} file for {name}", exc=e)

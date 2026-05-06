@@ -162,6 +162,12 @@ async def start_background_services():
         print("[Server] Reminder checker started")
     except Exception as e:
         print(f"[Server] Reminder checker failed: {e}")
+    try:
+        from core.personality_sync import start_personality_sync_loop
+        start_personality_sync_loop(llm, loop=loop)
+        print("[Server] Personality sync loop started")
+    except Exception as e:
+        print(f"[Server] Personality sync loop failed: {e}")
 
 
 async def _drain_reminders(queue):

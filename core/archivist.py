@@ -217,6 +217,12 @@ class Brief:
     fronters_joined:    list[str] = field(default_factory=list)
     fronters_left:      list[str] = field(default_factory=list)
 
+    # Emotional state — populated by Archivist via emotion_tracker
+    valence:            float = 0.0
+    intensity:          float = 0.2
+    chaos:              float = 0.0
+    emotion_arc_block:  str   = ""   # pre-formatted for Ego's system prompt
+
     def to_dict(self) -> dict:
         return {
             "message":            self.message,
@@ -397,6 +403,22 @@ class Archivist:
         question   = bool(_QUESTION_RE.search(message.strip()))
         correction = bool(_CORRECTION_RE.search(message))
 
+        # ── Emotion tracking ──────────────────────────────────────────────────
+        emotion_point = None
+        try:
+            from core.emotion_tracker import emotion_tracker
+            primary_topic = topics[0] if topics else "general"
+            emotion_point = emotion_tracker.record(
+                session_id=session_id,
+                message=message,
+                headmate=headmate,
+                register=register,
+                topic=primary_topic,
+                timestamp=now,
+            )
+        except Exception as e:
+            log_error("Archivist", "emotion_tracker.record failed", exc=e)
+
         # Update conversation field — all active fronters warm their collections
         conv_field = self._get_field(session_id)
         conv_field.update(topics=topics, participant=headmate)
@@ -412,6 +434,21 @@ class Archivist:
             log_error("Archivist", "failed to save message to history", exc=e)
 
         # Build brief
+        # Pull emotion arc block for Ego
+        arc_block = ""
+        ep_valence = 0.0
+        ep_intensity = 0.2
+        ep_chaos = 0.0
+        try:
+            from core.emotion_tracker import emotion_tracker
+            arc_block = emotion_tracker.ego_block(session_id)
+            if emotion_point:
+                ep_valence   = emotion_point.valence
+                ep_intensity = emotion_point.intensity
+                ep_chaos     = emotion_point.chaos
+        except Exception:
+            pass
+
         brief = Brief(
             message=message,
             session_id=session_id,
@@ -431,6 +468,10 @@ class Archivist:
             previous_host=changes["previous_host"],
             fronters_joined=changes["fronters_joined"],
             fronters_left=changes["fronters_left"],
+            valence=ep_valence,
+            intensity=ep_intensity,
+            chaos=ep_chaos,
+            emotion_arc_block=arc_block,
         )
 
         duration_ms = round((time.monotonic() - t_start) * 1000, 1)
