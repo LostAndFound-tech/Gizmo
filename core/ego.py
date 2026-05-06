@@ -7,7 +7,9 @@ that means. It reads the Archivist's brief, reads Mind's facts, reads
 the personality system, and assembles direction for the Body.
 
 It also:
-  - Detects unknown names (possible headmates or external people)
+  - Detects unknown names (possible headmates, external people, or pets)
+  - Groups unknown names and asks ONE natural question about all of them
+  - Parses confirmation responses — heuristic first, LLM if ambiguous
   - Disambiguates and creates entity files on confirmation
   - Applies behavioral corrections from rules.json
   - Reads per-headmate observation files to inform tone
@@ -16,21 +18,18 @@ It also:
   - Handles corrections in Gizmo's voice — brief, honest, forward
   - Occasionally overrides correct behavior — spice of life
 
-The direction it returns is a structured dict, not just a string.
-Body gets the system prompt. Everything else is for logging and reflection.
+Entity detection flow:
+  1. Extract unknown proper nouns from message
+  2. If alongside known headmates → high confidence signal, ask immediately
+  3. Otherwise wait for second mention (threshold)
+  4. Grouped question: "Who are they? Friends? Mates?"
+  5. Parse answer — heuristic first
+     - Simple/unambiguous → classify directly
+     - Multiple names, freeform, or low confidence → LLM parse
+  6. Create files: headmate / external / pet
 
 Personality lookup priority (most specific wins):
   headmate + register combo → register alone → headmate alone → defaults
-
-Entity detection:
-  Unknown proper nouns flagged by Archivist → Ego asks one question
-  Confirmed headmate → auto-creates headmate file
-  Confirmed external → auto-creates external file
-  Recurring ambiguous name → file after threshold
-
-Usage:
-    from core.ego import ego
-    direction = await ego.direct(brief, facts)
 """
 
 import json
@@ -52,31 +51,26 @@ _BASE_DIR        = Path(__file__).parent.parent
 _PERSONALITY_DIR = _BASE_DIR / "personality"
 _HEADMATES_DIR   = _PERSONALITY_DIR / "headmates"
 _EXTERNAL_DIR    = _PERSONALITY_DIR / "external"
+_PETS_DIR        = _PERSONALITY_DIR / "pets"
 _SEED_FILE       = _BASE_DIR / "personality.txt"
-_GIZMO_FILE      = _PERSONALITY_DIR / "gizmo.json"
 _RULES_FILE      = _PERSONALITY_DIR / "rules.json"
 
-# How many times a name must appear before auto-creating an external file
-_EXTERNAL_MENTION_THRESHOLD = 2
+_EXTERNAL_MENTION_THRESHOLD = 2   # mentions before asking about unknown name
+_HEADMATE_CONTEXT_THRESHOLD = 1   # ask immediately if alongside known headmates
 
 # ── Direction dataclass ───────────────────────────────────────────────────────
 
 @dataclass
 class Direction:
-    """
-    Structured direction for the Body.
-    system_prompt is what Body receives.
-    Everything else is for logging and Ego's own reflection.
-    """
     system_prompt:    str
-    tone:             str        # brief description of intended tone
-    register_target:  str        # what register Ego is aiming for
+    tone:             str
+    register_target:  str
     override:         bool = False
     override_reason:  str  = ""
     corrections:      list = field(default_factory=list)
     host_context:     dict = field(default_factory=dict)
-    entity_question:  str  = ""  # if Ego needs to ask about an unknown entity
-    new_entity:       dict = field(default_factory=dict)  # if a new entity was just confirmed
+    entity_question:  str  = ""
+    new_entities:     list = field(default_factory=list)  # list of {name, type, action}
 
 
 # ── Personality loader ────────────────────────────────────────────────────────
@@ -96,7 +90,6 @@ def _load_rules() -> dict:
 
 
 def _load_headmate(name: str) -> Optional[dict]:
-    """Load a headmate's observation file. Returns None if not found."""
     if not name:
         return None
     path = _HEADMATES_DIR / f"{name.lower()}.json"
@@ -110,7 +103,6 @@ def _load_headmate(name: str) -> Optional[dict]:
 
 
 def _load_external(name: str) -> Optional[dict]:
-    """Load an external person's observation file."""
     if not name:
         return None
     path = _EXTERNAL_DIR / f"{name.lower()}.json"
@@ -126,8 +118,9 @@ def _load_external(name: str) -> Optional[dict]:
 def _save_headmate(name: str, data: dict) -> None:
     try:
         _HEADMATES_DIR.mkdir(parents=True, exist_ok=True)
-        path = _HEADMATES_DIR / f"{name.lower()}.json"
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        (_HEADMATES_DIR / f"{name.lower()}.json").write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
         log_event("Ego", "HEADMATE_FILE_SAVED", name=name)
     except Exception as e:
         log_error("Ego", f"failed to save headmate file for {name}", exc=e)
@@ -136,15 +129,26 @@ def _save_headmate(name: str, data: dict) -> None:
 def _save_external(name: str, data: dict) -> None:
     try:
         _EXTERNAL_DIR.mkdir(parents=True, exist_ok=True)
-        path = _EXTERNAL_DIR / f"{name.lower()}.json"
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        (_EXTERNAL_DIR / f"{name.lower()}.json").write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
         log_event("Ego", "EXTERNAL_FILE_SAVED", name=name)
     except Exception as e:
         log_error("Ego", f"failed to save external file for {name}", exc=e)
 
 
+def _save_pet(name: str, data: dict) -> None:
+    try:
+        _PETS_DIR.mkdir(parents=True, exist_ok=True)
+        (_PETS_DIR / f"{name.lower()}.json").write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
+        log_event("Ego", "PET_FILE_SAVED", name=name)
+    except Exception as e:
+        log_error("Ego", f"failed to save pet file for {name}", exc=e)
+
+
 def _create_headmate_file(name: str) -> dict:
-    """Create a cold-start headmate file and save it."""
     data = {
         "version": 1,
         "name": name.lower(),
@@ -166,14 +170,13 @@ def _create_headmate_file(name: str) -> dict:
     return data
 
 
-def _create_external_file(name: str, relationship: str = "unknown") -> dict:
-    """Create a cold-start external person file and save it."""
+def _create_external_file(name: str, relationship: str = "unknown", note: str = "") -> dict:
     data = {
         "version": 1,
         "name": name.lower(),
         "type": "external",
         "relationship_to_system": relationship,
-        "note": "Observed, not declared.",
+        "note": note or "Observed, not declared.",
         "mentions": [],
         "observed_facts": [],
         "moments_of_note": [],
@@ -183,27 +186,294 @@ def _create_external_file(name: str, relationship: str = "unknown") -> dict:
     return data
 
 
-def _add_observed_fact(name: str, fact: str, entity_type: str = "external") -> None:
-    """Add an observed fact to an entity's file."""
-    from core.timezone import tz_now
-    timestamp = tz_now().strftime("%Y-%m-%d %H:%M %Z")
+def _create_pet_file(name: str, species: str = "unknown") -> dict:
+    data = {
+        "version": 1,
+        "name": name.lower(),
+        "type": "pet",
+        "species": species,
+        "note": "A pet — not a headmate, not external.",
+        "moments_of_note": [],
+    }
+    _save_pet(name, data)
+    log_event("Ego", "PET_CREATED", name=name, species=species)
+    return data
 
-    if entity_type == "headmate":
-        data = _load_headmate(name)
-        if data is None:
-            data = _create_headmate_file(name)
-        if "moments_of_note" not in data:
-            data["moments_of_note"] = []
-        data["moments_of_note"].append(f"[{timestamp}] {fact}")
-        _save_headmate(name, data)
+
+# ── Known entity sets ─────────────────────────────────────────────────────────
+
+def _get_known_headmates() -> set:
+    try:
+        return {p.stem.lower() for p in _HEADMATES_DIR.glob("*.json")
+                if not p.stem.startswith("_")}
+    except Exception:
+        return set()
+
+
+def _get_known_externals() -> set:
+    try:
+        _EXTERNAL_DIR.mkdir(parents=True, exist_ok=True)
+        return {p.stem.lower() for p in _EXTERNAL_DIR.glob("*.json")}
+    except Exception:
+        return set()
+
+
+def _get_known_pets() -> set:
+    try:
+        _PETS_DIR.mkdir(parents=True, exist_ok=True)
+        return {p.stem.lower() for p in _PETS_DIR.glob("*.json")}
+    except Exception:
+        return set()
+
+
+def _get_all_known() -> set:
+    return _get_known_headmates() | _get_known_externals() | _get_known_pets()
+
+
+# ── Proper noun extraction ────────────────────────────────────────────────────
+
+_PROPER_NOUN_RE = re.compile(r"(?<![.!?]\s)(?<!\A)\b([A-Z][a-z]{2,})\b")
+
+_IGNORE_WORDS = {
+    "I", "The", "A", "An", "And", "But", "Or", "So", "Yet", "For",
+    "Nor", "My", "Your", "Our", "Their", "Its", "His", "Her",
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+    "January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December",
+    "Gizmo", "Ok", "Okay", "Yes", "No", "Hey", "Oh", "God", "Jesus",
+    "English", "American", "European", "Python", "Google", "GitHub",
+}
+
+
+def _extract_unknown_names(message: str, known: set) -> list[str]:
+    candidates = _PROPER_NOUN_RE.findall(message)
+    unknown = []
+    for name in candidates:
+        if name in _IGNORE_WORDS:
+            continue
+        if name.lower() in known:
+            continue
+        if len(name) >= 3 and not name.isupper():
+            unknown.append(name)
+    return list(dict.fromkeys(unknown))
+
+
+# ── Mention tracker ───────────────────────────────────────────────────────────
+
+_MENTIONS_FILE = _PERSONALITY_DIR / "mention_counts.json"
+
+
+def _load_mention_counts() -> dict:
+    try:
+        return json.loads(_MENTIONS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_mention_counts(counts: dict) -> None:
+    try:
+        _PERSONALITY_DIR.mkdir(parents=True, exist_ok=True)
+        _MENTIONS_FILE.write_text(json.dumps(counts, indent=2), encoding="utf-8")
+    except Exception as e:
+        log_error("Ego", "failed to save mention counts", exc=e)
+
+
+def _increment_mention(name: str) -> int:
+    counts = _load_mention_counts()
+    counts[name.lower()] = counts.get(name.lower(), 0) + 1
+    _save_mention_counts(counts)
+    return counts[name.lower()]
+
+
+def _get_mention_count(name: str) -> int:
+    counts = _load_mention_counts()
+    return counts.get(name.lower(), 0)
+
+
+# ── Pending entity questions ──────────────────────────────────────────────────
+# Maps session_id → list of names being asked about
+
+_pending_entity_questions: dict[str, list[str]] = {}
+
+
+# ── Heuristic confidence scoring ─────────────────────────────────────────────
+
+# Pet indicators
+_PET_RE = re.compile(
+    r"\b(dog|cat|bird|fish|rabbit|hamster|pet|puppy|kitten|pup|"
+    r"rescue|shelter|adopted|walks?|fetches?|barks?|meows?|purrs?)\b",
+    re.IGNORECASE,
+)
+
+# Headmate indicators
+_HEADMATE_RE = re.compile(
+    r"\b(headmate|alter|part of (the |my )?system|fronting|front|"
+    r"plural|system|co-?front|switched?)\b",
+    re.IGNORECASE,
+)
+
+# External / person indicators
+_EXTERNAL_RE = re.compile(
+    r"\b(friend|family|partner|boyfriend|girlfriend|husband|wife|"
+    r"coworker|colleague|neighbor|neighbour|person|human|outside|external)\b",
+    re.IGNORECASE,
+)
+
+# Simple yes/no for single-name pending question
+_YES_RE = re.compile(r"^\s*(yes|yeah|yep|yea|correct|right|they are|that'?s right)\s*$", re.IGNORECASE)
+_NO_RE  = re.compile(r"^\s*(no|nope|nah|not really|they'?re not)\s*$", re.IGNORECASE)
+
+
+def _heuristic_classify(name: str, message: str) -> tuple[Optional[str], float]:
+    """
+    Try to classify a name from message context using heuristics.
+    Returns (entity_type, confidence) where entity_type is one of:
+      "headmate" | "external" | "pet" | None
+    confidence is 0.0–1.0.
+
+    Returns (None, 0.0) if heuristics can't determine with enough confidence.
+    """
+    msg_lower = message.lower()
+    name_lower = name.lower()
+
+    # Check for name-specific context: "Opie is a dog", "Opie the dog"
+    name_context_re = re.compile(
+        rf"\b{re.escape(name_lower)}\b.{{0,30}}",
+        re.IGNORECASE,
+    )
+    match = name_context_re.search(msg_lower)
+    context_window = match.group() if match else msg_lower
+
+    pet_score      = len(_PET_RE.findall(context_window))
+    headmate_score = len(_HEADMATE_RE.findall(context_window))
+    external_score = len(_EXTERNAL_RE.findall(context_window))
+
+    total = pet_score + headmate_score + external_score
+    if total == 0:
+        return None, 0.0
+
+    if pet_score > headmate_score and pet_score > external_score:
+        confidence = min(0.9, 0.5 + pet_score * 0.2)
+        return "pet", confidence
+
+    if headmate_score > pet_score and headmate_score > external_score:
+        confidence = min(0.9, 0.5 + headmate_score * 0.2)
+        return "headmate", confidence
+
+    if external_score > pet_score and external_score > headmate_score:
+        confidence = min(0.9, 0.5 + external_score * 0.2)
+        return "external", confidence
+
+    # Tied — not confident enough
+    return None, 0.0
+
+
+async def _llm_parse_entity_response(
+    names: list[str],
+    response: str,
+) -> list[dict]:
+    """
+    LLM call to parse a freeform entity confirmation response.
+    Returns a list of {name, type, species (optional)} dicts.
+
+    Only fires when heuristics can't confidently classify.
+    """
+    try:
+        from core.llm import llm
+
+        prompt = [{
+            "role": "user",
+            "content": (
+                f"I asked about these names: {', '.join(names)}\n"
+                f"The response was: \"{response}\"\n\n"
+                f"For each name, determine if they are a headmate (alter/system member), "
+                f"an external person (friend, family, colleague), or a pet.\n\n"
+                f"Respond ONLY with a JSON array, no other text. Example:\n"
+                f'[{{"name": "Oren", "type": "headmate"}}, '
+                f'{{"name": "Opie", "type": "pet", "species": "dog"}}, '
+                f'{{"name": "Sarah", "type": "external"}}]\n\n'
+                f"Types must be exactly: headmate, external, or pet.\n"
+                f"Only include names from the list: {', '.join(names)}"
+            )
+        }]
+
+        result = await llm.generate(
+            prompt,
+            system_prompt=(
+                "You parse entity classification responses into structured JSON. "
+                "Return only valid JSON array. No preamble, no explanation."
+            ),
+            max_new_tokens=200,
+            temperature=0.0,
+        )
+
+        # Strip markdown fences if present
+        clean = re.sub(r"```(?:json)?|```", "", result).strip()
+        parsed = json.loads(clean)
+
+        # Validate — keep only entries with known names
+        name_set = {n.lower() for n in names}
+        valid = [
+            e for e in parsed
+            if isinstance(e, dict)
+            and e.get("name", "").lower() in name_set
+            and e.get("type") in ("headmate", "external", "pet")
+        ]
+
+        log_event("Ego", "LLM_ENTITY_PARSE",
+            names=names,
+            parsed=len(valid),
+            result=valid,
+        )
+        return valid
+
+    except Exception as e:
+        log_error("Ego", "LLM entity parse failed", exc=e)
+        return []
+
+
+def _should_use_llm(names: list[str], message: str) -> bool:
+    """
+    Decide whether to use LLM for entity classification.
+    Returns True if heuristics aren't sufficient.
+    """
+    # Multiple names → likely need LLM to untangle who is what
+    if len(names) > 1:
+        return True
+
+    # Single name — try heuristics
+    name = names[0]
+    _, confidence = _heuristic_classify(name, message)
+
+    # Low confidence → use LLM
+    if confidence < 0.6:
+        return True
+
+    return False
+
+
+def _build_entity_question(names: list[str]) -> str:
+    """Build a natural grouped question for unknown names."""
+    if len(names) == 1:
+        return f"Who's {names[0]}? Headmate, someone outside the system, or a pet?"
+    elif len(names) == 2:
+        return f"Who are {names[0]} and {names[1]}? Headmates, people outside the system, pets?"
     else:
-        data = _load_external(name)
-        if data is None:
-            data = _create_external_file(name)
-        if "observed_facts" not in data:
-            data["observed_facts"] = []
-        data["observed_facts"].append(f"[{timestamp}] {fact}")
-        _save_external(name, data)
+        name_list = ", ".join(names[:-1]) + f", and {names[-1]}"
+        return f"Who are {name_list}? Headmates, people outside the system, pets?"
+
+
+def _names_alongside_headmates(
+    unknown_names: list[str],
+    message: str,
+    known_headmates: set,
+) -> bool:
+    """
+    Return True if unknown names appear in the same message as known headmates.
+    Strong signal that unknowns might be system-related.
+    """
+    msg_lower = message.lower()
+    return any(h in msg_lower for h in known_headmates)
 
 
 # ── Tone resolution ───────────────────────────────────────────────────────────
@@ -213,15 +483,6 @@ def _resolve_tone(
     register: str,
     headmate_data: Optional[dict],
 ) -> dict:
-    """
-    Resolve tone from personality data.
-    Priority: headmate+register > register > headmate baseline > defaults.
-
-    v1: reads from headmate file observations.
-    Future: reads from Id tensor directly.
-
-    Returns a tone dict with: style, humor, verbosity, notes
-    """
     defaults = {
         "style":     "warm, direct, a little dry",
         "humor":     "situational — read the room",
@@ -229,7 +490,6 @@ def _resolve_tone(
         "notes":     [],
     }
 
-    # Register-based overrides
     register_overrides = {
         "distress": {
             "style":     "quiet, present — no advice unless asked",
@@ -259,25 +519,18 @@ def _resolve_tone(
 
     tone = dict(defaults)
 
-    # Apply register override if present
     if register in register_overrides:
         tone.update(register_overrides[register])
 
-    # Apply headmate-specific notes from observation file
     if headmate_data:
         baseline = headmate_data.get("baseline", {})
-        observations = headmate_data.get("observed_patterns", [])
         departures = headmate_data.get("departures", [])
-
-        # If we have observations, note what's been seen
         obs_count = baseline.get("observations", 0)
         if obs_count > 0:
             tone["notes"].append(
                 f"{obs_count} observations on file — "
                 f"baseline register: {baseline.get('register', 'unknown')}"
             )
-
-        # Check for any departure patterns matching current register
         for dep in departures:
             if dep.get("condition", "").lower() in register.lower():
                 outcome = dep.get("outcome", "")
@@ -290,16 +543,10 @@ def _resolve_tone(
 # ── Correction assembly ───────────────────────────────────────────────────────
 
 def _get_corrections(headmate: Optional[str], rules: dict) -> list[str]:
-    """
-    Assemble active behavioral corrections for this headmate.
-    Global rules always apply. Headmate-specific rules added on top.
-    """
     corrections = list(rules.get("global", []))
-
     if headmate:
         headmate_rules = rules.get("by_headmate", {}).get(headmate.lower(), [])
         corrections.extend(headmate_rules)
-
     return corrections
 
 
@@ -312,11 +559,9 @@ def _build_system_prompt(
     tone: dict,
     corrections: list,
     host_context: dict,
+    entity_question: str = "",
+    new_entities: list = None,
 ) -> str:
-    """
-    Assemble the full system prompt for Body.
-    Seed + facts + context + tone guidance + corrections.
-    """
     from core.timezone import tz_now
     from core.agent_tools import TOOL_REGISTRY
 
@@ -363,11 +608,9 @@ def _build_system_prompt(
             f"Acknowledge this naturally — don't make it clinical."
         )
     if host_context.get("fronters_joined"):
-        joined = ", ".join(host_context["fronters_joined"])
-        change_block += f"\n  Joined the front: {joined}"
+        change_block += f"\n  Joined the front: {', '.join(host_context['fronters_joined'])}"
     if host_context.get("fronters_left"):
-        left = ", ".join(host_context["fronters_left"])
-        change_block += f"\n  Left the front: {left}"
+        change_block += f"\n  Left the front: {', '.join(host_context['fronters_left'])}"
 
     # Tone guidance
     tone_notes = tone.get("notes", [])
@@ -390,9 +633,9 @@ def _build_system_prompt(
     tool_descriptions = "\n".join(
         f"- {t.name}: {t.description}"
         for t in TOOL_REGISTRY.values()
-    )
+    ) if TOOL_REGISTRY else "(none currently)"
 
-    return f"""{seed}
+    prompt = f"""{seed}
 
 Current time: {now_str}
 Message history includes [HH:MM] timestamps — use these to reason about elapsed time.
@@ -417,238 +660,190 @@ KNOWLEDGE RULES:
 - If it's empty, you genuinely don't have that memory — say so honestly.
 - Never contradict it. Never invent beyond it."""
 
+    # Entity question — work it into the response naturally
+    if entity_question:
+        prompt += (
+            f"\n\n[Entity question — work this into your response naturally]\n"
+            f"  {entity_question}\n"
+            f"  Keep it casual. One sentence. Don't make it a big deal."
+        )
 
-# ── Entity detection ──────────────────────────────────────────────────────────
+    # New entities confirmed
+    if new_entities:
+        for entity in new_entities:
+            name = entity["name"]
+            etype = entity["type"]
+            if etype == "headmate":
+                prompt += (
+                    f"\n\n[New headmate discovered: {name}]\n"
+                    f"  React naturally — genuine curiosity, warmth. "
+                    f"Maybe ask something about them if the moment feels right."
+                )
+            elif etype == "pet":
+                species = entity.get("species", "")
+                prompt += (
+                    f"\n\n[New pet noted: {name}{'— ' + species if species else ''}]\n"
+                    f"  Acknowledge naturally if relevant. Don't make it weird."
+                )
+            else:
+                prompt += (
+                    f"\n\n[New external person noted: {name}]\n"
+                    f"  Note this naturally if relevant, continue normally."
+                )
 
-# Proper noun pattern — capitalized word not at sentence start
-_PROPER_NOUN_RE = re.compile(
-    r"(?<![.!?]\s)(?<!\A)\b([A-Z][a-z]{2,})\b"
-)
-
-# Words to ignore — not names
-_IGNORE_WORDS = {
-    "I", "The", "A", "An", "And", "But", "Or", "So", "Yet", "For",
-    "Nor", "My", "Your", "Our", "Their", "Its", "His", "Her",
-    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
-    "January", "February", "March", "April", "May", "June", "July",
-    "August", "September", "October", "November", "December",
-    "Gizmo", "Ok", "Okay", "Yes", "No", "Hey", "Oh", "God", "Jesus",
-    "English", "American", "European", "Python", "Google", "GitHub",
-}
-
-
-def _extract_unknown_names(
-    message: str,
-    known_headmates: set,
-    known_externals: set,
-) -> list[str]:
-    """
-    Extract capitalized words that might be names of unknown people.
-    Filters out known entities and common non-name words.
-    """
-    candidates = _PROPER_NOUN_RE.findall(message)
-    unknown = []
-    for name in candidates:
-        if name in _IGNORE_WORDS:
-            continue
-        if name.lower() in known_headmates:
-            continue
-        if name.lower() in known_externals:
-            continue
-        # Likely a name if it's 3+ chars and not all caps
-        if len(name) >= 3 and not name.isupper():
-            unknown.append(name)
-    return list(dict.fromkeys(unknown))  # deduplicate, preserve order
-
-
-def _get_known_headmates() -> set:
-    """Return set of known headmate names (lowercase)."""
-    try:
-        return {
-            p.stem.lower()
-            for p in _HEADMATES_DIR.glob("*.json")
-            if not p.stem.startswith("_")
-        }
-    except Exception:
-        return set()
-
-
-def _get_known_externals() -> set:
-    """Return set of known external person names (lowercase)."""
-    try:
-        _EXTERNAL_DIR.mkdir(parents=True, exist_ok=True)
-        return {p.stem.lower() for p in _EXTERNAL_DIR.glob("*.json")}
-    except Exception:
-        return set()
-
-
-# ── Mention tracker ───────────────────────────────────────────────────────────
-# Tracks how many times an ambiguous name has appeared across sessions.
-# Persists to disk so it survives restarts.
-
-_MENTIONS_FILE = _PERSONALITY_DIR / "mention_counts.json"
-
-
-def _load_mention_counts() -> dict:
-    try:
-        return json.loads(_MENTIONS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_mention_counts(counts: dict) -> None:
-    try:
-        _PERSONALITY_DIR.mkdir(parents=True, exist_ok=True)
-        _MENTIONS_FILE.write_text(json.dumps(counts, indent=2), encoding="utf-8")
-    except Exception as e:
-        log_error("Ego", "failed to save mention counts", exc=e)
-
-
-def _increment_mention(name: str) -> int:
-    """Increment mention count for a name. Returns new count."""
-    counts = _load_mention_counts()
-    counts[name.lower()] = counts.get(name.lower(), 0) + 1
-    _save_mention_counts(counts)
-    return counts[name.lower()]
-
-
-# ── Pending entity questions ──────────────────────────────────────────────────
-# Tracks which names Ego has asked about and is waiting for confirmation.
-
-_pending_entity_questions: dict[str, str] = {}
-# session_id → name being asked about
-
-
-def _is_headmate_confirmation(message: str) -> bool:
-    """Detect if the user is confirming something is a headmate."""
-    return bool(re.search(
-        r"\b(yes|yea|yeah|yep|headmate|alter|part of (the |my )?system|"
-        r"they('re| are) (a headmate|an alter|in (the |my )?system))\b",
-        message, re.IGNORECASE,
-    ))
-
-
-def _is_external_confirmation(message: str) -> bool:
-    """Detect if the user is confirming someone is external."""
-    return bool(re.search(
-        r"\b(no|nope|external|outside|friend|family|colleague|"
-        r"they('re| are) (not|external|outside|a (friend|person|human)))\b",
-        message, re.IGNORECASE,
-    ))
+    return prompt
 
 
 # ── Ego ───────────────────────────────────────────────────────────────────────
 
 class Ego:
-    """
-    Singleton. Reads personality, reads brief + facts, produces direction.
-    Also handles entity detection and file creation.
-    """
 
     def __init__(self):
         _HEADMATES_DIR.mkdir(parents=True, exist_ok=True)
         _EXTERNAL_DIR.mkdir(parents=True, exist_ok=True)
+        _PETS_DIR.mkdir(parents=True, exist_ok=True)
         self._seed = _load_seed()
         log("Ego", f"initialised — seed loaded ({len(self._seed)} chars)")
 
     def _reload_seed(self) -> None:
-        """Reload seed from disk — called if file changes."""
         self._seed = _load_seed()
 
     async def direct(self, brief: "Brief", facts: dict) -> Direction:
         """
         Main entry point. Takes brief + facts, returns Direction for Body.
-
-        Steps:
-          1. Check for pending entity question response
-          2. Detect unknown entities in message
-          3. Load personality data
-          4. Resolve tone
-          5. Assemble corrections
-          6. Build system prompt
-          7. Log decision
         """
         t_start = time.monotonic()
-        headmate = brief.headmate
-        register = brief.emotional_register
+        headmate   = brief.headmate
+        register   = brief.emotional_register
         session_id = brief.session_id
 
-        # ── Step 1: Check for pending entity question response ─────────────────
         entity_question = ""
-        new_entity = {}
+        new_entities    = []
 
+        known_headmates = _get_known_headmates()
+        known_all       = known_headmates | _get_known_externals() | _get_known_pets()
+
+        # ── Step 1: Check for pending entity question response ────────────────
         if session_id in _pending_entity_questions:
-            pending_name = _pending_entity_questions[session_id]
+            pending_names = _pending_entity_questions[session_id]
+            message = brief.message
 
-            if _is_headmate_confirmation(brief.message):
-                # Create headmate file
-                _create_headmate_file(pending_name)
-                del _pending_entity_questions[session_id]
-                new_entity = {
-                    "name": pending_name,
-                    "type": "headmate",
-                    "action": "created",
-                }
-                log_event("Ego", "ENTITY_CONFIRMED_HEADMATE", name=pending_name)
+            use_llm = _should_use_llm(pending_names, message)
 
-            elif _is_external_confirmation(brief.message):
-                # Create external file
-                _create_external_file(pending_name)
-                del _pending_entity_questions[session_id]
-                new_entity = {
-                    "name": pending_name,
-                    "type": "external",
-                    "action": "created",
-                }
-                log_event("Ego", "ENTITY_CONFIRMED_EXTERNAL", name=pending_name)
-
-            else:
-                # Ambiguous response — keep waiting
-                log_event("Ego", "ENTITY_QUESTION_UNANSWERED",
-                    name=pending_name,
+            if use_llm:
+                # LLM parse
+                log_event("Ego", "ENTITY_PARSE_LLM",
                     session=session_id[:8],
+                    names=pending_names,
+                    reason="low heuristic confidence or multiple names",
+                )
+                parsed = await _llm_parse_entity_response(pending_names, message)
+            else:
+                # Heuristic parse — single name, high confidence
+                name = pending_names[0]
+                entity_type, confidence = _heuristic_classify(name, message)
+
+                # Also handle simple yes/no for headmate (single name)
+                if entity_type is None:
+                    if _YES_RE.match(message):
+                        entity_type = "headmate"
+                    elif _NO_RE.match(message):
+                        entity_type = "external"
+
+                parsed = [{"name": name, "type": entity_type}] if entity_type else []
+                log_event("Ego", "ENTITY_PARSE_HEURISTIC",
+                    session=session_id[:8],
+                    name=name,
+                    type=entity_type,
+                    confidence=confidence,
                 )
 
-        # ── Step 2: Detect unknown entities ────────────────────────────────────
-        if not entity_question and not new_entity:
-            known_headmates = _get_known_headmates()
-            known_externals = _get_known_externals()
-            unknown_names   = _extract_unknown_names(
-                brief.message, known_headmates, known_externals
-            )
+            # Create files for parsed entities
+            resolved_names = set()
+            for entity in parsed:
+                name  = entity["name"]
+                etype = entity.get("type")
+                resolved_names.add(name.lower())
 
-            for name in unknown_names:
-                count = _increment_mention(name)
+                if etype == "headmate":
+                    _create_headmate_file(name)
+                    new_entities.append({"name": name, "type": "headmate", "action": "created"})
+                elif etype == "pet":
+                    species = entity.get("species", "unknown")
+                    _create_pet_file(name, species=species)
+                    new_entities.append({"name": name, "type": "pet", "species": species, "action": "created"})
+                elif etype == "external":
+                    _create_external_file(name)
+                    new_entities.append({"name": name, "type": "external", "action": "created"})
 
-                if count >= _EXTERNAL_MENTION_THRESHOLD:
-                    # Recurring unknown name — ask about it this turn
-                    _pending_entity_questions[session_id] = name
-                    entity_question = (
-                        f"Hey, quick question — is {name} a headmate, "
-                        f"or someone outside the system?"
-                    )
+            # Remove resolved names from pending; keep unresolved for next turn
+            remaining = [n for n in pending_names if n.lower() not in resolved_names]
+            if remaining:
+                _pending_entity_questions[session_id] = remaining
+                log_event("Ego", "ENTITY_QUESTION_PARTIAL",
+                    session=session_id[:8],
+                    resolved=list(resolved_names),
+                    remaining=remaining,
+                )
+            else:
+                del _pending_entity_questions[session_id]
+                log_event("Ego", "ENTITY_QUESTION_RESOLVED",
+                    session=session_id[:8],
+                    resolved=list(resolved_names),
+                )
+
+        # ── Step 2: Detect new unknown entities ───────────────────────────────
+        if not entity_question and session_id not in _pending_entity_questions:
+            unknown_names = _extract_unknown_names(brief.message, known_all)
+
+            if unknown_names:
+                # Increment mentions for all unknowns
+                for name in unknown_names:
+                    _increment_mention(name)
+
+                # Decide whether to ask now
+                alongside_headmates = _names_alongside_headmates(
+                    unknown_names, brief.message, known_headmates
+                )
+
+                names_to_ask = []
+                for name in unknown_names:
+                    count = _get_mention_count(name)
+                    if alongside_headmates and count >= _HEADMATE_CONTEXT_THRESHOLD:
+                        names_to_ask.append(name)
+                        log_event("Ego", "ENTITY_ASK_HEADMATE_CONTEXT",
+                            name=name,
+                            session=session_id[:8],
+                        )
+                    elif count >= _EXTERNAL_MENTION_THRESHOLD:
+                        names_to_ask.append(name)
+                        log_event("Ego", "ENTITY_ASK_THRESHOLD",
+                            name=name,
+                            session=session_id[:8],
+                            mentions=count,
+                        )
+                    else:
+                        log_event("Ego", "ENTITY_FIRST_MENTION",
+                            name=name,
+                            session=session_id[:8],
+                        )
+
+                if names_to_ask:
+                    _pending_entity_questions[session_id] = names_to_ask
+                    entity_question = _build_entity_question(names_to_ask)
                     log_event("Ego", "ENTITY_QUESTION_QUEUED",
-                        name=name,
-                        session=session_id[:8],
-                        mentions=count,
-                    )
-                    break  # one question at a time
-                elif count == 1:
-                    log_event("Ego", "ENTITY_FIRST_MENTION",
-                        name=name,
+                        names=names_to_ask,
                         session=session_id[:8],
                     )
 
-        # ── Step 3: Load personality data ───────────────────────────────────────
-        rules        = _load_rules()
+        # ── Step 3: Load personality data ─────────────────────────────────────
+        rules         = _load_rules()
         headmate_data = _load_headmate(headmate) if headmate else None
 
-        # ── Step 4: Resolve tone ────────────────────────────────────────────────
+        # ── Step 4: Resolve tone ──────────────────────────────────────────────
         tone = _resolve_tone(headmate, register, headmate_data)
 
-        # ── Step 5: Corrections ─────────────────────────────────────────────────
-        # Global + headmate-specific from rules.json
-        # + corrections from headmate's own file
+        # ── Step 5: Corrections ───────────────────────────────────────────────
         corrections = _get_corrections(headmate, rules)
         if headmate_data:
             headmate_corrections = [
@@ -658,7 +853,7 @@ class Ego:
             ]
             corrections.extend(headmate_corrections)
 
-        # ── Step 6: Host context ────────────────────────────────────────────────
+        # ── Step 6: Host context ──────────────────────────────────────────────
         host_context = {
             "host_changed":    brief.host_changed,
             "previous_host":   brief.previous_host,
@@ -666,65 +861,28 @@ class Ego:
             "fronters_left":   brief.fronters_left,
         }
 
-        # ── Step 7: Occasional override ─────────────────────────────────────────
-        # Ego can decide "correct" is boring and do something unexpected.
-        # v1: very rare, rule-based. Future: Id-informed probability.
-        override = False
-        override_reason = ""
-
-        # ── Step 8: Build system prompt ─────────────────────────────────────────
-        # If there's an entity question, append it to the prompt
-        # so Body naturally asks it as part of the response.
-        seed = self._seed
-        if entity_question:
-            seed = seed  # Body will weave the question in naturally
-
+        # ── Step 7: Build system prompt ───────────────────────────────────────
         system_prompt = _build_system_prompt(
-            seed=seed,
+            seed=self._seed,
             brief=brief,
             facts=facts,
             tone=tone,
             corrections=corrections,
             host_context=host_context,
+            entity_question=entity_question,
+            new_entities=new_entities,
         )
 
-        # If entity question, append instruction for Body
-        if entity_question:
-            system_prompt += (
-                f"\n\n[Entity question — work this into your response naturally]\n"
-                f"  {entity_question}\n"
-                f"  Keep it casual. One sentence. Don't make it weird."
-            )
-
-        # If new entity was confirmed, add warm acknowledgment instruction
-        if new_entity:
-            name = new_entity["name"]
-            entity_type = new_entity["type"]
-            if entity_type == "headmate":
-                system_prompt += (
-                    f"\n\n[New headmate discovered: {name}]\n"
-                    f"  You just learned {name} exists. React naturally — "
-                    f"genuine curiosity, warmth. Maybe ask something about them "
-                    f"if the moment feels right. Don't make it a big production."
-                )
-            else:
-                system_prompt += (
-                    f"\n\n[New external person noted: {name}]\n"
-                    f"  You now know {name} is external to the system. "
-                    f"Note this naturally if relevant, continue normally."
-                )
-
         duration_ms = round((time.monotonic() - t_start) * 1000)
-
         log_event("Ego", "DIRECTION_BUILT",
             session=session_id[:8],
             headmate=headmate or "unknown",
             register=register,
             tone_style=tone["style"][:40],
             corrections=len(corrections),
-            override=override,
             entity_question=bool(entity_question),
-            new_entity=bool(new_entity),
+            new_entities=len(new_entities),
+            used_llm=bool(new_entities and session_id in _pending_entity_questions),
             prompt_len=len(system_prompt),
             duration_ms=duration_ms,
         )
@@ -733,12 +891,10 @@ class Ego:
             system_prompt=system_prompt,
             tone=tone["style"],
             register_target=register,
-            override=override,
-            override_reason=override_reason,
             corrections=corrections,
             host_context=host_context,
             entity_question=entity_question,
-            new_entity=new_entity,
+            new_entities=new_entities,
         )
 
     def update_headmate_observation(
@@ -747,12 +903,6 @@ class Ego:
         observation_type: str,
         data: dict,
     ) -> None:
-        """
-        Write an observation back to a headmate file.
-        Called by the medium loop and reflection process.
-
-        observation_type: "pattern" | "departure" | "moment" | "correction"
-        """
         from core.timezone import tz_now
         timestamp = tz_now().strftime("%Y-%m-%d %H:%M %Z")
 
@@ -761,61 +911,41 @@ class Ego:
             headmate_data = _create_headmate_file(name)
 
         if observation_type == "pattern":
-            headmate_data.setdefault("observed_patterns", []).append({
-                **data,
-                "timestamp": timestamp,
-            })
+            headmate_data.setdefault("observed_patterns", []).append({**data, "timestamp": timestamp})
             headmate_data["baseline"]["observations"] = (
                 headmate_data["baseline"].get("observations", 0) + 1
             )
         elif observation_type == "departure":
-            headmate_data.setdefault("departures", []).append({
-                **data,
-                "timestamp": timestamp,
-            })
+            headmate_data.setdefault("departures", []).append({**data, "timestamp": timestamp})
         elif observation_type == "moment":
             headmate_data.setdefault("moments_of_note", []).append(
                 f"[{timestamp}] {data.get('note', '')}"
             )
         elif observation_type == "correction":
-            headmate_data.setdefault("corrections", []).append({
-                **data,
-                "timestamp": timestamp,
-            })
+            headmate_data.setdefault("corrections", []).append({**data, "timestamp": timestamp})
 
         _save_headmate(name, headmate_data)
-        log_event("Ego", "OBSERVATION_WRITTEN",
-            headmate=name,
-            type=observation_type,
-        )
+        log_event("Ego", "OBSERVATION_WRITTEN", headmate=name, type=observation_type)
 
     def add_global_rule(self, rule: str) -> None:
-        """Add a global behavioral rule. Called when a correction is logged."""
         rules = _load_rules()
         if rule not in rules["global"]:
             rules["global"].append(rule)
             try:
-                _RULES_FILE.write_text(
-                    json.dumps(rules, indent=2), encoding="utf-8"
-                )
+                _RULES_FILE.write_text(json.dumps(rules, indent=2), encoding="utf-8")
                 log_event("Ego", "GLOBAL_RULE_ADDED", rule=rule[:60])
             except Exception as e:
                 log_error("Ego", "failed to save global rule", exc=e)
 
     def add_headmate_rule(self, headmate: str, rule: str) -> None:
-        """Add a headmate-specific behavioral rule."""
         rules = _load_rules()
         rules.setdefault("by_headmate", {})
         rules["by_headmate"].setdefault(headmate.lower(), [])
         if rule not in rules["by_headmate"][headmate.lower()]:
             rules["by_headmate"][headmate.lower()].append(rule)
             try:
-                _RULES_FILE.write_text(
-                    json.dumps(rules, indent=2), encoding="utf-8"
-                )
-                log_event("Ego", "HEADMATE_RULE_ADDED",
-                    headmate=headmate, rule=rule[:60]
-                )
+                _RULES_FILE.write_text(json.dumps(rules, indent=2), encoding="utf-8")
+                log_event("Ego", "HEADMATE_RULE_ADDED", headmate=headmate, rule=rule[:60])
             except Exception as e:
                 log_error("Ego", "failed to save headmate rule", exc=e)
 
