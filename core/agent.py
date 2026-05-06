@@ -399,6 +399,7 @@ class Agent:
                 history=history,
                 context=ctx,
                 source="body",
+                user_message=user_message,
             )
 
         # ── 5. Log ────────────────────────────────────────────────────────────

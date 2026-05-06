@@ -459,10 +459,11 @@ class Archivist:
         history,
         context: Optional[dict] = None,
         source: str = "body",
+        user_message: str = "",  # the message that triggered this response
     ) -> None:
         """
         Receive an outgoing message (what Gizmo just said).
-        Updates the conversation field and logs — closes the loop.
+        Updates the conversation field, logs, and fires background observation.
         """
         ctx = context or {}
         topics = self._classify_topics(message)
@@ -482,6 +483,26 @@ class Archivist:
             words=len(message.split()),
             hot=conv_field.hot_topics(),
         )
+
+        # ── Background observation — fire and forget ──────────────────────────
+        # Extract facts from this exchange and write to entity files.
+        # Runs async so it never blocks the response pipeline.
+        fronters = list(ctx.get("fronters") or [])
+        if fronters and user_message:
+            try:
+                from core.observer import observe
+                from core.llm import llm
+                asyncio.ensure_future(
+                    observe(
+                        user_message=user_message,
+                        gizmo_response=message,
+                        fronters=fronters,
+                        session_id=session_id,
+                        llm=llm,
+                    )
+                )
+            except Exception as e:
+                log_error("Archivist", "failed to schedule observation", exc=e)
 
     def get_field(self, session_id: str) -> Optional[ConversationField]:
         return self._fields.get(session_id)
