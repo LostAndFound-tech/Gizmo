@@ -288,21 +288,42 @@ _FACTUAL_SIGNAL_RE = re.compile(
     r"\b(used to|originally|born|grew up|studied|graduated|married|"
     r"divorced|moved|lives? in|from|species|race|occupation|"
     r"profession|personality|ability|power|background|history|"
-    r"experiment|military|alternate|dimension|universe|planet)\b",
+    r"experiment|military|alternate|dimension|universe|planet|"
+    r"dream|growing up|my goal|always wanted|hope to|wanted to be|"
+    r"love kids|love children|passion|hobby|favorite|favourite)\b",
     re.IGNORECASE,
 )
 
+# Message length threshold for "rich" messages worth LLM even if heuristics found something
+_RICH_MESSAGE_WORDS = 20
+
 def _worth_llm_fallback(message: str, heuristic_results: dict) -> bool:
-    """Only call LLM if heuristics found nothing AND message has factual signals."""
-    if heuristic_results:
+    """
+    Call LLM if:
+    - Heuristics found nothing AND message has factual signals, OR
+    - Message is rich (20+ words) AND has factual signals
+      (LLM catches what patterns miss in complex sentences)
+    """
+    words = len(message.split())
+    has_signal = bool(_FACTUAL_SIGNAL_RE.search(message))
+
+    if not has_signal:
         return False
-    if len(message.split()) < 10:
-        return False
-    return bool(_FACTUAL_SIGNAL_RE.search(message))
+    if not heuristic_results and words >= 8:
+        return True
+    if words >= _RICH_MESSAGE_WORDS:
+        return True
+    return False
 
 
 async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> dict:
-    """LLM fallback. Only fires when heuristics miss real content."""
+    """
+    LLM fallback. Returns bullet points per person — more reliable than JSON.
+    Format:
+      [name]
+      - fact one
+      - fact two
+    """
     entity_list = ", ".join(sorted(known))
     fronter_list = ", ".join(f.title() for f in fronters) if fronters else "unknown"
 
@@ -312,39 +333,74 @@ async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> di
             f"Extract lasting personal facts from this message.\n"
             f"Speaker: {fronter_list} | Known people: {entity_list}\n\n"
             f"Message: \"{message}\"\n\n"
-            f"- Attribute facts to their SUBJECT, not the speaker\n"
-            f"- Only lasting facts: species, age, origin, occupation, background, abilities\n"
-            f"- Skip: current fronting/hosting, session metadata\n"
-            f"- One short sentence per fact\n\n"
-            f"JSON only: {{\"name\": [\"fact\"]}} or {{}}\n"
-            f"Names from: {entity_list}"
+            f"For each person with facts, write their name in [brackets] then bullet points.\n"
+            f"Each bullet = one short standalone fact.\n\n"
+            f"Rules:\n"
+            f"- Attribute to SUBJECT not speaker — if Kaylee says 'I am 19', write under [kaylee]\n"
+            f"- Only lasting facts: age, species, occupation, origin, dreams, preferences, relationships\n"
+            f"- Skip: who is fronting/hosting, session metadata, observation counts\n"
+            f"- Only use names from: {entity_list}\n\n"
+            f"Example:\n"
+            f"[kaylee]\n"
+            f"- is 19 years old\n"
+            f"- is a futa\n"
+            f"- dreams of being a preschool teacher\n"
+            f"- loves kids\n\n"
+            f"If no lasting facts exist, write nothing."
         )
     }]
 
     try:
         result = await llm.generate(
             prompt,
-            system_prompt="Extract lasting personal facts as JSON. Attribute to subject not speaker. JSON only.",
-            max_new_tokens=300,
+            system_prompt=(
+                "Extract lasting personal facts as bullet points grouped by person name in [brackets]. "
+                "One fact per bullet. No JSON. No preamble. Attribute to subject not speaker."
+            ),
+            max_new_tokens=400,
             temperature=0.1,
         )
 
         if not result or not result.strip():
             return {}
 
-        clean = re.sub(r"```(?:json)?|```", "", result).strip()
-        parsed = json.loads(clean)
+        # Parse: [name] headers + bullet points
+        facts: dict[str, list[str]] = {}
+        current_name = None
 
-        validated = {}
-        for name, name_facts in parsed.items():
-            if name.lower() in known and isinstance(name_facts, list):
-                clean_facts = [
-                    f for f in name_facts
-                    if isinstance(f, str) and f.strip() and not _is_junk(f)
-                ]
-                if clean_facts:
-                    validated[name.lower()] = clean_facts
-        return validated
+        for line in result.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            # Name header — [name] or **name** or name:
+            name_match = re.match(
+                r'^\[([^\]]+)\]$|^\*\*([^*]+)\*\*$|^([a-z][a-z]{1,20}):$',
+                line, re.IGNORECASE
+            )
+            if name_match:
+                candidate = (
+                    name_match.group(1) or
+                    name_match.group(2) or
+                    name_match.group(3) or ""
+                ).strip().lower()
+                if candidate in known:
+                    current_name = candidate
+                continue
+
+            # Bullet point
+            if current_name and (line.startswith("- ") or line.startswith("• ")):
+                fact = line[2:].strip()
+                if fact and not _is_junk(fact) and len(fact.split()) >= 2:
+                    facts.setdefault(current_name, [])
+                    if fact.lower() not in [f.lower() for f in facts[current_name]]:
+                        facts[current_name].append(fact)
+
+        log_event("Observer", "LLM_EXTRACT",
+            names=list(facts.keys()),
+            total=sum(len(f) for f in facts.values()),
+        )
+        return facts
 
     except Exception as e:
         log_error("Observer", "LLM fallback failed", exc=e)
