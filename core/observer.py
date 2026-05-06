@@ -141,6 +141,30 @@ def _existing_facts(data: dict, entity_type: str) -> set:
 
 # ── LLM extraction ────────────────────────────────────────────────────────────
 
+# ── Junk fact filter ──────────────────────────────────────────────────────────
+# Facts that are context metadata, not real information worth keeping
+
+_JUNK_PATTERNS = re.compile(
+    r"\b(is (currently |now |the |a )?host(ing)?|is fronting|is co.?front|"
+    r"is present|is (currently )?speaking|switched (in|out)|"
+    r"has \d+ observation|has \d+ moment|observation count|"
+    r"is active|is online|is (in|part of) (the |this )?session|"
+    r"is (a |the )?headmate$|is (a |the )?system member$|"
+    r"is (a |the )?(current |active )?fronter)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_junk_fact(fact: str) -> bool:
+    """Return True if this fact is metadata noise, not real information."""
+    if _JUNK_PATTERNS.search(fact):
+        return True
+    # Very short facts are usually noise
+    if len(fact.split()) < 3:
+        return True
+    return False
+
+
 async def _extract_facts(
     user_message: str,
     gizmo_response: str,
@@ -151,15 +175,21 @@ async def _extract_facts(
     Ask the LLM what facts worth keeping were shared in this exchange.
     Returns a dict: {name_lower: [fact_str, ...]}
 
+    Only extracts from user_message — Gizmo's response words aren't
+    facts about the person.
+
     Extracts facts about ANYONE mentioned — active fronters AND
     third parties being talked about (e.g. "Kaylee is a preschool teacher"
     when Jess is speaking about Kaylee).
+
+    Facts are attributed to the SUBJECT, not the speaker.
     """
-    # Build full known entity list — anyone who has a file
+    # Build full known entity list
     known_entities = set(f.lower() for f in fronters)
     try:
         if _HEADMATES_DIR.exists():
-            known_entities.update(p.stem.lower() for p in _HEADMATES_DIR.glob("*.json"))
+            known_entities.update(p.stem.lower() for p in _HEADMATES_DIR.glob("*.json")
+                                  if p.stem != "count")
         if _EXTERNAL_DIR.exists():
             known_entities.update(p.stem.lower() for p in _EXTERNAL_DIR.glob("*.json"))
         if _PETS_DIR.exists():
@@ -176,24 +206,23 @@ async def _extract_facts(
     prompt = [{
         "role": "user",
         "content": (
-            f"The following is a conversation exchange.\n"
-            f"Speaking: {fronter_list}.\n"
-            f"Known people: {entity_list}.\n\n"
-            f"User said: \"{user_message}\"\n"
-            f"Gizmo responded: \"{gizmo_response[:300]}\"\n\n"
-            f"Extract any facts worth remembering about ANY of the known people — "
-            f"whether they are speaking or being talked about.\n"
-            f"Facts include: personal attributes, preferences, relationships, "
-            f"species, age, occupation, important events, corrections, etc.\n\n"
-            f"Return ONLY a JSON object mapping lowercase names to arrays of short fact strings. "
-            f"Each fact should be one concise sentence. "
-            f"If there are no meaningful facts, return an empty object.\n\n"
-            f"Example: "
-            f'{{\"jess\": [\"goes by Jess, previously called Princess\"], '
-            f'\"oren\": [\"84 years old\", \"werewolf\", \"astrophysicist\"], '
-            f'\"kaylee\": [\"19 years old\", \"futa\", \"preschool teacher\"]}}\n\n'
-            f"Only include names from this list (lowercase): {entity_list}\n"
-            f"No preamble. No explanation. JSON only."
+            f"Extract memorable facts from this message.\n"
+            f"Speaker: {fronter_list}\n"
+            f"Known people: {entity_list}\n\n"
+            f"Message: \"{user_message}\"\n\n"
+            f"Rules:\n"
+            f"- Extract facts about the SUBJECT of each fact, not the speaker\n"
+            f"  Example: 'Jess says Oren is a werewolf' → attribute to oren, not jess\n"
+            f"- Only extract LASTING personal facts: species, age, occupation, "
+            f"relationships, preferences, important personal details\n"
+            f"- DO NOT extract: who is currently fronting/hosting, observation counts, "
+            f"session metadata, or anything Gizmo said\n"
+            f"- DO NOT extract facts that only describe the current moment\n"
+            f"- Each fact should be a standalone sentence someone could read later\n\n"
+            f"Return ONLY a JSON object: {{\"name\": [\"fact\", ...]}}\n"
+            f"Only use names from: {entity_list}\n"
+            f"If no lasting facts, return {{}}\n"
+            f"No preamble. JSON only."
         )
     }]
 
@@ -201,9 +230,10 @@ async def _extract_facts(
         result = await llm.generate(
             prompt,
             system_prompt=(
-                "You extract memorable facts from conversations and return them as JSON. "
-                "Be concise. Only include facts explicitly stated. Never invent. "
-                "Extract facts about anyone mentioned, not just the speaker."
+                "You extract lasting personal facts from messages. "
+                "Attribute facts to their subject, not the speaker. "
+                "Never extract session metadata or who is currently fronting. "
+                "JSON only."
             ),
             max_new_tokens=400,
             temperature=0.1,
@@ -215,11 +245,14 @@ async def _extract_facts(
         clean = re.sub(r"```(?:json)?|```", "", result).strip()
         parsed = json.loads(clean)
 
-        # Validate — keep any known entity, not just fronters
+        # Validate — keep any known entity, filter junk facts
         validated = {}
         for name, facts in parsed.items():
             if name.lower() in known_entities and isinstance(facts, list):
-                clean_facts = [f for f in facts if isinstance(f, str) and f.strip()]
+                clean_facts = [
+                    f for f in facts
+                    if isinstance(f, str) and f.strip() and not _is_junk_fact(f)
+                ]
                 if clean_facts:
                     validated[name.lower()] = clean_facts
 
@@ -270,21 +303,16 @@ def _write_facts(name: str, facts: list[str]) -> int:
 
         # Write to appropriate field
         if entity_type == "headmate":
-            # Try to detect if this is a baseline attribute
-            baseline_keys = {
-                "age": ["years old", "age"],
-                "register": ["usually", "tends to", "baseline"],
-                "verbosity": ["verbose", "concise", "chatty", "quiet"],
-            }
+            # Only route to baseline if it's clearly a specific attribute
+            # Age: must contain a number + "years old" or "year old"
+            # Register/verbosity: only if it's genuinely about communication style
             written_to_baseline = False
-            for key, indicators in baseline_keys.items():
-                if any(ind in fact_lower for ind in indicators):
-                    # Don't overwrite if already set
-                    current = data.get("baseline", {}).get(key, "unknown")
-                    if current == "unknown":
-                        data.setdefault("baseline", {})[key] = fact
-                        written_to_baseline = True
-                        break
+            age_match = re.search(r'\b(\d+)\s+years?\s+old\b', fact_lower)
+            if age_match:
+                current = data.get("baseline", {}).get("age", "unknown")
+                if current == "unknown":
+                    data.setdefault("baseline", {})["age"] = fact
+                    written_to_baseline = True
 
             if not written_to_baseline:
                 data.setdefault("moments_of_note", []).append(
@@ -305,12 +333,15 @@ def _write_facts(name: str, facts: list[str]) -> int:
         written += 1
 
     if written > 0:
+        # Clear stale cold-start note once real facts exist
+        if data.get("note", "").startswith("Cold start"):
+            data["note"] = f"Actively observed — {data['baseline'].get('observations', 0)} exchanges logged."
         _save_entity(name, entity_type, data)
         log_event("Observer", "FACTS_WRITTEN",
             name=name,
             type=entity_type,
             count=written,
-            facts=facts[:3],  # log first 3 for readability
+            facts=facts[:3],
         )
 
     return written
