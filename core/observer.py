@@ -327,25 +327,31 @@ async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> di
     entity_list = ", ".join(sorted(known))
     fronter_list = ", ".join(f.title() for f in fronters) if fronters else "unknown"
 
+    # Primary speaker is always fronters[0]
+    primary_speaker = fronters[0].title() if fronters else "unknown"
+    other_fronters = [f.title() for f in fronters[1:]] if len(fronters) > 1 else []
+    fronter_context = f"Primary speaker: {primary_speaker}"
+    if other_fronters:
+        fronter_context += f" (also present: {', '.join(other_fronters)})"
+
     prompt = [{
         "role": "user",
         "content": (
             f"Extract lasting personal facts from this message.\n"
-            f"Speaker: {fronter_list} | Known people: {entity_list}\n\n"
+            f"{fronter_context} | Known people: {entity_list}\n\n"
             f"Message: \"{message}\"\n\n"
             f"For each person with facts, write their name in [brackets] then bullet points.\n"
             f"Each bullet = one short standalone fact.\n\n"
             f"Rules:\n"
-            f"- Attribute to SUBJECT not speaker — if Kaylee says 'I am 19', write under [kaylee]\n"
+            f"- When the speaker says 'I' or 'my', attribute to {primary_speaker}\n"
+            f"- Attribute to SUBJECT — if {primary_speaker} says 'Oren is a werewolf', write under [oren]\n"
             f"- Only lasting facts: age, species, occupation, origin, dreams, preferences, relationships\n"
             f"- Skip: who is fronting/hosting, session metadata, observation counts\n"
             f"- Only use names from: {entity_list}\n\n"
             f"Example:\n"
-            f"[kaylee]\n"
+            f"[{primary_speaker.lower()}]\n"
             f"- is 19 years old\n"
-            f"- is a futa\n"
-            f"- dreams of being a preschool teacher\n"
-            f"- loves kids\n\n"
+            f"- dreams of being a preschool teacher\n\n"
             f"If no lasting facts exist, write nothing."
         )
     }]

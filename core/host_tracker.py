@@ -172,9 +172,14 @@ class SessionState:
         self.host_confidence = confidence
         self.updated_at = time.time()
 
-        # Host is always a fronter
-        if name not in [f.lower() for f in self.active_fronters]:
-            self.active_fronters.insert(0, name)
+        # Host is always first fronter — move to front if already present
+        lower_fronters = [f.lower() for f in self.active_fronters]
+        if name in lower_fronters:
+            # Remove and re-insert at front
+            self.active_fronters = [
+                f for f in self.active_fronters if f.lower() != name
+            ]
+        self.active_fronters.insert(0, name)
 
         return changed
 
@@ -213,6 +218,7 @@ class SessionState:
         return {
             "current_host": self.current_host or "",
             "fronters":     list(self.active_fronters),
+            "host":         self.current_host or "",  # explicit alias
             "timezone":     self.timezone,
         }
 

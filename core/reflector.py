@@ -96,9 +96,8 @@ async def _decide(
     Fast LLM call — is there a thread worth pulling?
     Returns {"action": "pull"|"hold"|"nothing", "thread": str, "who": str}
 
-    Small prompt, low tokens, temperature 0.2 — this is a decision, not prose.
+    Uses plain text format — more reliable than JSON when router is flaky.
     """
-    # Build a compact transcript of recent messages
     transcript = "\n".join(
         f"{'User' if m['role'] == 'user' else 'Gizmo'}: {m['content'][:200]}"
         for m in recent_messages[-8:]
@@ -110,7 +109,7 @@ async def _decide(
     prompt = [{
         "role": "user",
         "content": (
-            f"You are reviewing a conversation for threads worth pulling.\n\n"
+            f"Review this conversation for threads worth pulling.\n\n"
             f"Active people: {fronter_list}\n"
             f"Emotional arc: {arc_summary}\n\n"
             f"Recent conversation:\n{transcript}\n\n"
@@ -118,16 +117,11 @@ async def _decide(
             f"- Something mentioned twice but never resolved\n"
             f"- An emotional undercurrent that hasn't been named\n"
             f"- A topic dropped mid-thought\n"
-            f"- A pattern in how someone is talking that seems significant\n"
             f"- Something that feels unfinished\n\n"
-            f"Respond with ONLY valid JSON, no markdown:\n"
-            f'{{"action": "pull"|"hold"|"nothing", '
-            f'"thread": "one sentence describing what you noticed", '
-            f'"who": "which person this is about (or session)"}}\n\n'
-            f"action rules:\n"
-            f"  pull = surface it right now, good moment, thread is clear\n"
-            f"  hold = thread is there but moment isn't right, or it needs more data\n"
-            f"  nothing = no meaningful thread, don't interrupt\n\n"
+            f"Respond in exactly this format (3 lines):\n"
+            f"ACTION: pull OR hold OR nothing\n"
+            f"THREAD: one sentence describing what you noticed (or 'none')\n"
+            f"WHO: which person this is about (or 'session')\n\n"
             f"Be conservative. Most of the time the answer is nothing."
         )
     }]
@@ -136,27 +130,36 @@ async def _decide(
         raw = await llm.generate(
             prompt,
             system_prompt=(
-                "You detect meaningful conversational threads worth reflecting on. "
+                "You detect meaningful conversational threads. "
                 "Be conservative — only flag things that genuinely matter. "
-                "JSON only."
+                "Respond in the exact 3-line format requested."
             ),
-            max_new_tokens=120,
+            max_new_tokens=80,
             temperature=0.2,
         )
 
-        import json, re
-        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
-        parsed = json.loads(clean)
+        if not raw or not raw.strip():
+            return {"action": "nothing", "thread": "", "who": "session"}
 
-        action = parsed.get("action", "nothing")
-        if action not in ("pull", "hold", "nothing"):
-            action = "nothing"
+        # Parse plain text format
+        action = "nothing"
+        thread = ""
+        who = "session"
 
-        return {
-            "action": action,
-            "thread": parsed.get("thread", ""),
-            "who":    parsed.get("who", "session"),
-        }
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.upper().startswith("ACTION:"):
+                val = line.split(":", 1)[1].strip().lower()
+                if val in ("pull", "hold", "nothing"):
+                    action = val
+            elif line.upper().startswith("THREAD:"):
+                val = line.split(":", 1)[1].strip()
+                if val.lower() != "none":
+                    thread = val
+            elif line.upper().startswith("WHO:"):
+                who = line.split(":", 1)[1].strip().lower()
+
+        return {"action": action, "thread": thread, "who": who}
 
     except Exception as e:
         log_error("Reflector", "decide() failed", exc=e)
