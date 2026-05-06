@@ -177,9 +177,9 @@ _WORK_RE = re.compile(
 # Speaker self-descriptions
 _SELF_AGE_RE    = re.compile(r"\bI'?m\s+(\d+)\s+years?\s+old\b", re.IGNORECASE)
 _SELF_WORK_RE   = re.compile(r"\bI\s+(?:work|worked)\s+(?:as|at|in|for)\s+([^.!?,\n]{4,60})(?:\.|,|$)", re.IGNORECASE)
-_SELF_IS_RE     = re.compile(r"\bI'?m\s+(?:a|an)\s+([a-z][^.!?,\n]{3,50})(?:\.|,|!|\?|$)", re.IGNORECASE)
+_SELF_IS_RE     = re.compile(r"\bI'?m\s+(?:a|an)\s+([\w][^.!?,\n]{2,60})(?:\.|,|!|\?|$)", re.IGNORECASE)
 _SELF_PREF_RE   = re.compile(r"\bI\s+(like|love|hate|prefer|enjoy|adore|despise)\s+([^.!?,\n]{3,60})(?:\.|,|$)", re.IGNORECASE)
-_SELF_FROM_RE   = re.compile(r"\bI'?(?:m from|come from|was born in|grew up in)\s+([^.!?,\n]{3,60})(?:\.|,|$)", re.IGNORECASE)
+_SELF_FROM_RE   = re.compile(r"\bI'?(?:m from|come from|was born in|grew up in|'?m\s+from)\s+([^.!?,\n]{3,80})(?:\.|,|$)", re.IGNORECASE)
 
 # Junk predicates — after "is" these aren't real facts
 _JUNK_PRED_RE = re.compile(
@@ -410,6 +410,72 @@ def _write_facts(name: str, facts: list[str]) -> int:
         )
 
     return written
+
+
+# ── File cleaner ──────────────────────────────────────────────────────────────
+
+def clean_junk_facts(name: str) -> int:
+    """
+    Remove junk facts from an existing entity file.
+    Returns count removed. Can be called manually or via a tool.
+    """
+    entity_type = _get_entity_type(name)
+    if not entity_type:
+        return 0
+
+    data = _load_entity(name, entity_type)
+    if not data:
+        return 0
+
+    removed = 0
+
+    if entity_type == "headmate":
+        original = data.get("moments_of_note", [])
+        cleaned = [m for m in original if not _is_junk(
+            re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(m))
+        )]
+        removed = len(original) - len(cleaned)
+        data["moments_of_note"] = cleaned
+
+        # Fix bad baseline entries
+        baseline = data.get("baseline", {})
+        for key in list(baseline.keys()):
+            val = str(baseline.get(key, ""))
+            if key == "age" and not re.search(r'\d', val):
+                baseline[key] = "unknown"
+                removed += 1
+
+    else:
+        original = data.get("observed_facts", [])
+        cleaned = [f for f in original if not _is_junk(
+            re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(f))
+        )]
+        removed = len(original) - len(cleaned)
+        data["observed_facts"] = cleaned
+
+    if removed > 0:
+        _save_entity(name, entity_type, data)
+        log_event("Observer", "JUNK_CLEANED",
+            name=name,
+            removed=removed,
+        )
+
+    return removed
+
+
+def clean_all_junk() -> dict:
+    """Clean junk facts from all entity files. Returns {name: count_removed}."""
+    results = {}
+    for d, etype in [(_HEADMATES_DIR, "headmate"), (_EXTERNAL_DIR, "external"), (_PETS_DIR, "pet")]:
+        if not d.exists():
+            continue
+        for f in d.glob("*.json"):
+            if f.stem in ("count", "_schema"):
+                continue
+            removed = clean_junk_facts(f.stem)
+            if removed > 0:
+                results[f.stem] = removed
+    return results
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────

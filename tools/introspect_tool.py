@@ -310,7 +310,7 @@ class IntrospectTool(BaseTool):
             "or what rules you're following. "
             "Args: query (str) — one of: "
             "'headmates', 'externals', 'pets', 'all_known', "
-            "'personality', 'rules', 'self', "
+            "'personality', 'rules', 'self', 'clean_junk', "
             "'headmate:<name>', 'external:<name>', 'pet:<name>'"
         )
 
@@ -340,6 +340,17 @@ class IntrospectTool(BaseTool):
             elif query == "self":
                 output = _self_summary()
 
+            elif query == "clean_junk":
+                from core.observer import clean_all_junk
+                results = clean_all_junk()
+                if results:
+                    lines = ["Cleaned junk facts from files:"]
+                    for name, count in results.items():
+                        lines.append(f"  {name.title()}: {count} removed")
+                    output = "\n".join(lines)
+                else:
+                    output = "No junk facts found — files are clean."
+
             elif query.startswith("headmate:"):
                 name = query.split(":", 1)[1].strip()
                 output = _full_headmate(name)
@@ -353,8 +364,6 @@ class IntrospectTool(BaseTool):
                 output = _full_pet(name)
 
             else:
-                # Try to guess — maybe they passed a name directly
-                # Check all three directories
                 for dir_, reader in [
                     (_HEADMATES_DIR, _full_headmate),
                     (_EXTERNAL_DIR,  _full_external),
@@ -367,7 +376,8 @@ class IntrospectTool(BaseTool):
                     output = (
                         f"Unknown query '{query}'. "
                         f"Valid options: headmates, externals, pets, all_known, "
-                        f"personality, rules, self, headmate:<name>, external:<name>, pet:<name>"
+                        f"personality, rules, self, clean_junk, "
+                        f"headmate:<name>, external:<name>, pet:<name>"
                     )
 
             return ToolResult(success=True, output=output)
