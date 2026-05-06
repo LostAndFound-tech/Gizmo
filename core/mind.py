@@ -179,29 +179,15 @@ async def _query_rag(
 
 async def _query_web(query: str, topics: list) -> dict:
     """
-    Web search — last resort. Uses existing epistemic synthesis.
-    Only fires when RAG confidence is below threshold.
+    Web search — last resort.
+    Stub until web search component is rebuilt.
+    Returns empty — Mind will fall through to "nothing found".
     """
-    try:
-        from core.epistemic_synthesis import synthesize as epistemic_synthesize
-        from core.llm import llm
-
-        result = await epistemic_synthesize(
-            query=query,
-            llm=llm,
-        )
-
-        if not result:
-            return {"text": "", "confidence": 0.0}
-
-        return {
-            "text":       result,
-            "confidence": 0.6,   # web search is decent but not ground truth
-        }
-
-    except Exception as e:
-        log_error("Mind", "web search failed", exc=e)
-        return {"text": "", "confidence": 0.0}
+    log_event("Mind", "WEB_SEARCH_STUB",
+        query=query[:60],
+        note="web search not yet implemented in new architecture",
+    )
+    return {"text": "", "confidence": 0.0}
 
 
 # ── Correction veto stub ───────────────────────────────────────────────────────
