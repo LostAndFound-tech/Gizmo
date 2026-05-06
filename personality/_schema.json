@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "note": "Schema only — not a real headmate file. Copy this to create a new headmate.",
+
+  "name": "headmate_name",
+
+  "baseline": {
+    "note": "Observed tendency, not a fixed trait. Confidence starts at 0.",
+    "register": "unknown",
+    "verbosity": "unknown",
+    "humor_response": "unknown",
+    "confidence": 0.0,
+    "observations": 0
+  },
+
+  "observed_patterns": [
+    {
+      "note": "Example pattern entry — delete this",
+      "condition": "what was happening when this was observed",
+      "observed_behavior": "what they actually did",
+      "confidence": 0.0,
+      "instances": 0,
+      "first_seen": null,
+      "last_seen": null
+    }
+  ],
+
+  "departures": [
+    {
+      "note": "Example departure entry — when someone acts outside their baseline",
+      "baseline_expectation": "what we expected based on their pattern",
+      "actual_behavior": "what actually happened",
+      "condition": "what was going on",
+      "gizmo_response": "what Gizmo did",
+      "outcome": "how it landed",
+      "timestamp": null
+    }
+  ],
+
+  "moments_of_note": [
+    "Example: showed unexpected steadiness during a hard conversation"
+  ],
+
+  "corrections": [
+    {
+      "note": "Example correction — things Gizmo should do differently with this person",
+      "rule": "don't do X",
+      "source": "explicit correction from headmate",
+      "timestamp": null
+    }
+  ]
+}

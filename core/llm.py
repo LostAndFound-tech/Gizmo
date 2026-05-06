@@ -19,10 +19,16 @@ HF_ROUTER_URL = "https://router.huggingface.co/v1"
 class LLMClient:
     def __init__(self, model_id: str = HF_MODEL_ID):
         self.model_id = model_id
-        self.client = AsyncOpenAI(
-            base_url=HF_ROUTER_URL,
-            api_key=HF_TOKEN,
-        )
+        try:
+            self.client = AsyncOpenAI(
+                base_url=HF_ROUTER_URL,
+                api_key=HF_TOKEN,
+            )
+        except:
+            self.client = AsyncOpenAI(
+                base_url="silly",
+                api_key="goose"
+            )
 
     async def stream(
         self,

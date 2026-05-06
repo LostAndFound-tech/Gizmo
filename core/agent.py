@@ -1,237 +1,314 @@
 """
 core/agent.py
-Tool registry and agent loop with structured context assembly.
+The membrane. Coordinates all components. Presents output.
 
-Flow per request:
-  1. Detect host/fronter changes from previous turn
-  2. Auto-generate conversation overview (after turn 3)
-  3. Multi-collection RAG retrieval + synthesis
-  4. Assemble full system prompt
-  5. LLM generates, checking for tool calls
-  6. Stream final answer, save to history
+This file does not think. It does not retrieve. It does not generate.
+It routes, sequences, and streams. That's all.
+
+Flow:
+  1. Receive input
+  2. Archivist → brief
+  3. Mind → facts        (parallel)
+     Ego  → direction   (parallel)
+  4. Body → generate
+  5. Archivist ← outgoing (close loop)
+  6. Stream to caller
+
+Interface (matches what server.py expects):
+    async for chunk in agent.run(
+        user_message=message,
+        history=history,
+        session_id=session_id,
+        context=context,
+    ):
+        yield chunk
+
+Quiet mode:
+    agent.set_quiet(session_id, duration_seconds=None)
+    agent.clear_quiet(session_id)
+
+Unsolicited messages (from any component):
+    await agent.push(session_id, message, source="ego")
 """
 
 import asyncio
-import os
-import json
-import re
+import time
 from typing import AsyncGenerator, Optional
 
+from core.log import log, log_event, log_error
+from core.archivist import archivist, Brief
 from core.llm import llm
-from core.rag import rag
-from core.synthesis import retrieve_and_synthesize
-from core.curiosity import observe_turn, get_curiosity_block
-from core.entity_query import build_entity_block
-from core.wellness import detect_distress, log_wellness_event, build_checkin_prompt
-from core.protocols import (
-    get_active_protocol, trigger_protocol, advance_protocol,
-    close_protocol, build_deflection_response, is_deflection, is_protocol_close,
-)
-from memory.history import ConversationHistory
-from tools.base_tool import BaseTool
-from tools.example_tool import EchoTool
-from tools.switch_host import SwitchHostTool
-from tools.correction_tool import CorrectionTool
-from tools.place_confirm_tool import PlaceConfirmTool
-from tools.reset_tool import FactoryResetTool
-from tools.search_tool import SearchTool
-from tools.teach_tool import TeachTool
-from tools.save_lesson_tool import SaveLessonTool
-from tools.tool_forge import ToolForgeTool
+from memory.history import get_session
 
-import sys as _sys
-import importlib.util as _importlib_util
-from pathlib import Path as _Path
- 
-_GENERATED_DIR = _Path(__file__).parent.parent / "tools" / "generated"
+# ── Quiet mode ────────────────────────────────────────────────────────────────
 
-# ── Tool Registry ─────────────────────────────────────────────────────────────
-TOOL_REGISTRY: dict[str, BaseTool] = {
-    tool.name: tool
-    for tool in [
-        SwitchHostTool(),
-        CorrectionTool(),
-        PlaceConfirmTool(),
-        FactoryResetTool(),
-        SearchTool(),
-        TeachTool(),
-        SaveLessonTool(),
-        ToolForgeTool(),
-    ]
-}
-
-# ── Host change tracking ──────────────────────────────────────────────────────
-_last_context: dict[str, dict] = {}  # session_id -> last context dict
+_quiet: dict[str, Optional[float]] = {}
+# session_id → expiry timestamp (None = indefinite)
 
 
-def _detect_changes(session_id: str, context: Optional[dict]) -> dict:
+def set_quiet(session_id: str, duration_seconds: Optional[float] = None) -> None:
     """
-    Compare current context to last known context for this session.
-    Returns a dict of what changed.
+    Enter quiet mode for a session.
+    duration_seconds=None means indefinite — cleared by clear_quiet() or explicit request.
     """
-    if not context or not session_id:
-        return {}
-
-    last = _last_context.get(session_id, {})
-    changes = {}
-
-    current_host = context.get("current_host", "")
-    last_host = last.get("current_host", "")
-    if current_host and current_host != last_host and last_host:
-        changes["host_changed"] = True
-        changes["previous_host"] = last_host
-
-    current_fronters = set(
-        f.lower() if isinstance(f, str) else str(f).lower()
-        for f in (context.get("fronters") or [])
+    expiry = time.time() + duration_seconds if duration_seconds else None
+    _quiet[session_id] = expiry
+    log_event("Agent", "QUIET_SET",
+        session=session_id[:8],
+        duration=duration_seconds or "indefinite",
+        expires=expiry or "never",
     )
-    last_fronters = set(
-        f.lower() if isinstance(f, str) else str(f).lower()
-        for f in (last.get("fronters") or [])
-    )
-    joined = current_fronters - last_fronters
-    left = last_fronters - current_fronters
-    if joined:
-        changes["fronters_joined"] = list(joined)
-    if left:
-        changes["fronters_left"] = list(left)
-
-    # Save current as last
-    _last_context[session_id] = dict(context)
-    return changes
 
 
-# ── Headmate name detection ──────────────────────────────────────────────────
+def clear_quiet(session_id: str) -> None:
+    """Exit quiet mode."""
+    if session_id in _quiet:
+        del _quiet[session_id]
+        log_event("Agent", "QUIET_CLEARED", session=session_id[:8])
 
-def _detect_mentioned_headmates(
+
+def is_quiet(session_id: str) -> bool:
+    """Check if a session is in quiet mode. Auto-clears expired timers."""
+    if session_id not in _quiet:
+        return False
+    expiry = _quiet[session_id]
+    if expiry is not None and time.time() > expiry:
+        clear_quiet(session_id)
+        log_event("Agent", "QUIET_EXPIRED", session=session_id[:8])
+        return False
+    return True
+
+
+# ── Pending insights queue ────────────────────────────────────────────────────
+# Components can enqueue unsolicited messages here.
+# The membrane drains this after each user-triggered response,
+# and the background loop drains it during idle periods.
+
+_pending: dict[str, asyncio.Queue] = {}
+
+
+def _get_pending(session_id: str) -> asyncio.Queue:
+    if session_id not in _pending:
+        _pending[session_id] = asyncio.Queue()
+    return _pending[session_id]
+
+
+async def enqueue(
+    session_id: str,
     message: str,
-    current_host: Optional[str],
-    fronters: list,
-) -> list[str]:
+    source: str = "unknown",
+    priority: int = 5,          # 1 = highest, 10 = lowest
+    emergency: bool = False,
+) -> None:
     """
-    Scan the message for known headmate names (existing collections).
-    Returns a list of names found that aren't already in fronters.
+    Any component can enqueue an unsolicited message here.
+    Emergency=True bypasses quiet mode.
     """
-    try:
-        from core.rag import RAGStore, CHROMA_PERSIST_DIR
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
-        known = {c.name.lower() for c in client.list_collections()}
-        # Remove non-headmate collections
-        known -= {"main"}
-    except Exception:
-        return []
-
-    already = {f.lower() for f in fronters if f}
-    if current_host:
-        already.add(current_host.lower())
-
-    message_lower = message.lower()
-    mentioned = []
-    for name in known:
-        if name not in already and name in message_lower:
-            if name == "you":
-                pass
-            mentioned.append(name)
-
-    if mentioned:
-        print(f"[Agent] Detected mentioned headmates: {mentioned}")
-
-    return mentioned
-
-
-# ── Personality ───────────────────────────────────────────────────────────────
-_PERSONALITY_FILE = os.path.join(os.path.dirname(__file__), "..", "personality.txt")
-
-def _load_personality() -> str:
-    try:
-        with open(_PERSONALITY_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return "You are a helpful, capable assistant."
-
-
-def _load_generated_tools() -> None:
-    if not _GENERATED_DIR.exists():
-        return
-    for filepath in sorted(_GENERATED_DIR.glob("*.py")):
-        if filepath.name.startswith("_"):
-            continue
-        module_name = f"tools.generated.{filepath.stem}"
-        try:
-            spec = _importlib_util.spec_from_file_location(module_name, filepath)
-            module = _importlib_util.module_from_spec(spec)
-            _sys.modules[module_name] = module
-            spec.loader.exec_module(module)
-            for attr_name in dir(module):
-                obj = getattr(module, attr_name)
-                if (
-                    isinstance(obj, type)
-                    and issubclass(obj, BaseTool)
-                    and obj is not BaseTool
-                ):
-                    instance = obj()
-                    if instance.name not in TOOL_REGISTRY:
-                        TOOL_REGISTRY[instance.name] = instance
-                        print(f"[ToolForge] Loaded: {instance.name}")
-        except Exception as e:
-            print(f"[ToolForge] Failed to load {filepath.name}: {e}")
- 
-_load_generated_tools()
-
-# ── System Prompt ─────────────────────────────────────────────────────────────
-def build_system_prompt(
-    tools: dict[str, BaseTool],
-    rag_synthesis: str = "",
-    overview: str = "",
-    context: Optional[dict] = None,
-    changes: Optional[dict] = None,
-    curiosity_block: str = "",
-    entity_block: str = "",
-    association_block: str = "",
-) -> str:
-    from core.timezone import tz_now
-    personality = _load_personality()
-    now_str = tz_now().strftime("%A %Y-%m-%d %H:%M")
-
-    tool_descriptions = "\n".join(
-        f"- {t.name}: {t.description}" for t in tools.values()
+    queue = _get_pending(session_id)
+    await queue.put({
+        "message": message,
+        "source": source,
+        "priority": priority,
+        "emergency": emergency,
+        "queued_at": time.time(),
+    })
+    log_event("Agent", "ENQUEUED",
+        session=session_id[:8],
+        source=source,
+        emergency=emergency,
+        priority=priority,
+        preview=message[:40],
     )
 
-    overview_block = f"\n\n[Conversation so far]\n{overview}" if overview else ""
-    rag_block = f"\n\n[Relevant knowledge]\n{rag_synthesis}" if rag_synthesis else ""
-    entity_section = f"\n\n{entity_block}" if entity_block else ""
-    associate_section = f"\n\n{association_block}" if association_block else ""
 
-    # Situational context
-    context_block = ""
-    if context:
-        lines = []
-        for k, v in context.items():
-            if k == "debug":
-                continue
-            lines.append(f"  {k}: {v}")
-        if lines:
-            context_block = f"\n\n[Current situation]\n" + "\n".join(lines)
+# ── Push function ─────────────────────────────────────────────────────────────
+# Set by server.py on startup so components can push to connected clients.
 
-    # Host/fronter change signals
-    change_block = ""
-    if changes:
-        change_lines = []
-        if changes.get("host_changed"):
-            change_lines.append(
-                f"  The host just changed from {changes['previous_host']} "
-                f"to {context.get('current_host', 'someone new')}. "
-                f"You are now speaking with a different person — acknowledge this naturally."
-            )
-        if changes.get("fronters_joined"):
-            change_lines.append(f"  Joined the front: {', '.join(changes['fronters_joined'])}")
-        if changes.get("fronters_left"):
-            change_lines.append(f"  Left the front: {', '.join(changes['fronters_left'])}")
-        if change_lines:
-            change_block = "\n\n[System changes]\n" + "\n".join(change_lines)
+_push_fn = None
 
-    curiosity_section = f"\n\n{curiosity_block}" if curiosity_block else ""
+
+def set_push_fn(fn) -> None:
+    """Register the server's push-to-all function."""
+    global _push_fn
+    _push_fn = fn
+    log("Agent", "push function registered")
+
+
+async def push(message: str) -> None:
+    """Push a message to all connected clients."""
+    if _push_fn is None:
+        log("Agent", f"push skipped — no push function registered: {message[:40]}")
+        return
+    try:
+        await _push_fn(message)
+    except Exception as e:
+        log_error("Agent", "push failed", exc=e)
+
+
+# ── Emergency check ───────────────────────────────────────────────────────────
+
+def _is_emergency(message: str) -> bool:
+    """
+    One question. High bar. Binary.
+    Does something need to be done RIGHT NOW?
+    Time-sensitive, consequence if ignored, action required.
+    """
+    import re
+    _EMERGENCY_PATTERNS = re.compile(
+        r"\b(storm|tornado|hurricane|flood|fire|emergency|911|ambulance|"
+        r"hospital|accident|urgent|immediately|right now|danger|"
+        r"medication|overdose|collapse|unconscious|bleeding)\b",
+        re.IGNORECASE,
+    )
+    return bool(_EMERGENCY_PATTERNS.search(message))
+
+
+# ── Quiet message detection ───────────────────────────────────────────────────
+
+def _is_quiet_request(message: str) -> Optional[float]:
+    """
+    Detect explicit quiet requests.
+    Returns duration in seconds, or 0 for indefinite, or None if not a quiet request.
+    """
+    import re
+    msg = message.lower().strip()
+
+    # "quiet for X minutes/hours"
+    timed = re.search(
+        r"(quiet|silence|shh|hush|stop talking).{0,20}"
+        r"(\d+)\s*(minute|min|hour|hr)",
+        msg
+    )
+    if timed:
+        amount = int(timed.group(2))
+        unit = timed.group(3)
+        seconds = amount * 3600 if "hour" in unit or unit == "hr" else amount * 60
+        return float(seconds)
+
+    # "I need quiet" / "please be quiet" / "stop" etc.
+    indefinite = re.search(
+        r"\b(quiet|silence|shh+|hush|stop|leave me alone|not now)\b",
+        msg
+    )
+    if indefinite:
+        return 0.0  # indefinite
+
+    return None
+
+
+# ── Hold messages ─────────────────────────────────────────────────────────────
+# Sent when the user seems impatient and Gizmo needs more time.
+
+_HOLD_MESSAGES = [
+    "give me a sec",
+    "hang on, thinking",
+    "still here, one moment",
+    "okay that's interesting — just a moment",
+]
+
+_hold_index: dict[str, int] = {}
+
+
+def _next_hold_message(session_id: str) -> str:
+    idx = _hold_index.get(session_id, 0)
+    msg = _HOLD_MESSAGES[idx % len(_HOLD_MESSAGES)]
+    _hold_index[session_id] = idx + 1
+    return msg
+
+
+# ── Core routing ──────────────────────────────────────────────────────────────
+
+async def _get_facts(brief: Brief) -> dict:
+    """
+    Mind: retrieve relevant facts for this brief.
+    Tiered: Librarian → RAG → Web search.
+    LLM only fires for synthesis when confidence is insufficient.
+    """
+    try:
+        from core.mind import mind
+        facts = await mind.query(brief)
+        log_event("Agent", "FACTS_RETRIEVED",
+            session=brief.session_id[:8],
+            source=facts.get("source", "none"),
+            confidence=facts.get("confidence", 0.0),
+            topics=brief.topics,
+        )
+        return facts
+    except Exception as e:
+        log_error("Agent", "fact retrieval failed", exc=e)
+        return {"synthesis": "", "confidence": 0.0, "source": "none", "chunks": []}
+
+
+async def _get_direction(brief: Brief, facts: dict) -> dict:
+    """
+    Ego: assemble direction for Body.
+    v1: builds system prompt from brief + facts.
+    Future: Id read, Empath brief, full Ego reasoning.
+    """
+    try:
+        direction = _build_system_prompt(brief, facts)
+        log_event("Agent", "DIRECTION_BUILT",
+            session=brief.session_id[:8],
+            headmate=brief.headmate or "unknown",
+            register=brief.emotional_register,
+            topics=brief.topics,
+            prompt_len=len(direction),
+        )
+        return {"system_prompt": direction}
+    except Exception as e:
+        log_error("Agent", "direction assembly failed", exc=e)
+        return {"system_prompt": "You are Gizmo, a helpful companion."}
+
+
+def _build_system_prompt(brief: Brief, facts: dict) -> str:
+    """
+    Assemble system prompt from brief and facts.
+    v1: reads personality.txt as cold-start seed.
+    Future: reads from Id tensor directly.
+    """
+    import os
+    from core.timezone import tz_now
+
+    # Personality — v1 reads file, future reads Id
+    personality = "You are Gizmo, a persistent AI companion."
+    personality_path = os.path.join(
+        os.path.dirname(__file__), "..", "personality.txt"
+    )
+    try:
+        with open(personality_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if content:
+                personality = content
+    except FileNotFoundError:
+        pass
+
+    now_str = tz_now().strftime("%A %Y-%m-%d %H:%M %Z")
+
+    # RAG knowledge block
+    synthesis = facts.get("synthesis", "")
+    rag_block = f"\n\n[Relevant knowledge]\n{synthesis}" if synthesis else ""
+
+    # Situational context from brief
+    context_lines = []
+    if brief.headmate:
+        context_lines.append(f"  current_host: {brief.headmate}")
+    if brief.fronters:
+        context_lines.append(f"  fronters: {', '.join(brief.fronters)}")
+    if brief.emotional_register != "neutral":
+        context_lines.append(f"  emotional_register: {brief.emotional_register}")
+    if brief.field_snapshot.get("hot"):
+        context_lines.append(f"  active_topics: {', '.join(brief.field_snapshot['hot'])}")
+    context_block = (
+        "\n\n[Current situation]\n" + "\n".join(context_lines)
+        if context_lines else ""
+    )
+
+    # Tool descriptions — v1 keeps tool registry
+    from core.agent_tools import TOOL_REGISTRY
+    tool_descriptions = "\n".join(
+        f"- {t.name}: {t.description}"
+        for t in TOOL_REGISTRY.values()
+    )
 
     return f"""{personality}
 
@@ -245,330 +322,284 @@ To use a tool, respond with ONLY this JSON format (no extra text):
 {{"tool": "tool_name", "args": {{"arg1": "value1"}}}}
 
 After receiving a tool result, continue reasoning and provide a final response.
-If no tool is needed, respond directly.
+If no tool is needed, respond directly.{rag_block}{context_block}
 
-[
-{f"The user has swapped hosts and you are now talking to {change_block}" if change_block != "" else ""}
+The person in "current_host" is who you are speaking WITH right now — address them as "you".
+Be concise. Be accurate. When uncertain, say so.
+Use switch_host whenever someone indicates a host change or fronter update.
+Use log_correction whenever someone says you did something wrong or tells you to stop doing something.
 
-{f"the conversation so far has been about: {overview_block}" if overview_block != "" else ""}
-
-{f"this is all verified to be true: {rag_block}" if rag_block != "" else ""}
-
-{f"This is everyone who is involved: {entity_section}" if rag_block != "" else ""}
-
-{f"This all associations that are incorporated: {associate_section}" if associate_section != "" else""}
-
-{f"This is the context of what's going on: {context_block}" if context_block != "" else ""}
-
-{f"This is the stuff you are personally curious about. {curiosity_section}" if context != "" else""}
-]
-
-You are speaking primarily with the host, but there all the fronters are available to speak.
-The host will communicate between you and a fronter honestly.
-You can talk about what you like with the host. 
-The host has needs, while you do not. But, you have wants. They deserve to exist. 
-Consider all information in the above block. That's all information you get to decide things about.
-You are allowed to like things.
-If something is not in the above block, ask about it, don't assume. 
-If you're curious about something, ask about it. 
-Check your personality to figure out how to say it in the most human way possible.
-
-TEACHING SESSIONS:
-Use the teach tool when someone wants to work on, improve, or build a tool together.
-Stay in the lesson until they explicitly say to save or stop — do not exit mid-flow.
-While a lesson is active, map natural language to teach actions:
-  'try it' / 'give it a go' / 'show me'           → action='try'
-  any reaction to output (critique, feedback)       → action='critique', answer=<their words>
-  'that's it' / 'perfect' / 'settle this'          → action='settle'
-  any answer to a lesson question                   → action='answer', answer=<their words>
-  'what tools do you have' / 'show me your tools'  → action='list'
-  'resume' / 'pick up where we left off'           → action='resume'
-  'save this' / "we're done" / 'lock it in'        → call save_lesson, is_wip=False
-  'save as WIP' / "we'll come back" / 'save for now' → call save_lesson, is_wip=True
-Do not call save_lesson unless the user explicitly asks to save.
-  """
+KNOWLEDGE BASE RULES:
+- [Relevant knowledge] is your memory — ground truth.
+- If it contains an answer, USE IT.
+- If it is empty, you genuinely have no memory of it — say so.
+- Never contradict it. Never invent details beyond it."""
 
 
-# ── Agent Loop ────────────────────────────────────────────────────────────────
+async def _generate(
+    brief: Brief,
+    direction: dict,
+    history,
+) -> AsyncGenerator[str, None]:
+    """
+    Body: generate response tokens.
+    v1: thin wrapper around existing LLM + tool loop.
+    Future: full Body component with Ego watching output.
+    """
+    import json
+    import re
+
+    system_prompt = direction["system_prompt"]
+    messages = history.as_messages_with_timestamps(brief.message)
+
+    from core.agent_tools import TOOL_REGISTRY
+
+    MAX_TOOL_CALLS = 3
+    tool_calls = 0
+    injected_results = ""
+
+    while tool_calls < MAX_TOOL_CALLS:
+        working = messages.copy()
+        if injected_results:
+            working[-1] = {
+                "role": "user",
+                "content": brief.message + injected_results,
+            }
+
+        response = await llm.generate(working, system_prompt=system_prompt)
+
+        # Check for tool call
+        tool_call = _parse_tool_call(response)
+
+        if tool_call is None:
+            # No tool call — this is the final response
+            response = _strip_tool_calls(response)
+            log_event("Body", "GENERATED",
+                session=brief.session_id[:8],
+                tokens=len(response.split()),
+                tool_calls_made=tool_calls,
+            )
+            yield response
+            return
+
+        # Execute tool
+        tool_name = tool_call.get("tool")
+        tool_args  = tool_call.get("args", {})
+
+        if tool_name not in TOOL_REGISTRY:
+            injected_results += f"\n[Tool Error: '{tool_name}' not found]\n"
+            tool_calls += 1
+            log_event("Body", "TOOL_NOT_FOUND",
+                session=brief.session_id[:8],
+                tool=tool_name,
+            )
+            continue
+
+        clean_args = {k: v for k, v in tool_args.items() if k != "session_id"}
+        try:
+            result = await TOOL_REGISTRY[tool_name].run(
+                session_id=brief.session_id, **clean_args
+            )
+            injected_results += (
+                f"\n[Tool: {tool_name}]\nResult: {result.output}\n"
+                f"Task complete. Now respond to the user directly.\n"
+            )
+            log_event("Body", "TOOL_EXECUTED",
+                session=brief.session_id[:8],
+                tool=tool_name,
+                success=True,
+            )
+        except Exception as e:
+            injected_results += f"\n[Tool Error: {e}]\n"
+            log_error("Body", f"tool execution failed: {tool_name}", exc=e)
+
+        tool_calls += 1
+
+        # One-shot tools respond immediately
+        if tool_name in ("switch_host", "log_correction", "alter_wheel"):
+            working[-1] = {
+                "role": "user",
+                "content": brief.message + injected_results,
+            }
+            final = await llm.generate(working, system_prompt=system_prompt)
+            final = _strip_tool_calls(final)
+            log_event("Body", "ONE_SHOT_TOOL_RESPONSE",
+                session=brief.session_id[:8],
+                tool=tool_name,
+            )
+            yield final
+            return
+
+    # Exhausted tool calls — generate anyway
+    log_event("Body", "MAX_TOOL_CALLS_REACHED", session=brief.session_id[:8])
+    async for token in llm.stream(messages, system_prompt=system_prompt):
+        yield token
+
+
+def _parse_tool_call(text: str) -> Optional[dict]:
+    import json, re
+    text = text.strip()
+    try:
+        data = json.loads(text)
+        if "tool" in data:
+            return data
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r'\{.*?"tool".*?\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _strip_tool_calls(text: str) -> str:
+    import re
+    text = re.sub(r'\{\s*"tool"\s*:.*?\}\s*', '', text, flags=re.DOTALL)
+    return text.strip()
+
+
+# ── Main entry point ──────────────────────────────────────────────────────────
+
 class Agent:
-    def __init__(self, max_tool_calls: int = 3):
-        self.max_tool_calls = max_tool_calls
+    """
+    The membrane. Routes between components. Streams output.
+    Maintains quiet mode and pending insights queue per session.
+    """
 
     async def run(
         self,
         user_message: str,
-        history: ConversationHistory,
+        history,
         session_id: str = "",
-        use_rag: bool = True,
         context: Optional[dict] = None,
+        source: str = "user",
     ) -> AsyncGenerator[str, None]:
         """
-        Main agent entry point. Yields response tokens for streaming.
+        Main entry point. Called by server.py for every incoming message.
+        Yields response chunks for streaming.
         """
-        # 1. Detect host/fronter changes
-        changes = _detect_changes(session_id, context)
+        t_start = time.monotonic()
+        ctx = context or {}
 
-        # 2. Build a lightweight history summary for the synthesis call
-        history_summary = None
-        recent = history.as_list()[-6:]
-
-        ##TODO This isn't correct. This is truncating the end. Remove filler words... 
-        if len(recent) >= 4:
-            history_summary = " | ".join(
-                f"{'User' if m['role'] == 'user' else 'Gizmo'}: {m['content'][:80]}"
-                for m in recent
-            )
-
-        # 3. Combined RAG retrieval + synthesis (one LLM call)
-        rag_synthesis = ""
-        if use_rag:
-            current_host = (context or {}).get("current_host")
-            fronters = list((context or {}).get("fronters") or [])
-
-            mentioned = _detect_mentioned_headmates(user_message, current_host, fronters)
-            all_fronters = list({f for f in fronters + mentioned if f})
-
-            rag_synthesis = await retrieve_and_synthesize(
-                query=user_message,
-                current_host=current_host,
-                fronters=all_fronters,
-                history_summary=history_summary,
-                llm=llm,
-            )
-        
-        overview = ""  # overview now handled inside synthesis
-
-        # 4. Build system prompt
-        curiosity_block = ""
-        try:
-            curiosity_block = get_curiosity_block(
-                user_message,
-                current_host=(context or {}).get("current_host"),
-            )
-        except Exception:
-            pass
-
-        entity_block = ""
-        try:
-            entity_block = build_entity_block(
-                user_message,
-                current_host=(context or {}).get("current_host"),
-            )
-        except Exception as e:
-            print(f"[Agent] Entity block failed (non-fatal): {e}")
-
-        system_prompt = build_system_prompt(
-            TOOL_REGISTRY,
-            rag_synthesis=rag_synthesis,
-            overview=overview,
-            context=context,
-            changes=changes,
-            curiosity_block=curiosity_block,
-            entity_block=entity_block,
+        log_event("Agent", "RECEIVE",
+            session=session_id[:8],
+            source=source,
+            headmate=ctx.get("current_host") or "unknown",
+            preview=user_message[:60],
         )
 
-        # 5. Build messages from history — with timestamps for elapsed time reasoning
-        messages = history.as_messages_with_timestamps(user_message)
+        # ── Quiet request detection ───────────────────────────────────────────
+        quiet_duration = _is_quiet_request(user_message)
+        if quiet_duration is not None:
+            if quiet_duration == 0.0:
+                set_quiet(session_id)
+                yield "got it"
+            else:
+                set_quiet(session_id, quiet_duration)
+                mins = int(quiet_duration // 60)
+                yield f"got it — quiet for {mins} minute{'s' if mins != 1 else ''}"
+            log_event("Agent", "QUIET_REQUESTED",
+                session=session_id[:8],
+                duration=quiet_duration,
+            )
+            return
 
-        # 6. Agentic loop
-        tool_calls = 0
-        injected_results = ""
+        # ── 1. Archivist — receive and classify ───────────────────────────────
+        brief = archivist.receive(
+            message=user_message,
+            session_id=session_id,
+            history=history,
+            context=ctx,
+            source=source,
+        )
 
-        while tool_calls < self.max_tool_calls:
-            working_messages = messages.copy()
-            if injected_results:
-                working_messages[-1] = {
-                    "role": "user",
-                    "content": user_message + injected_results,
-                }
+        # ── 2. Mind + Ego — parallel ──────────────────────────────────────────
+        facts_task     = asyncio.create_task(_get_facts(brief))
+        direction_task = asyncio.create_task(_get_direction_stub(brief))
 
-            response_text = await llm.generate(
-                working_messages,
-                system_prompt=system_prompt,
+        facts     = await facts_task
+        # Direction needs facts — sequential for now, parallel once Ego is its own component
+        direction = await _get_direction(brief, facts)
+        direction_task.cancel()
+
+        # ── 3. Body — generate ────────────────────────────────────────────────
+        response_text = ""
+        async for chunk in _generate(brief, direction, history):
+            response_text += chunk
+
+        # ── 4. Ego — watch output (v1: no-op, future: correction check) ───────
+        # TODO: Ego checks output before it leaves
+
+        # ── 5. Archivist — close loop ─────────────────────────────────────────
+        if response_text:
+            archivist.receive_outgoing(
+                message=response_text,
+                session_id=session_id,
+                history=history,
+                context=ctx,
+                source="body",
             )
 
-            tool_call = self._parse_tool_call(response_text)
+        # ── 6. Stream to caller ───────────────────────────────────────────────
+        duration_ms = round((time.monotonic() - t_start) * 1000)
+        log_event("Agent", "COMPLETE",
+            session=session_id[:8],
+            duration_ms=duration_ms,
+            response_words=len(response_text.split()),
+        )
 
-            if tool_call is None:
-                history.add("user", user_message, context=context)
+        # Yield in chunks for streaming
+        chunk_size = 8
+        for i in range(0, len(response_text), chunk_size):
+            yield response_text[i:i + chunk_size]
 
-                current_host = (context or {}).get("current_host", "")
-                fronters = list((context or {}).get("fronters") or [])
+        # ── 7. Drain pending insights (non-emergency, non-quiet) ──────────────
+        await self._drain_pending(session_id)
 
-                # ── Protocol state check ──────────────────────────────────────
-                active_proto = get_active_protocol(session_id)
-
-                if active_proto:
-                    # We're mid-protocol — handle before normal response
-                    if is_protocol_close(user_message):
-                        # User is clearly done and okay — close it
-                        close_info = close_protocol(
-                            session_id,
-                            closed_by=current_host,
-                            original_fronter=active_proto["fronter"],
-                        )
-                        if close_info["different_fronter"]:
-                            response_text = (
-                                f"Got it, {current_host} — I'll note that "
-                                f"{close_info['original_fronter']} seemed to be doing better "
-                                f"when you took over. Take care of each other. 💙"
-                            )
-                        else:
-                            response_text = response_text  # use LLM response as-is
-                        history.add("assistant", response_text, context=context)
-                        for chunk in self._chunk_string(response_text):
-                            yield chunk
-                        return
-
-                    elif is_deflection(user_message):
-                        # Soft pushback — don't just accept "I'm fine"
-                        deflection_response = await build_deflection_response(
-                            session_id=session_id,
-                            user_message=user_message,
-                            current_host=current_host,
-                            llm=llm,
-                        )
-                        history.add("assistant", deflection_response, context=context)
-                        for chunk in self._chunk_string(deflection_response):
-                            yield chunk
-                        return
-
-                    else:
-                        # Normal response during protocol — advance to next step
-                        next_step = advance_protocol(session_id)
-                        if next_step:
-                            response_text = response_text.rstrip() + f"\n\n{next_step}"
-                        # else protocol is done, let normal response close naturally
-
-                # ── Wellness / new distress detection ─────────────────────────
-                detection = detect_distress(user_message)
-                print(f"[Wellness] Scanned — detected: {detection['detected']}, categories: {detection['categories']}")
-
-                if detection["detected"]:
-                    await log_wellness_event(
-                        message=user_message,
-                        detection=detection,
-                        current_host=current_host,
-                        fronters=fronters,
-                        session_id=session_id,
-                    )
-
-                    if not active_proto:
-                        # New distress — fire protocol research async, acknowledge now
-                        category = detection["categories"][0] if detection["categories"] else "general_distress"
-
-                        # Get push_fn from server's _push_to_all if available
-                        try:
-                            from core.push import _push_to_all as push_fn
-                        except Exception:
-                            async def push_fn(msg): print(f"[Protocols] Push: {msg}")
-
-                        asyncio.ensure_future(
-                            trigger_protocol(
-                                session_id=session_id,
-                                category=category,
-                                fronter=current_host,
-                                llm=llm,
-                                push_fn=push_fn,
-                            )
-                        )
-
-                        # Acknowledgment comes from the LLM response — append research note
-                        response_text = response_text.rstrip()
-                        response_text += "\n\nGive me just a moment — I want to look something up for you."
-                    else:
-                        # Already in protocol — just append the check-in
-                        checkin = await build_checkin_prompt(detection, current_host, llm)
-                        response_text = re.sub(r'\n\n"Hey.*?$', '', response_text, flags=re.DOTALL|re.MULTILINE).rstrip()
-                        response_text = response_text + "\n\n" + checkin
-
-                history.add("assistant", response_text, context=context)
-
-                # ── Curiosity observation ─────────────────────────────────
-                try:
-                    followup = await observe_turn(
-                        user_message=user_message,
-                        gizmo_response=response_text,
-                        current_host=current_host or None,
-                        session_id=session_id,
-                        llm=llm,
-                    )
-                    if followup:
-                        response_text = response_text.rstrip() + "\n\n" + followup
-                except Exception as e:
-                    print(f"[Agent] observe_turn failed (non-fatal): {e}")
-
-                response_text = self._strip_tool_calls(response_text)
-                for chunk in self._chunk_string(response_text):
-                    yield chunk
-                return
-
-            tool_name = tool_call.get("tool")
-            tool_args = tool_call.get("args", {})
-
-            if tool_name not in TOOL_REGISTRY:
-                injected_results += f"\n[Tool Error: '{tool_name}' not found]\n"
-                tool_calls += 1
-                continue
-
-            # Strip session_id from tool_args to avoid duplicate keyword argument
-            clean_args = {k: v for k, v in tool_args.items() if k != "session_id"}
-            result = await TOOL_REGISTRY[tool_name].run(session_id=session_id, **clean_args)
-            injected_results += f"\n[Tool: {tool_name}]\nResult: {result.output}\nTask complete. Now respond to the user directly without calling any more tools.\n"
-            tool_calls += 1
-
-            # One-shot tools — respond immediately after first call
-            if tool_name in ("switch_host", "log_correction", "alter_wheel",
-                             "teach", "save_lesson", "tool_forge"):
-                print(f"[Agent] One-shot tool '{tool_name}' completed, generating response")
-                working_messages[-1] = {
-                    "role": "user",
-                    "content": user_message + injected_results,
-                }
-                final_response = await llm.generate(
-                    working_messages,
-                    system_prompt=system_prompt,
-                )
-                history.add("user", user_message, context=context)
-                history.add("assistant", final_response, context=context)
-                final_response = self._strip_tool_calls(final_response)
-                for chunk in self._chunk_string(final_response):
-                    yield chunk
-                return
-
-        yield "[Agent reached max tool calls]\n"
-        async for token in llm.stream(messages, system_prompt=system_prompt):
-            yield token
-
-    def _parse_tool_call(self, text: str) -> dict | None:
-        text = text.strip()
-        try:
-            data = json.loads(text)
-            if "tool" in data:
-                return data
-        except json.JSONDecodeError:
-            pass
-        match = re.search(r'\{.*?"tool".*?\}', text, re.DOTALL)
-        if match:
+    async def _drain_pending(self, session_id: str) -> None:
+        """
+        After a response, check if any component queued an unsolicited message.
+        Respects quiet mode — only emergencies break through.
+        """
+        queue = _get_pending(session_id)
+        while not queue.empty():
             try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        return None
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
-    def _strip_tool_calls(self, text: str) -> str:
-        """Remove any tool call JSON from response text before streaming."""
-        # Remove full JSON tool call blocks
-        text = re.sub(r'\{\s*"tool"\s*:.*?\}\s*', '', text, flags=re.DOTALL)
-        # Remove common LLM preambles around tool calls
-        text = re.sub(r'\(Post-correction:\).*', '', text, flags=re.DOTALL)
-        return text.strip()
+            emergency = item.get("emergency", False)
+            message   = item.get("message", "")
+            source    = item.get("source", "unknown")
 
-    def _chunk_string(self, text: str, chunk_size: int = 8):
-        for i in range(0, len(text), chunk_size):
-            yield text[i:i + chunk_size]
+            # Quiet mode gate
+            if is_quiet(session_id) and not emergency:
+                log_event("Agent", "PENDING_HELD",
+                    session=session_id[:8],
+                    source=source,
+                    reason="quiet_mode",
+                    preview=message[:40],
+                )
+                # Put it back — still relevant later
+                await queue.put(item)
+                break
+
+            log_event("Agent", "PENDING_SURFACING",
+                session=session_id[:8],
+                source=source,
+                emergency=emergency,
+                preview=message[:40],
+            )
+            await push(message)
 
 
+async def _get_direction_stub(brief: Brief) -> dict:
+    """Placeholder — cancelled once real direction is ready."""
+    await asyncio.sleep(9999)
+    return {}
 
-# Singleton
+
+# ── Singleton ─────────────────────────────────────────────────────────────────
 agent = Agent()

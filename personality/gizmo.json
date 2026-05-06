@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "note": "Observed, not declared. Grows from experience. Cold start — nothing known yet.",
+  "seed": "personality.txt",
+
+  "baseline": {
+    "register": "neutral",
+    "verbosity": "concise",
+    "humor_frequency": "situational",
+    "confidence": 0.0,
+    "observations": 0
+  },
+
+  "observed_patterns": [],
+
+  "departures": [],
+
+  "moments_of_note": []
+}
