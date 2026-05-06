@@ -238,6 +238,7 @@ async def _generate(
                 "content": brief.message + injected_results,
             }
 
+        # Buffer first to check for tool call
         response = await llm.generate(working, system_prompt=system_prompt)
         tool_call = _parse_tool_call(response)
 
@@ -248,7 +249,10 @@ async def _generate(
                 tokens=len(response.split()),
                 tool_calls_made=tool_calls,
             )
-            yield response
+            # Stream the final response token by token
+            chunk_size = 4
+            for i in range(0, len(response), chunk_size):
+                yield response[i:i + chunk_size]
             return
 
         tool_name = tool_call.get("tool")
@@ -379,10 +383,13 @@ class Agent:
         facts     = await _get_facts(brief)
         direction = await _get_direction(brief, facts)
 
-        # ── 3. Body ───────────────────────────────────────────────────────────
+        # ── 3. Body — generate and stream live ───────────────────────────────
+        # Yield chunks as they arrive — don't buffer the whole response.
+        # This keeps the event loop alive so WebSocket pings get serviced.
         response_text = ""
         async for chunk in _generate(brief, direction, history):
             response_text += chunk
+            yield chunk
 
         # ── 4. Archivist — close loop ─────────────────────────────────────────
         if response_text:
@@ -394,17 +401,13 @@ class Agent:
                 source="body",
             )
 
-        # ── 5. Stream to caller ───────────────────────────────────────────────
+        # ── 5. Log ────────────────────────────────────────────────────────────
         duration_ms = round((time.monotonic() - t_start) * 1000)
         log_event("Agent", "COMPLETE",
             session=session_id[:8],
             duration_ms=duration_ms,
             response_words=len(response_text.split()),
         )
-
-        chunk_size = 8
-        for i in range(0, len(response_text), chunk_size):
-            yield response_text[i:i + chunk_size]
 
         # ── 6. Drain pending insights ─────────────────────────────────────────
         await self._drain_pending(session_id)

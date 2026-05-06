@@ -201,8 +201,8 @@ async def main():
         HOST,
         PORT,
         process_request=http_handler,
-        ping_interval=20,
-        ping_timeout=10,
+        ping_interval=60,
+        ping_timeout=60,
         max_size=1_000_000,
     ):
         print(f"[Server] Ready at http://{HOST}:{PORT}")

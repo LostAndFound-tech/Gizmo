@@ -9,6 +9,7 @@ Future: tool forge registers tools here dynamically.
 """
 
 from core.log import log
+from tools.introspect_tool import IntrospectTool
 
 # Import surviving tools
 # (others deleted — switch_host and correction_tool are temporary
@@ -28,7 +29,11 @@ except Exception as e:
     _correction = None
 
 # Build registry — skip any tools that failed to load
-TOOL_REGISTRY: dict = {}
+TOOL_REGISTRY = {
+    tool.name: tool for tool in [
+        IntrospectTool()
+    ]
+}
 
 for tool in [_switch, _correction]:
     if tool is not None:
