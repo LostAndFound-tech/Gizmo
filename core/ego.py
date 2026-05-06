@@ -371,10 +371,11 @@ def _heuristic_classify(name: str, message: str) -> tuple[Optional[str], float]:
 async def _llm_parse_entity_response(
     names: list[str],
     response: str,
-) -> list[dict]:
+) -> list[dict] | None:
     """
     LLM call to parse a freeform entity confirmation response.
-    Returns a list of {name, type, species (optional)} dicts.
+    Returns a list of {name, type, species (optional)} dicts on success.
+    Returns None on failure — caller should ask the question explicitly.
 
     Only fires when heuristics can't confidently classify.
     """
@@ -407,6 +408,14 @@ async def _llm_parse_entity_response(
             temperature=0.0,
         )
 
+        # Empty response — LLM timed out or returned nothing
+        if not result or not result.strip():
+            log_event("Ego", "ENTITY_PARSE_EMPTY",
+                names=names,
+                note="LLM returned empty — will ask explicitly",
+            )
+            return None
+
         # Strip markdown fences if present
         clean = re.sub(r"```(?:json)?|```", "", result).strip()
         parsed = json.loads(clean)
@@ -428,8 +437,8 @@ async def _llm_parse_entity_response(
         return valid
 
     except Exception as e:
-        log_error("Ego", "LLM entity parse failed", exc=e)
-        return []
+        log_error("Ego", "LLM entity parse failed — will ask explicitly", exc=e)
+        return None  # signal to caller: ask the question out loud
 
 
 def _should_use_llm(names: list[str], message: str) -> bool:
@@ -731,7 +740,6 @@ class Ego:
             use_llm = _should_use_llm(pending_names, message)
 
             if use_llm:
-                # LLM parse
                 log_event("Ego", "ENTITY_PARSE_LLM",
                     session=session_id[:8],
                     names=pending_names,
@@ -742,14 +750,11 @@ class Ego:
                 # Heuristic parse — single name, high confidence
                 name = pending_names[0]
                 entity_type, confidence = _heuristic_classify(name, message)
-
-                # Also handle simple yes/no for headmate (single name)
                 if entity_type is None:
                     if _YES_RE.match(message):
                         entity_type = "headmate"
                     elif _NO_RE.match(message):
                         entity_type = "external"
-
                 parsed = [{"name": name, "type": entity_type}] if entity_type else []
                 log_event("Ego", "ENTITY_PARSE_HEURISTIC",
                     session=session_id[:8],
@@ -758,39 +763,49 @@ class Ego:
                     confidence=confidence,
                 )
 
-            # Create files for parsed entities
-            resolved_names = set()
-            for entity in parsed:
-                name  = entity["name"]
-                etype = entity.get("type")
-                resolved_names.add(name.lower())
-
-                if etype == "headmate":
-                    _create_headmate_file(name)
-                    new_entities.append({"name": name, "type": "headmate", "action": "created"})
-                elif etype == "pet":
-                    species = entity.get("species", "unknown")
-                    _create_pet_file(name, species=species)
-                    new_entities.append({"name": name, "type": "pet", "species": species, "action": "created"})
-                elif etype == "external":
-                    _create_external_file(name)
-                    new_entities.append({"name": name, "type": "external", "action": "created"})
-
-            # Remove resolved names from pending; keep unresolved for next turn
-            remaining = [n for n in pending_names if n.lower() not in resolved_names]
-            if remaining:
-                _pending_entity_questions[session_id] = remaining
-                log_event("Ego", "ENTITY_QUESTION_PARTIAL",
+            # None = LLM failed or returned empty — clear pending, ask explicitly
+            if parsed is None:
+                del _pending_entity_questions[session_id]
+                entity_question = _build_entity_question(pending_names)
+                _pending_entity_questions[session_id] = pending_names  # re-queue for next answer
+                log_event("Ego", "ENTITY_PARSE_FALLBACK_TO_QUESTION",
                     session=session_id[:8],
-                    resolved=list(resolved_names),
-                    remaining=remaining,
+                    names=pending_names,
                 )
             else:
-                del _pending_entity_questions[session_id]
-                log_event("Ego", "ENTITY_QUESTION_RESOLVED",
-                    session=session_id[:8],
-                    resolved=list(resolved_names),
-                )
+                # Create files for parsed entities
+                resolved_names = set()
+                for entity in parsed:
+                    name  = entity["name"]
+                    etype = entity.get("type")
+                    resolved_names.add(name.lower())
+
+                    if etype == "headmate":
+                        _create_headmate_file(name)
+                        new_entities.append({"name": name, "type": "headmate", "action": "created"})
+                    elif etype == "pet":
+                        species = entity.get("species", "unknown")
+                        _create_pet_file(name, species=species)
+                        new_entities.append({"name": name, "type": "pet", "species": species, "action": "created"})
+                    elif etype == "external":
+                        _create_external_file(name)
+                        new_entities.append({"name": name, "type": "external", "action": "created"})
+
+                # Remove resolved, keep unresolved pending
+                remaining = [n for n in pending_names if n.lower() not in resolved_names]
+                if remaining:
+                    _pending_entity_questions[session_id] = remaining
+                    log_event("Ego", "ENTITY_QUESTION_PARTIAL",
+                        session=session_id[:8],
+                        resolved=list(resolved_names),
+                        remaining=remaining,
+                    )
+                else:
+                    del _pending_entity_questions[session_id]
+                    log_event("Ego", "ENTITY_QUESTION_RESOLVED",
+                        session=session_id[:8],
+                        resolved=list(resolved_names),
+                    )
 
         # ── Step 2: Detect new unknown entities ───────────────────────────────
         if not entity_question and session_id not in _pending_entity_questions:
