@@ -9,6 +9,7 @@ Responsibilities (v1):
   - Track topic temperature: hot / warm / cool
   - Save raw message to history
   - Log everything in structured, reflection-ready format
+  - Detect host/fronter changes between turns
 
 What this is NOT yet (grows into later):
   - Full tensor temperature management
@@ -41,11 +42,6 @@ from typing import Optional
 from core.log import log, log_event, log_error
 
 # ── Topic keyword map ─────────────────────────────────────────────────────────
-# Lightweight heuristic classification. No LLM.
-# Each entry: topic_tag → list of trigger patterns (regex or plain substrings)
-# Ordered by specificity — first match wins per message.
-# Grows over time as Gizmo encounters new domains.
-
 _TOPIC_PATTERNS: list[tuple[str, list[str]]] = [
     # Emotional / wellbeing
     ("distress",        [r"\b(help|scared|panic|crisis|can't cope|overwhelmed|hurting)\b"]),
@@ -87,20 +83,15 @@ _TOPIC_PATTERNS: list[tuple[str, list[str]]] = [
     ("identity",        [r"\b(who am i|who are we|alter|headmate|front|fronting|system|plural|switch)\b"]),
 
     # Catch-all
-    ("general",         []),  # always matches as fallback
+    ("general",         []),
 ]
 
-# Compile patterns once
 _COMPILED: list[tuple[str, list[re.Pattern]]] = [
     (topic, [re.compile(p, re.IGNORECASE) for p in patterns])
     for topic, patterns in _TOPIC_PATTERNS
 ]
 
-
-# ── Emotional register classifier ────────────────────────────────────────────
-# Very lightweight — maps to one of five registers.
-# The baseline reader will replace this with per-headmate deviation scoring later.
-
+# ── Emotional register classifier ─────────────────────────────────────────────
 _REGISTER_PATTERNS = {
     "distress":  re.compile(
         r"\b(help|scared|panic|can't|cannot|overwhelm|hurt|crisis|please|desperate)\b",
@@ -115,7 +106,7 @@ _REGISTER_PATTERNS = {
         re.IGNORECASE
     ),
     "subdued":   re.compile(
-        r"^.{0,40}$",   # very short messages often signal withdrawal or low energy
+        r"^.{0,40}$",
     ),
 }
 
@@ -129,9 +120,6 @@ class ConversationField:
     """
     Per-session living field. Tracks topic temperature and participant history.
     Hot = active now. Warm = earlier this session. Cool = present but fading.
-
-    v1: simple weight map with decay.
-    Future: full tensor with cross-session links.
     """
     session_id: str
     topic_weights: dict[str, float] = field(default_factory=dict)
@@ -142,20 +130,16 @@ class ConversationField:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
-    # Temperature thresholds
     HOT_THRESHOLD:  float = 0.6
     WARM_THRESHOLD: float = 0.3
-    DECAY_RATE:     float = 0.15   # per message, applied to all non-active topics
+    DECAY_RATE:     float = 0.15
 
     def update(self, topics: list[str], participant: Optional[str] = None) -> None:
-        """Integrate new topics — boost active, decay inactive."""
-        # Decay all existing weights
         for t in list(self.topic_weights):
             self.topic_weights[t] = max(0.0, self.topic_weights[t] - self.DECAY_RATE)
             if self.topic_weights[t] == 0.0:
                 del self.topic_weights[t]
 
-        # Boost active topics
         for topic in topics:
             current = self.topic_weights.get(topic, 0.0)
             self.topic_weights[topic] = min(1.0, current + 0.4)
@@ -168,7 +152,6 @@ class ConversationField:
         self.updated_at = time.time()
 
     def temperature(self, topic: str) -> str:
-        """Return hot / warm / cool / absent for a topic."""
         w = self.topic_weights.get(topic, 0.0)
         if w >= self.HOT_THRESHOLD:
             return "hot"
@@ -186,13 +169,12 @@ class ConversationField:
                 if self.WARM_THRESHOLD <= w < self.HOT_THRESHOLD]
 
     def snapshot(self) -> dict:
-        """Plain dict snapshot for the brief."""
         return {
-            "hot":          self.hot_topics(),
-            "warm":         self.warm_topics(),
-            "participants": list(self.participants),
+            "hot":           self.hot_topics(),
+            "warm":          self.warm_topics(),
+            "participants":  list(self.participants),
             "message_count": self.message_count,
-            "last_topics":  self.last_topics,
+            "last_topics":   self.last_topics,
             "last_register": self.last_register,
         }
 
@@ -208,26 +190,32 @@ class Brief:
     Consumed by: Mind (topic scope), Ego (context + register), Empath (participants).
     """
     # Message basics
-    message:          str
-    session_id:       str
-    timestamp:        float
-    headmate:         Optional[str]
-    fronters:         list[str]
+    message:            str
+    session_id:         str
+    timestamp:          float
+    headmate:           Optional[str]
+    fronters:           list[str]
 
     # Classification
-    topics:           list[str]
-    emotional_register: str        # neutral / positive / elevated / distress / subdued
-    is_directed_at_gizmo: bool     # explicit address ("hey gizmo", "gizmo,")
-    is_question:      bool
-    is_correction:    bool         # "that's wrong", "no, actually", etc.
-    word_count:       int
-    char_count:       int
+    topics:             list[str]
+    emotional_register: str
+    is_directed_at_gizmo: bool
+    is_question:        bool
+    is_correction:      bool
+    word_count:         int
+    char_count:         int
 
     # Conversation field snapshot
-    field_snapshot:   dict         # hot / warm / cool topic lists + participants
+    field_snapshot:     dict
 
-    # Source — who initiated this (user message, or which agent flagged it)
-    source:           str          # "user" | "archivist" | "ego" | "mind" | etc.
+    # Source
+    source:             str
+
+    # Host/fronter change detection — populated by Archivist, consumed by Ego
+    host_changed:       bool = False
+    previous_host:      Optional[str] = None
+    fronters_joined:    list[str] = field(default_factory=list)
+    fronters_left:      list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -245,22 +233,21 @@ class Brief:
             "char_count":         self.char_count,
             "field":              self.field_snapshot,
             "source":             self.source,
+            "host_changed":       self.host_changed,
+            "previous_host":      self.previous_host,
+            "fronters_joined":    self.fronters_joined,
+            "fronters_left":      self.fronters_left,
         }
 
 
 # ── Archivist ─────────────────────────────────────────────────────────────────
 
-# Gizmo address patterns
 _GIZMO_RE = re.compile(r"\b(gizmo|hey gizmo|giz)\b", re.IGNORECASE)
-
-# Correction signal patterns
 _CORRECTION_RE = re.compile(
     r"\b(that'?s wrong|no,? actually|not quite|incorrect|you'?re wrong|"
     r"that'?s not right|wait no|actually,?|i meant|i said|polar bears)\b",
     re.IGNORECASE,
 )
-
-# Question detection — ends with ? or starts with question word
 _QUESTION_RE = re.compile(
     r"(\?$|^\s*(what|how|why|where|when|who|can you|could you|do you|is there|"
     r"are there|will you|would you|have you|did you))",
@@ -271,10 +258,12 @@ _QUESTION_RE = re.compile(
 class Archivist:
     """
     Singleton-style — one per process. Sessions are keyed by session_id.
+    Also owns host/fronter change detection — last context per session lives here.
     """
 
     def __init__(self):
         self._fields: dict[str, ConversationField] = {}
+        self._last_context: dict[str, dict] = {}  # session_id → last known context
         log("Archivist", "initialised")
 
     def _get_field(self, session_id: str) -> ConversationField:
@@ -286,10 +275,6 @@ class Archivist:
     # ── Classification ────────────────────────────────────────────────────────
 
     def _classify_topics(self, text: str) -> list[str]:
-        """
-        Extract 1-4 topic tags from text using compiled regex patterns.
-        No LLM. Fast. Falls back to 'general' if nothing matches.
-        """
         found = []
         for topic, patterns in _COMPILED:
             if topic == "general":
@@ -300,19 +285,60 @@ class Archivist:
                     break
             if len(found) >= 4:
                 break
-
         return found if found else ["general"]
 
     def _classify_register(self, text: str) -> str:
-        """
-        Classify emotional register. Returns one of:
-        distress / elevated / positive / subdued / neutral
-        Priority: distress > elevated > positive > subdued > neutral
-        """
         for register, pattern in _REGISTER_PATTERNS.items():
             if pattern.search(text):
                 return register
         return _DEFAULT_REGISTER
+
+    # ── Host change detection ─────────────────────────────────────────────────
+
+    def _detect_changes(self, session_id: str, context: dict) -> dict:
+        """
+        Compare current context to last known context for this session.
+        Returns a changes dict consumed by Brief and Ego.
+        """
+        last = self._last_context.get(session_id, {})
+
+        current_host = context.get("current_host", "")
+        last_host    = last.get("current_host", "")
+
+        current_fronters = set(context.get("fronters") or [])
+        last_fronters    = set(last.get("fronters") or [])
+
+        host_changed    = bool(current_host and current_host != last_host and last_host)
+        previous_host   = last_host if host_changed else None
+        fronters_joined = list(current_fronters - last_fronters)
+        fronters_left   = list(last_fronters - current_fronters)
+
+        # Update stored context
+        self._last_context[session_id] = dict(context)
+
+        if host_changed:
+            log_event("Archivist", "HOST_CHANGED",
+                session=session_id[:8],
+                previous=last_host,
+                current=current_host,
+            )
+        if fronters_joined:
+            log_event("Archivist", "FRONTERS_JOINED",
+                session=session_id[:8],
+                joined=fronters_joined,
+            )
+        if fronters_left:
+            log_event("Archivist", "FRONTERS_LEFT",
+                session=session_id[:8],
+                left=fronters_left,
+            )
+
+        return {
+            "host_changed":    host_changed,
+            "previous_host":   previous_host,
+            "fronters_joined": fronters_joined,
+            "fronters_left":   fronters_left,
+        }
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -320,40 +346,40 @@ class Archivist:
         self,
         message: str,
         session_id: str,
-        history,                      # ConversationHistory instance
+        history,
         context: Optional[dict] = None,
         source: str = "user",
     ) -> Brief:
         """
-        Receive a message, classify it, update the conversation field,
-        save to history, and return a structured brief.
-
-        This is the only public method most callers need.
+        Receive a message, classify it, detect host changes, update the
+        conversation field, save to history, and return a structured brief.
         """
         t_start = time.monotonic()
         now = time.time()
 
-        # Extract context
         ctx = context or {}
         headmate = ctx.get("current_host") or None
         fronters = list(ctx.get("fronters") or [])
         if headmate and headmate not in fronters:
             fronters.insert(0, headmate)
 
+        # Detect host/fronter changes BEFORE updating stored context
+        changes = self._detect_changes(session_id, ctx)
+
         # Classify
-        topics    = self._classify_topics(message)
-        register  = self._classify_register(message)
-        directed  = bool(_GIZMO_RE.search(message))
-        question  = bool(_QUESTION_RE.search(message.strip()))
+        topics     = self._classify_topics(message)
+        register   = self._classify_register(message)
+        directed   = bool(_GIZMO_RE.search(message))
+        question   = bool(_QUESTION_RE.search(message.strip()))
         correction = bool(_CORRECTION_RE.search(message))
 
         # Update conversation field
-        field = self._get_field(session_id)
-        field.update(topics=topics, participant=headmate)
-        field.last_register = register
-        snapshot = field.snapshot()
+        conv_field = self._get_field(session_id)
+        conv_field.update(topics=topics, participant=headmate)
+        conv_field.last_register = register
+        snapshot = conv_field.snapshot()
 
-        # Save to history (raw — no modification)
+        # Save to history
         try:
             history.add("user", message, context=ctx)
         except Exception as e:
@@ -375,9 +401,12 @@ class Archivist:
             char_count=len(message),
             field_snapshot=snapshot,
             source=source,
+            host_changed=changes["host_changed"],
+            previous_host=changes["previous_host"],
+            fronters_joined=changes["fronters_joined"],
+            fronters_left=changes["fronters_left"],
         )
 
-        # Log — structured and reflection-ready
         duration_ms = round((time.monotonic() - t_start) * 1000, 1)
         log_event(
             "Archivist", "RECEIVE",
@@ -391,6 +420,7 @@ class Archivist:
             words=brief.word_count,
             hot=snapshot["hot"],
             warm=snapshot["warm"],
+            host_changed=changes["host_changed"],
             duration_ms=duration_ms,
         )
 
@@ -407,13 +437,12 @@ class Archivist:
         """
         Receive an outgoing message (what Gizmo just said).
         Updates the conversation field and logs — closes the loop.
-        Does not build a full brief — outgoing messages are field updates only.
         """
         ctx = context or {}
         topics = self._classify_topics(message)
 
-        field = self._get_field(session_id)
-        field.update(topics=topics)
+        conv_field = self._get_field(session_id)
+        conv_field.update(topics=topics)
 
         try:
             history.add("assistant", message, context=ctx)
@@ -425,20 +454,18 @@ class Archivist:
             source=source,
             topics=topics,
             words=len(message.split()),
-            hot=field.hot_topics(),
+            hot=conv_field.hot_topics(),
         )
 
     def get_field(self, session_id: str) -> Optional[ConversationField]:
-        """Return the conversation field for a session, if it exists."""
         return self._fields.get(session_id)
 
     def field_snapshot(self, session_id: str) -> dict:
-        """Return a plain dict snapshot of the conversation field."""
-        field = self._fields.get(session_id)
-        if field is None:
+        conv_field = self._fields.get(session_id)
+        if conv_field is None:
             return {"hot": [], "warm": [], "participants": [], "message_count": 0,
                     "last_topics": [], "last_register": "neutral"}
-        return field.snapshot()
+        return conv_field.snapshot()
 
     def active_sessions(self) -> list[str]:
         return list(self._fields.keys())
