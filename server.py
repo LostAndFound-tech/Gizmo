@@ -78,20 +78,23 @@ async def handler(websocket):
             # ── Greeting ──────────────────────────────────────────────────────
             if not _greeted:
                 _greeted = True
-                from core.greeter import should_greet, build_greeting
-                if should_greet(history):
-                    fronter = context.get("current_host", "")
-                    print(f"[Server] Firing return greeting for {fronter or 'unknown'}")
-                    try:
-                        greeting = await build_greeting(
-                            fronter=fronter,
-                            session_id=session_id,
-                            llm=llm,
-                        )
-                        await websocket.send(json.dumps({"type": "token", "data": greeting}))
-                        await websocket.send(json.dumps({"type": "done",  "data": ""}))
-                    except Exception as e:
-                        print(f"[Server] Greeting failed: {e}")
+                try:
+                    from core.greeter import should_greet, build_greeting
+                    if should_greet(history):
+                        fronter = context.get("current_host", "")
+                        print(f"[Server] Firing return greeting for {fronter or 'unknown'}")
+                        try:
+                            greeting = await build_greeting(
+                                fronter=fronter,
+                                session_id=session_id,
+                                llm=llm,
+                            )
+                            await websocket.send(json.dumps({"type": "token", "data": greeting}))
+                            await websocket.send(json.dumps({"type": "done",  "data": ""}))
+                        except Exception as e:
+                            print(f"[Server] Greeting failed: {e}")
+                except ImportError:
+                    pass  # greeter not yet rebuilt — skip silently
 
             print(f"[Server] | MESSAGE | session={session_id[:8]} | headmate={context.get('current_host') or '?'} | preview={message[:60]}")
 
