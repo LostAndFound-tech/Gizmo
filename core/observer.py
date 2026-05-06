@@ -151,32 +151,48 @@ async def _extract_facts(
     Ask the LLM what facts worth keeping were shared in this exchange.
     Returns a dict: {name_lower: [fact_str, ...]}
 
-    Only extracts facts *about* the fronters — not about Gizmo,
-    not about abstract topics.
+    Extracts facts about ANYONE mentioned — active fronters AND
+    third parties being talked about (e.g. "Kaylee is a preschool teacher"
+    when Jess is speaking about Kaylee).
     """
-    if not fronters:
+    # Build full known entity list — anyone who has a file
+    known_entities = set(f.lower() for f in fronters)
+    try:
+        if _HEADMATES_DIR.exists():
+            known_entities.update(p.stem.lower() for p in _HEADMATES_DIR.glob("*.json"))
+        if _EXTERNAL_DIR.exists():
+            known_entities.update(p.stem.lower() for p in _EXTERNAL_DIR.glob("*.json"))
+        if _PETS_DIR.exists():
+            known_entities.update(p.stem.lower() for p in _PETS_DIR.glob("*.json"))
+    except Exception:
+        pass
+
+    if not known_entities:
         return {}
 
-    fronter_list = ", ".join(f.title() for f in fronters)
+    entity_list = ", ".join(sorted(known_entities))
+    fronter_list = ", ".join(f.title() for f in fronters) if fronters else "unknown"
 
     prompt = [{
         "role": "user",
         "content": (
-            f"The following is a conversation exchange. "
-            f"Active people: {fronter_list}.\n\n"
+            f"The following is a conversation exchange.\n"
+            f"Speaking: {fronter_list}.\n"
+            f"Known people: {entity_list}.\n\n"
             f"User said: \"{user_message}\"\n"
             f"Gizmo responded: \"{gizmo_response[:300]}\"\n\n"
-            f"Extract any facts worth remembering about the active people. "
+            f"Extract any facts worth remembering about ANY of the known people — "
+            f"whether they are speaking or being talked about.\n"
             f"Facts include: personal attributes, preferences, relationships, "
-            f"important events, corrections, species, age, occupation, etc.\n\n"
+            f"species, age, occupation, important events, corrections, etc.\n\n"
             f"Return ONLY a JSON object mapping lowercase names to arrays of short fact strings. "
             f"Each fact should be one concise sentence. "
             f"If there are no meaningful facts, return an empty object.\n\n"
             f"Example: "
             f'{{\"jess\": [\"goes by Jess, previously called Princess\"], '
-            f'\"oren\": [\"84 years old\", \"werewolf\", \"astrophysicist\"]}}\n\n'
-            f"Only include names from this list (lowercase): "
-            f"{', '.join(f.lower() for f in fronters)}\n"
+            f'\"oren\": [\"84 years old\", \"werewolf\", \"astrophysicist\"], '
+            f'\"kaylee\": [\"19 years old\", \"futa\", \"preschool teacher\"]}}\n\n'
+            f"Only include names from this list (lowercase): {entity_list}\n"
             f"No preamble. No explanation. JSON only."
         )
     }]
@@ -186,9 +202,10 @@ async def _extract_facts(
             prompt,
             system_prompt=(
                 "You extract memorable facts from conversations and return them as JSON. "
-                "Be concise. Only include facts explicitly stated. Never invent."
+                "Be concise. Only include facts explicitly stated. Never invent. "
+                "Extract facts about anyone mentioned, not just the speaker."
             ),
-            max_new_tokens=300,
+            max_new_tokens=400,
             temperature=0.1,
         )
 
@@ -198,11 +215,10 @@ async def _extract_facts(
         clean = re.sub(r"```(?:json)?|```", "", result).strip()
         parsed = json.loads(clean)
 
-        # Validate — only keep known fronters, string facts
-        fronter_set = {f.lower() for f in fronters}
+        # Validate — keep any known entity, not just fronters
         validated = {}
         for name, facts in parsed.items():
-            if name.lower() in fronter_set and isinstance(facts, list):
+            if name.lower() in known_entities and isinstance(facts, list):
                 clean_facts = [f for f in facts if isinstance(f, str) and f.strip()]
                 if clean_facts:
                     validated[name.lower()] = clean_facts

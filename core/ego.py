@@ -243,6 +243,10 @@ _IGNORE_WORDS = {
     "August", "September", "October", "November", "December",
     "Gizmo", "Ok", "Okay", "Yes", "No", "Hey", "Oh", "God", "Jesus",
     "English", "American", "European", "Python", "Google", "GitHub",
+    # Family titles and terms of endearment
+    "Baby", "Babe", "Gramma", "Grandma", "Grandpa", "Nana", "Papa",
+    "Mama", "Momma", "Daddy", "Auntie", "Uncle", "Sis", "Bro",
+    "Honey", "Sugar", "Sweetie", "Darling", "Love", "Hun",
 }
 
 

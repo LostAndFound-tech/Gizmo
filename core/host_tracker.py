@@ -115,6 +115,10 @@ _NOT_NAMES = {
     "Confused", "Surprised", "Shocked", "Impressed", "Interested",
     "Distressed", "Overwhelmed", "Frustrated", "Annoyed", "Angry",
     "Positive", "Neutral", "Negative", "Elevated", "Subdued",
+    # Family titles and terms of endearment that aren't names
+    "Baby", "Babe", "Gramma", "Grandma", "Grandpa", "Nana", "Papa",
+    "Mama", "Momma", "Daddy", "Auntie", "Uncle", "Sis", "Bro",
+    "Honey", "Sugar", "Sweetie", "Darling", "Love", "Hun",
 }
 
 
