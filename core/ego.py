@@ -632,6 +632,94 @@ def _build_system_prompt(
     if host_context.get("fronters_left"):
         change_block += f"\n  Left the front: {', '.join(host_context['fronters_left'])}"
 
+    # Current headmate file — injected every message, not on demand
+    headmate_block = ""
+    if headmate_data:
+        headmate_block = _format_headmate_for_prompt(headmate_data)
+        if headmate_block:
+            headmate_block = "\n\n" + headmate_block
+ 
+# ── Addition 2: interaction prefs ────────────────────────────────────────────
+ 
+    interaction_prefs_block = ""
+    if brief.headmate:
+        try:
+            from core.interaction_prefs import format_prefs_for_prompt
+            interaction_prefs_block = format_prefs_for_prompt(brief.headmate)
+            if interaction_prefs_block:
+                interaction_prefs_block = "\n\n" + interaction_prefs_block
+        except Exception as e:
+            log_error("Ego", "failed to load interaction prefs", exc=e)
+ 
+# ── Updated f-string ──────────────────────────────────────────────────────────
+# Before:
+#     ...{change_block}{tone_block}{corrections_block}...
+#
+# After:
+#     ...{change_block}{headmate_block}{interaction_prefs_block}{tone_block}{corrections_block}...
+#
+# Order matters:
+#   headmate_block       — factual ground truth about who this person is
+#   interaction_prefs    — how they want to be talked to
+#   tone_block           — Ego's read on register and style
+#   corrections_block    — hard rules, always last
+ 
+ 
+# ── New helper — add near the other _format_* / _build_* helpers in ego.py ───
+ 
+def _format_headmate_for_prompt(data: dict) -> str:
+    """
+    Format a headmate file as a concise context block for the system prompt.
+    Called every message — kept tight so it doesn't bloat the prompt.
+    Only injects signal, never noise.
+    """
+    import re
+ 
+    name = data.get("name", "unknown").title()
+    lines = [f"[What I know about {name}]"]
+ 
+    # Baseline — skip observations count and unknown values
+    baseline = data.get("baseline", {})
+    for k, v in baseline.items():
+        if k == "observations":
+            continue
+        if v not in ("unknown", 0, 0.0, "", None):
+            lines.append(f"  {k}: {v}")
+ 
+    # Moments of note — last 8, timestamp stripped
+    moments = data.get("moments_of_note", [])
+    if moments:
+        lines.append("  Known facts:")
+        for m in moments[-8:]:
+            clean = re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(m))
+            lines.append(f"    - {clean}")
+ 
+    # Observed patterns — last 3
+    patterns = data.get("observed_patterns", [])
+    if patterns:
+        lines.append("  Observed patterns:")
+        for p in patterns[-3:]:
+            if isinstance(p, dict):
+                lines.append(f"    - {p.get('pattern', str(p))}")
+            else:
+                lines.append(f"    - {p}")
+ 
+    # Per-headmate corrections — last 3
+    corrections = data.get("corrections", [])
+    if corrections:
+        lines.append("  Corrections from this person:")
+        for c in corrections[-3:]:
+            if isinstance(c, dict):
+                lines.append(f"    - {c.get('rule', str(c))}")
+            else:
+                lines.append(f"    - {c}")
+ 
+    # Nothing worth injecting if only the header exists
+    if len(lines) == 1:
+        return ""
+ 
+    return "\n".join(lines)
+ 
     # Tone guidance
     tone_notes = tone.get("notes", [])
     tone_block = (

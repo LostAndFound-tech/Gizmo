@@ -37,6 +37,27 @@ except Exception as e:
     _set_prefs  = None
     _view_prefs = None
 
+try:
+    from tools.file_tool import (
+        ReadFileTool,
+        WriteFileTool,
+        AppendFileTool,
+        ListFilesTool,
+        DeleteFileTool,
+    )
+    _read_file   = ReadFileTool()
+    _write_file  = WriteFileTool()
+    _append_file = AppendFileTool()
+    _list_files  = ListFilesTool()
+    _delete_file = DeleteFileTool()
+except Exception as e:
+    log("Agent", f"WARNING: file_tool failed to load: {e}")
+    _read_file   = None
+    _write_file  = None
+    _append_file = None
+    _list_files  = None
+    _delete_file = None
+
 # Build registry — skip any tools that failed to load
 TOOL_REGISTRY = {
     tool.name: tool for tool in [
@@ -44,7 +65,17 @@ TOOL_REGISTRY = {
     ]
 }
 
-for tool in [_switch, _correction, _set_prefs, _view_prefs]:
+for tool in [
+    _switch,
+    _correction,
+    _set_prefs,
+    _view_prefs,
+    _read_file,
+    _write_file,
+    _append_file,
+    _list_files,
+    _delete_file,
+]:
     if tool is not None:
         TOOL_REGISTRY[tool.name] = tool
 
