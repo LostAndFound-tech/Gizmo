@@ -6,6 +6,10 @@ Added:
   - retrieve_by_topic(): filter by topic tags in metadata
   - retrieve_by_timerange(): filter by date/hour for temporal queries
   - retrieve_recent(): convenience for "earlier today" type queries
+
+Fix: embedding function is now a module-level singleton — loaded once,
+reused for every RAGStore instance. Previously it was re-initialized
+per RAGStore construction, causing the model to reload on every request.
 """
 
 import os
@@ -20,21 +24,27 @@ load_dotenv()
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+# ── Embedding function singleton ──────────────────────────────────────────────
+# Loaded once at module import time. Every RAGStore shares this instance.
+# This prevents the model from being reloaded on every request.
+
+print(f"[RAG] Loading embedding model: {EMBED_MODEL}")
+_EMBED_FN = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name=EMBED_MODEL
+)
+print(f"[RAG] Embedding model loaded.")
+
 
 class RAGStore:
     def __init__(
         self,
         collection_name: str = "main",
         persist_dir: str = CHROMA_PERSIST_DIR,
-        embed_model: str = EMBED_MODEL,
     ):
         os.makedirs(persist_dir, exist_ok=True)
 
         self.client = chromadb.PersistentClient(path=persist_dir)
-        self.embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=embed_model
-        )
-        self._embed_model = embed_model
+        self.embed_fn = _EMBED_FN  # shared singleton — never reloaded
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
             embedding_function=self.embed_fn,
@@ -136,13 +146,6 @@ class RAGStore:
         query: str = "",
         n_results: int = 8,
     ) -> list[dict]:
-        """
-        Retrieve chunks whose topic metadata contains the given topic string.
-        ChromaDB stores topics as comma-separated strings, so we use $contains.
-
-        If query is provided, also scores by semantic similarity.
-        Otherwise returns by insertion order (most recent first via ID).
-        """
         n_results = min(n_results, self.collection.count())
         if n_results == 0:
             return []
@@ -185,18 +188,12 @@ class RAGStore:
     def retrieve_by_timerange(
         self,
         query: str,
-        date: Optional[str] = None,       # "YYYY-MM-DD", defaults to today
-        hour_start: Optional[str] = None,  # "HH" 24h format
-        hour_end: Optional[str] = None,    # "HH" 24h format
+        date: Optional[str] = None,
+        hour_start: Optional[str] = None,
+        hour_end: Optional[str] = None,
         n_results: int = 8,
         collection_override: Optional[str] = None,
     ) -> list[dict]:
-        """
-        Retrieve chunks filtered by date and optionally hour range.
-        Useful for "what were we talking about this morning" type queries.
-
-        Uses ChromaDB's $and/$gte/$lte operators on metadata fields.
-        """
         if collection_override:
             self.use_collection(collection_override)
 
@@ -245,10 +242,6 @@ class RAGStore:
         n_results: int = 8,
         collection_override: Optional[str] = None,
     ) -> list[dict]:
-        """
-        Convenience: retrieve from the past N hours.
-        Covers the "earlier today" / "this morning" use case.
-        """
         now = datetime.now()
         current_hour = int(now.strftime("%H"))
         start_hour = max(0, current_hour - hours_back)
@@ -265,7 +258,6 @@ class RAGStore:
     # ── Formatting ────────────────────────────────────────────────────────────
 
     def format_context(self, docs: list[dict]) -> str:
-        """Format retrieved docs into a context block for the LLM prompt."""
         if not docs:
             return ""
         sections = []
@@ -282,8 +274,8 @@ class RAGStore:
         return self.collection.count()
 
 
-# Lazy singleton — not instantiated at import time
-# Use get_rag() instead of importing rag directly
+# ── Lazy singleton ────────────────────────────────────────────────────────────
+
 _rag_instance = None
 
 def get_rag() -> "RAGStore":
@@ -292,7 +284,6 @@ def get_rag() -> "RAGStore":
         _rag_instance = RAGStore()
     return _rag_instance
 
-# Backwards compatibility — rag still importable but now lazy
 class _LazyRAG:
     def __getattr__(self, name):
         return getattr(get_rag(), name)
