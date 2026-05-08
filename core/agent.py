@@ -469,12 +469,14 @@ async def _generate(
 def _parse_tool_call(text: str) -> Optional[dict]:
     import json, re
     text = text.strip()
+    
     try:
         data = json.loads(text)
         if "tool" in data:
             return data
     except json.JSONDecodeError:
         pass
+    print(f"[Body] LLM raw output: {re[:200]}")
     match = re.search(r'\{.*?"tool".*?\}', text, re.DOTALL)
     if match:
         try:
