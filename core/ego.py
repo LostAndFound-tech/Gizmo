@@ -643,6 +643,39 @@ def _build_system_prompt(
     if tone_notes:
         tone_block += "\n  notes: " + "; ".join(tone_notes)
 
+    # ── ego.py patch ─────────────────────────────────────────────────────────────
+# In _build_system_prompt(), add this block immediately after tone_block
+# is assembled and before corrections_block.
+#
+# Find this line:
+#     corrections_block = ""
+#
+# Insert before it:
+
+    # Interaction prefs — verbatim, per-headmate, never filtered
+    # persona injects as raw direction; labeled fields and explicit follow
+    interaction_prefs_block = ""
+    if brief.headmate:
+        try:
+            from core.interaction_prefs import format_prefs_for_prompt
+            interaction_prefs_block = format_prefs_for_prompt(brief.headmate)
+            if interaction_prefs_block:
+                interaction_prefs_block = "\n\n" + interaction_prefs_block
+        except Exception as e:
+            log_error("Ego", "failed to load interaction prefs", exc=e)
+
+# Then update the return f-string — add {interaction_prefs_block} after {tone_block}:
+#
+# Before:
+#     ...{tone_block}{corrections_block}...
+#
+# After:
+#     ...{tone_block}{interaction_prefs_block}{corrections_block}...
+#
+# The persona block lands between tone guidance and hard rules —
+# after Gizmo knows the emotional register, before the non-negotiables.
+
+
     # Corrections block
     corrections_block = ""
     if corrections:

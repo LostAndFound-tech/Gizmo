@@ -1,42 +1,44 @@
 """
 core/interaction_prefs.py
-Per-host interaction preferences — how each headmate wants Gizmo to engage with them.
+Per-headmate interaction preferences — how each headmate wants Gizmo to engage.
 
-These are not inferred. They are set explicitly, in the headmate's own words,
-and read back verbatim. They survive personality rewrites and are never softened
-or synthesized away.
+These live inside the headmate's JSON file under "interaction_prefs", alongside
+corrections, moments_of_note, and baseline. Ego reads them in _build_system_prompt()
+and injects them into the tone block.
 
-Schema (SQLite):
-    interaction_prefs
-        id              TEXT PK
-        host            TEXT        -- headmate name, lowercase
-        field           TEXT        -- tone/pacing/checkins/humor/distress/explicit
-        value           TEXT        -- the actual preference, verbatim
-        set_by          TEXT        -- who set it
-        created_at      TEXT        -- ISO timestamp
-        updated_at      TEXT        -- ISO timestamp
+Not inferred. Set explicitly, stored verbatim, read back verbatim.
+Survive personality rewrites. Never softened or synthesized away.
 
-Fields:
-    tone        — how Gizmo should sound with this person
-    pacing      — verbose vs terse, elaboration vs just the answer
-    checkins    — whether Gizmo should proactively ask how they're doing
-    humor       — what kind, how much
-    distress    — how to respond when this person seems distressed
-    explicit    — freeform, verbatim, their exact words, no interpretation
+Schema (inside headmate JSON):
+    "interaction_prefs": {
+        "tone":     str | null,   -- how Gizmo should sound with this person
+        "pacing":   str | null,   -- verbose vs terse, elaboration vs just the answer
+        "checkins": str | null,   -- whether to proactively ask how they're doing
+        "humor":    str | null,   -- what kind, how much
+        "distress": str | null,   -- how to respond when this person seems distressed
+        "persona":  str | null,   -- freeform mini-prompt: "When talking to X, do A, say B..."
+                                     injected as raw instruction, not as a label
+        "explicit": [str, ...]    -- verbatim freeform one-liners, accumulates
+    }
 
-Multiple rows per host per field are allowed for 'explicit' (accumulates).
-All other fields are upserted — latest wins.
+Structured fields (tone/pacing/checkins/humor/distress/persona): upserted — latest wins.
+Explicit: append-only — each statement is its own entry, nothing overwritten.
+
+Injection order in system prompt:
+  1. persona  — raw instruction block, no label, reads as direct direction
+  2. tone/pacing/checkins/humor/distress — labeled key-value lines
+  3. explicit — bullet list of verbatim instructions
 """
 
-import os
-import sqlite3
-import uuid
-from datetime import datetime
+import json
+from pathlib import Path
 from typing import Optional
+import os
 
-PREFS_DB_PATH = os.getenv("PREFS_DB_PATH", "/data/interaction_prefs.db")
+_PERSONALITY_DIR = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
+_HEADMATES_DIR   = _PERSONALITY_DIR / "headmates"
 
-STRUCTURED_FIELDS = {"tone", "pacing", "checkins", "humor", "distress"}
+STRUCTURED_FIELDS = {"tone", "pacing", "checkins", "humor", "distress", "persona"}
 FREEFORM_FIELD    = "explicit"
 ALL_FIELDS        = STRUCTURED_FIELDS | {FREEFORM_FIELD}
 
@@ -46,197 +48,178 @@ FIELD_LABELS = {
     "checkins": "Check-ins",
     "humor":    "Humor",
     "distress": "When distressed",
+    "persona":  "Persona",   # label used in view_interaction_prefs only
     "explicit": "Explicit instructions",
 }
 
+_EMPTY_PREFS = {
+    "tone":     None,
+    "pacing":   None,
+    "checkins": None,
+    "humor":    None,
+    "distress": None,
+    "persona":  None,
+    "explicit": [],
+}
 
-# ── DB init ───────────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(PREFS_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(PREFS_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _headmate_path(name: str) -> Path:
+    return _HEADMATES_DIR / f"{name.lower()}.json"
 
 
-def init_db() -> None:
-    with _conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS interaction_prefs (
-                id          TEXT PRIMARY KEY,
-                host        TEXT NOT NULL,
-                field       TEXT NOT NULL,
-                value       TEXT NOT NULL,
-                set_by      TEXT NOT NULL,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prefs_host ON interaction_prefs (host)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prefs_host_field ON interaction_prefs (host, field)")
-        conn.commit()
-    print("[Prefs] DB initialized")
+def _load_headmate(name: str) -> Optional[dict]:
+    path = _headmate_path(name)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"[Prefs] Failed to load headmate file for {name}: {e}")
+        return None
+
+
+def _save_headmate(name: str, data: dict) -> None:
+    path = _headmate_path(name)
+    try:
+        _HEADMATES_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[Prefs] Failed to save headmate file for {name}: {e}")
+
+
+def _get_prefs_block(data: dict) -> dict:
+    """Return the interaction_prefs block from headmate data, with defaults filled in."""
+    prefs = data.get("interaction_prefs", {})
+    result = dict(_EMPTY_PREFS)
+    result.update({k: v for k, v in prefs.items() if k in ALL_FIELDS})
+    if not isinstance(result["explicit"], list):
+        result["explicit"] = []
+    return result
 
 
 # ── Write ─────────────────────────────────────────────────────────────────────
 
-def set_pref(
-    host: str,
-    field: str,
-    value: str,
-    set_by: str = "",
-) -> str:
+def set_pref(host: str, field: str, value: str) -> bool:
     """
-    Set or update a preference for a host.
-
-    Structured fields (tone/pacing/checkins/humor/distress): upserted — one row per field per host.
-    Explicit field: appended — each statement accumulates as its own row.
-
-    Returns the preference ID.
+    Set or update a preference for a headmate.
+    Structured fields: upserted — latest wins.
+    Explicit: appended — accumulates.
+    Returns True on success.
     """
-    if not host or not field or not value:
-        raise ValueError("host, field, and value are all required")
-
     field = field.lower().strip()
-    host  = host.lower().strip()
-
     if field not in ALL_FIELDS:
         raise ValueError(f"Unknown field '{field}'. Valid: {', '.join(sorted(ALL_FIELDS))}")
 
-    now = datetime.now().isoformat(timespec="seconds")
+    data = _load_headmate(host)
+    if data is None:
+        print(f"[Prefs] No headmate file found for {host} — cannot set pref")
+        return False
 
-    with _conn() as conn:
-        if field == FREEFORM_FIELD:
-            # Always append
-            pref_id = f"pref_{uuid.uuid4().hex[:12]}"
-            conn.execute("""
-                INSERT INTO interaction_prefs (id, host, field, value, set_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (pref_id, host, field, value, set_by or host, now, now))
-        else:
-            # Upsert — find existing row for this host+field
-            row = conn.execute(
-                "SELECT id FROM interaction_prefs WHERE host=? AND field=?",
-                (host, field)
-            ).fetchone()
+    prefs = _get_prefs_block(data)
 
-            if row:
-                pref_id = row["id"]
-                conn.execute(
-                    "UPDATE interaction_prefs SET value=?, set_by=?, updated_at=? WHERE id=?",
-                    (value, set_by or host, now, pref_id)
-                )
-            else:
-                pref_id = f"pref_{uuid.uuid4().hex[:12]}"
-                conn.execute("""
-                    INSERT INTO interaction_prefs (id, host, field, value, set_by, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (pref_id, host, field, value, set_by or host, now, now))
+    if field == FREEFORM_FIELD:
+        if value not in prefs["explicit"]:
+            prefs["explicit"].append(value)
+    else:
+        prefs[field] = value
 
-        conn.commit()
-
+    data["interaction_prefs"] = prefs
+    _save_headmate(host, data)
     print(f"[Prefs] Set '{field}' for {host}: {value[:60]}")
-    return pref_id
+    return True
 
 
-def delete_pref(host: str, field: str, pref_id: str = None) -> int:
+def delete_pref(host: str, field: str, value: str = None) -> bool:
     """
     Delete a preference.
-    If pref_id is given, deletes that specific row (useful for explicit entries).
-    Otherwise deletes all rows for this host+field.
-    Returns number of rows deleted.
+    For explicit: removes matching string if value provided, clears all if not.
+    For structured fields (including persona): sets to None.
+    Returns True on success.
     """
-    host  = host.lower().strip()
     field = field.lower().strip()
+    data = _load_headmate(host)
+    if data is None:
+        return False
 
-    with _conn() as conn:
-        if pref_id:
-            cursor = conn.execute(
-                "DELETE FROM interaction_prefs WHERE id=? AND host=? AND field=?",
-                (pref_id, host, field)
-            )
+    prefs = _get_prefs_block(data)
+
+    if field == FREEFORM_FIELD:
+        if value:
+            prefs["explicit"] = [e for e in prefs["explicit"] if e != value]
         else:
-            cursor = conn.execute(
-                "DELETE FROM interaction_prefs WHERE host=? AND field=?",
-                (host, field)
-            )
-        conn.commit()
-        return cursor.rowcount
+            prefs["explicit"] = []
+    else:
+        prefs[field] = None
+
+    data["interaction_prefs"] = prefs
+    _save_headmate(host, data)
+    return True
 
 
 # ── Read ──────────────────────────────────────────────────────────────────────
 
-def get_prefs(host: str) -> dict:
+def get_prefs(host: str) -> Optional[dict]:
     """
-    Return all preferences for a host as a dict.
-    Structured fields → single string value.
-    Explicit field → list of strings (all accumulated statements).
+    Return the interaction_prefs block for a headmate.
+    Returns None if the headmate file doesn't exist.
+    Returns an empty prefs dict if the file exists but has no prefs set.
     """
-    host = host.lower().strip()
+    data = _load_headmate(host)
+    if data is None:
+        return None
+    return _get_prefs_block(data)
 
-    rows = []
-    try:
-        with _conn() as conn:
-            rows = conn.execute(
-                "SELECT field, value, id, updated_at FROM interaction_prefs WHERE host=? ORDER BY updated_at ASC",
-                (host,)
-            ).fetchall()
-    except Exception as e:
-        print(f"[Prefs] get_prefs failed for {host}: {e}")
-        return {}
 
-    prefs: dict = {}
-    for row in rows:
-        field = row["field"]
-        if field == FREEFORM_FIELD:
-            prefs.setdefault("explicit", [])
-            prefs["explicit"].append({"id": row["id"], "value": row["value"], "updated_at": row["updated_at"]})
-        else:
-            prefs[field] = row["value"]
-
-    return prefs
+def has_prefs(host: str) -> bool:
+    """Return True if this headmate has any prefs set."""
+    prefs = get_prefs(host)
+    if prefs is None:
+        return False
+    return any(prefs.get(f) for f in STRUCTURED_FIELDS) or bool(prefs.get("explicit"))
 
 
 def format_prefs_for_prompt(host: str) -> str:
     """
-    Format a host's preferences for injection into the system prompt.
+    Format a headmate's prefs for injection into the system prompt.
     Returns empty string if no prefs are set.
+    Called by ego.py's _build_system_prompt().
+
+    Injection order:
+      1. persona — raw, unlabeled, reads as direct direction to the LLM
+      2. labeled fields (tone/pacing/checkins/humor/distress)
+      3. explicit bullet list
     """
     prefs = get_prefs(host)
     if not prefs:
         return ""
 
-    lines = [f"[How {host.title()} wants Gizmo to interact with them]"]
+    sections = []
 
+    # Persona — raw instruction block, no wrapping label
+    persona = prefs.get("persona")
+    if persona:
+        sections.append(persona.strip())
+
+    # Labeled fields
+    labeled_lines = []
     for field in ("tone", "pacing", "checkins", "humor", "distress"):
-        if field in prefs:
-            label = FIELD_LABELS[field]
-            lines.append(f"  {label}: {prefs[field]}")
+        val = prefs.get(field)
+        if val:
+            labeled_lines.append(f"  {FIELD_LABELS[field]}: {val}")
+    if labeled_lines:
+        sections.append(
+            f"[How {host.title()} wants to be engaged]\n" + "\n".join(labeled_lines)
+        )
 
-    explicit = prefs.get("explicit", [])
+    # Explicit instructions
+    explicit = [e for e in prefs.get("explicit", []) if e]
     if explicit:
-        lines.append(f"  Explicit instructions (verbatim, never override):")
-        for entry in explicit:
-            lines.append(f"    - {entry['value']}")
+        lines = [f"  - {e}" for e in explicit]
+        sections.append(
+            f"[Explicit instructions for {host.title()} — follow verbatim]\n"
+            + "\n".join(lines)
+        )
 
-    return "\n".join(lines)
-
-
-def list_hosts_with_prefs() -> list[str]:
-    """Return all hosts that have at least one preference set."""
-    try:
-        with _conn() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT host FROM interaction_prefs ORDER BY host"
-            ).fetchall()
-            return [r["host"] for r in rows]
-    except Exception as e:
-        print(f"[Prefs] list_hosts_with_prefs failed: {e}")
-        return []
-
-
-# ── Auto-init ─────────────────────────────────────────────────────────────────
-try:
-    init_db()
-except Exception as _e:
-    print(f"[Prefs] DB init failed at import time: {_e}")
+    return "\n\n".join(sections)
