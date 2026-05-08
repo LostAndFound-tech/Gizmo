@@ -492,6 +492,17 @@ class Archivist:
             duration_ms=duration_ms,
         )
 
+        try:
+            from core.session_manager import session_manager, is_close_signal
+            if is_close_signal(message):
+                session_manager.signal_close(session_id)
+                log_event("Archivist", "CLOSE_SIGNAL_DETECTED",
+                    session=session_id[:8],
+                    preview=message[:40],
+                )
+        except Exception as e:
+            log_error("Archivist", "close signal detection failed", exc=e)
+            
         return brief
 
     def receive_outgoing(
@@ -545,6 +556,16 @@ class Archivist:
                 )
             except Exception as e:
                 log_error("Archivist", "failed to schedule observation", exc=e)
+            
+        try:
+            from core.session_manager import session_manager
+            session_manager.touch(
+                session_id=session_id,
+                hosts=fronters,
+                topics=topics,
+            )
+        except Exception as e:
+            log_error("Archivist", "session_manager.touch failed", exc=e)
 
     def get_field(self, session_id: str) -> Optional[ConversationField]:
         return self._fields.get(session_id)

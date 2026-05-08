@@ -78,6 +78,18 @@ async def handler(websocket):
             # ── Greeting ──────────────────────────────────────────────────────
             if not _greeted:
                 _greeted = True
+                # Drain any queued rumination messages
+            try:
+                from core.agent import _get_pending
+                rumination_queue = _get_pending("__rumination__")
+                while not rumination_queue.empty():
+                    item = rumination_queue.get_nowait()
+                    message_text = item.get("message", "")
+                    if message_text:
+                        await websocket.send(json.dumps({"type": "token", "data": message_text}))
+                        await websocket.send(json.dumps({"type": "done",  "data": ""}))
+            except Exception as e:
+                print(f"[Server] Rumination drain failed: {e}")
                 try:
                     from core.greeter import should_greet, build_greeting
                     if should_greet(history):
@@ -168,6 +180,12 @@ async def start_background_services():
         print("[Server] Personality sync loop started")
     except Exception as e:
         print(f"[Server] Personality sync loop failed: {e}")
+    try:
+        from core.session_manager import session_manager
+        await session_manager.start(llm, push_fn=_push_to_all)
+        print("[Server] Session manager started")
+    except Exception as e:
+        print(f"[Server] Session manager failed: {e}")
 
 
 async def _drain_reminders(queue):
