@@ -1,28 +1,21 @@
 """
 tools/file_tool.py
 Direct file access for Gizmo — read, write, append, and list
-within his own data directory.
+within his data directory (/data/).
 
-Scoped strictly to /data/personality/ and /data/notes/.
-Cannot touch code, ChromaDB, or anything outside these paths.
+No confirm gate on writes. Instead, write_file uses a smart subject-match:
+  - New file            → write immediately
+  - Existing file       → LLM checks if incoming content is same subject
+      Same subject      → overwrite silently
+      Different subject → hold the write, return a confirmation request
+                          so Gizmo can ask the user before proceeding
 
-Operations:
-  read_file    — read any file in scope
-  write_file   — write (create or overwrite) a file in scope
-  append_file  — append to an existing file (or create if missing)
-  list_files   — list files in a directory in scope
-  delete_file  — delete a file in scope (requires confirm=True)
+Append never needs a check — it never destroys existing content.
+Delete still requires confirm=True — it's genuinely irreversible.
 
-Use cases:
-  - Mid-conversation: notice something worth remembering, write it down
-  - Read a headmate's file to check what's known before asking
-  - Append a note to someone's moments_of_note directly
-  - Update personality.txt intentionally
-  - Create a scratch note for something that doesn't fit existing structure
-  - List what files exist for a headmate or directory
-
-The /data/notes/ directory is Gizmo's own scratchpad —
-unstructured, freeform, his to use however makes sense.
+Path resolution:
+  Relative → resolved under /data/  ('notes/x.txt' → /data/notes/x.txt)
+  Absolute → must be within /data/
 """
 
 import json
@@ -32,50 +25,46 @@ from typing import Optional
 
 from tools.base_tool import BaseTool, ToolResult
 
-_PERSONALITY_DIR = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
-_NOTES_DIR       = Path(os.getenv("NOTES_DIR", "/data/notes"))
+_DATA_ROOT = Path(os.getenv("DATA_ROOT", "/data"))
 
-# All allowed root paths — nothing outside these
-_ALLOWED_ROOTS = [_PERSONALITY_DIR, _NOTES_DIR]
-
-_MAX_READ_BYTES  = 32_000   # ~8k tokens, enough for any single file
-_MAX_WRITE_BYTES = 64_000   # reasonable cap on writes
+_MAX_READ_BYTES  = 32_000
+_MAX_WRITE_BYTES = 64_000
+_SUBJECT_SAMPLE  = 300   # chars sent to subject-match LLM call
 
 
-def _resolve_and_validate(path_str: str) -> Optional[Path]:
+# ── Path validation ───────────────────────────────────────────────────────────
+
+def _resolve(path_str: str) -> tuple[Optional[Path], str]:
     """
-    Resolve a path and confirm it's within an allowed root.
-    Returns None if the path is outside scope.
+    Resolve path to absolute within /data/.
+    Returns (resolved, error). On success error is "".
     """
-    # Strip leading slashes so relative paths work naturally
-    path_str = path_str.lstrip("/")
+    if not path_str or not path_str.strip():
+        return None, "Empty path."
 
-    # Try each allowed root
-    for root in _ALLOWED_ROOTS:
-        candidate = (root / path_str).resolve()
-        try:
-            candidate.relative_to(root.resolve())
-            return candidate
-        except ValueError:
-            continue
+    path_str = path_str.strip()
 
-    # Also accept absolute paths that are within allowed roots
+    candidate = (
+        Path(path_str).resolve()
+        if path_str.startswith("/")
+        else (_DATA_ROOT / path_str).resolve()
+    )
+
     try:
-        absolute = Path(path_str).resolve()
-        for root in _ALLOWED_ROOTS:
-            try:
-                absolute.relative_to(root.resolve())
-                return absolute
-            except ValueError:
-                continue
-    except Exception:
-        pass
-
-    return None
+        candidate.relative_to(_DATA_ROOT.resolve())
+        return candidate, ""
+    except ValueError:
+        return None, (
+            f"'{path_str}' is outside /data/. "
+            f"Use relative paths like 'notes/x.txt' or "
+            f"'personality/headmates/oren.json'."
+        )
 
 
-def _safe_read(path: Path) -> tuple[str, str]:
-    """Read a file. Returns (content, error). One will be empty."""
+# ── Read helpers ──────────────────────────────────────────────────────────────
+
+def _read_raw(path: Path) -> tuple[str, str]:
+    """Returns (content, error)."""
     try:
         raw = path.read_bytes()
         if len(raw) > _MAX_READ_BYTES:
@@ -88,6 +77,75 @@ def _safe_read(path: Path) -> tuple[str, str]:
         return "", f"Read failed: {e}"
 
 
+# ── Write helpers ─────────────────────────────────────────────────────────────
+
+def _write_raw(path: Path, content: str) -> tuple[bool, str]:
+    """Actually write. Returns (success, message)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return True, f"Written: {path} ({len(content)} chars)"
+    except Exception as e:
+        return False, f"Write failed: {e}"
+
+
+# ── Subject match ─────────────────────────────────────────────────────────────
+
+async def _same_subject(existing: str, incoming: str) -> bool:
+    """
+    Cheap LLM call — are these two content blocks about the same subject?
+    Returns True (safe to overwrite) or False (different subject, hold write).
+    Defaults to True on any failure so we never silently block a write.
+    """
+    existing_sample = existing[:_SUBJECT_SAMPLE].strip()
+    if not existing_sample:
+        return True  # empty file — always safe
+
+    incoming_sample = incoming[:_SUBJECT_SAMPLE].strip()
+
+    try:
+        from core.llm import llm
+        result = await llm.generate(
+            [{
+                "role": "user",
+                "content": (
+                    f"File A (existing):\n\"\"\"\n{existing_sample}\n\"\"\"\n\n"
+                    f"File B (incoming):\n\"\"\"\n{incoming_sample}\n\"\"\"\n\n"
+                    f"Are these about the same subject? One word: YES or NO."
+                )
+            }],
+            system_prompt=(
+                "Compare two content blocks. "
+                "Reply with exactly one word: YES or NO."
+            ),
+            max_new_tokens=5,
+            temperature=0.0,
+        )
+        return result.strip().upper().startswith("Y")
+    except Exception:
+        return True  # on error, don't block
+
+
+# ── Pending write store ───────────────────────────────────────────────────────
+# Holds writes that need user confirmation (subject mismatch detected).
+# Keyed by session_id.
+
+_pending: dict[str, dict] = {}
+
+
+def release_pending(session_id: str) -> tuple[bool, str]:
+    """User confirmed — execute the held write."""
+    if session_id not in _pending:
+        return False, "No pending write to confirm."
+    p = _pending.pop(session_id)
+    return _write_raw(p["path"], p["content"])
+
+
+def discard_pending(session_id: str) -> bool:
+    """User declined — drop the held write."""
+    return bool(_pending.pop(session_id, None))
+
+
 # ── Read tool ─────────────────────────────────────────────────────────────────
 
 class ReadFileTool(BaseTool):
@@ -98,11 +156,10 @@ class ReadFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Read a file from your data directory. "
-            "Use this to check what you already know about someone before asking, "
-            "review your own personality or notes, or inspect any data file. "
-            "Paths are relative to /data/personality/ or /data/notes/. "
-            "Examples: 'headmates/oren.json', 'personality.txt', 'notes/reminders.txt'. "
+            "Read a file from your data directory (/data/). "
+            "ALWAYS use this before writing to check what's already there. "
+            "Paths are relative to /data/ — e.g. 'notes/thoughts.txt', "
+            "'personality/headmates/oren.json', 'personality/personality.txt'. "
             "Args: path (str) — file path to read."
         )
 
@@ -110,24 +167,21 @@ class ReadFileTool(BaseTool):
         if not path:
             return ToolResult(success=False, output="Need a file path.")
 
-        resolved = _resolve_and_validate(path)
-        if resolved is None:
-            return ToolResult(
-                success=False,
-                output=f"Path '{path}' is outside my data directory. I can only read within /data/personality/ and /data/notes/."
-            )
-
-        content, error = _safe_read(resolved)
+        resolved, error = _resolve(path)
         if error:
             return ToolResult(success=False, output=error)
 
-        # Pretty-print JSON if applicable
+        content, read_error = _read_raw(resolved)
+        if read_error:
+            return ToolResult(success=False, output=read_error)
+
+        # Pretty-print JSON
         if resolved.suffix == ".json":
             try:
                 parsed = json.loads(content.replace("\n[truncated]", ""))
                 content = json.dumps(parsed, indent=2)
             except Exception:
-                pass  # not valid JSON or truncated — return as-is
+                pass
 
         return ToolResult(
             success=True,
@@ -146,23 +200,24 @@ class WriteFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Write (create or overwrite) a file in your data directory. "
-            "Use for updating personality.txt, writing a new note, "
-            "or updating structured data you've read and modified. "
-            "WARNING: overwrites existing content — use append_file to add without replacing. "
+            "Write content to a file under /data/. "
+            "New files are written immediately. "
+            "Existing files: content is checked against what's already there — "
+            "if same subject, overwrites silently. "
+            "If different subject, write is held and you must ask the user to confirm. "
             "For JSON files, content must be valid JSON. "
-            "Paths are relative to /data/personality/ or /data/notes/. "
+            "ALWAYS read the file first if you think it might already exist. "
+            "Paths relative to /data/ — e.g. 'notes/x.txt', "
+            "'personality/headmates/oren.json'. "
             "Args: "
-            "path (str) — file path to write. "
-            "content (str) — content to write. "
-            "confirm (bool) — must be true to actually write (prevents accidental overwrites)."
+            "path (str) — file path. "
+            "content (str) — full content to write."
         )
 
     async def run(
         self,
         path: str = "",
         content: str = "",
-        confirm: bool = False,
         session_id: str = "",
         **kwargs,
     ) -> ToolResult:
@@ -170,45 +225,97 @@ class WriteFileTool(BaseTool):
             return ToolResult(success=False, output="Need a file path.")
         if not content:
             return ToolResult(success=False, output="Need content to write.")
-        if not confirm:
-            return ToolResult(
-                success=False,
-                output="Set confirm=true to write. This will overwrite the file if it exists."
-            )
 
-        resolved = _resolve_and_validate(path)
-        if resolved is None:
-            return ToolResult(
-                success=False,
-                output=f"Path '{path}' is outside my data directory."
-            )
+        resolved, error = _resolve(path)
+        if error:
+            return ToolResult(success=False, output=error)
 
         if len(content.encode("utf-8")) > _MAX_WRITE_BYTES:
             return ToolResult(
                 success=False,
-                output=f"Content too large ({len(content)} chars). Max is {_MAX_WRITE_BYTES} bytes."
+                output=f"Content too large. Max {_MAX_WRITE_BYTES} bytes."
             )
 
-        # Validate JSON if writing a .json file
+        # JSON validation
         if resolved.suffix == ".json":
             try:
                 json.loads(content)
             except json.JSONDecodeError as e:
                 return ToolResult(
                     success=False,
-                    output=f"Invalid JSON: {e}. File not written."
+                    output=f"Invalid JSON: {e}. Not written."
                 )
 
-        try:
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content, encoding="utf-8")
-        except Exception as e:
-            return ToolResult(success=False, output=f"Write failed: {e}")
+        # New file — write immediately
+        if not resolved.exists():
+            ok, msg = _write_raw(resolved, content)
+            return ToolResult(success=ok, output=msg, data={"path": str(resolved)})
 
+        # Existing file — subject check
+        existing, read_err = _read_raw(resolved)
+        if read_err:
+            # Can't read existing — write anyway, something's wrong with the file
+            ok, msg = _write_raw(resolved, content)
+            return ToolResult(success=ok, output=msg, data={"path": str(resolved)})
+
+        same = await _same_subject(existing, content)
+
+        if same:
+            ok, msg = _write_raw(resolved, content)
+            return ToolResult(success=ok, output=msg, data={"path": str(resolved)})
+        else:
+            # Hold the write — different subject detected
+            _pending[session_id] = {"path": resolved, "content": content}
+            return ToolResult(
+                success=False,
+                output=(
+                    f"The file at '{path}' already exists and appears to contain "
+                    f"different content. I've held the write. "
+                    f"Tell the user what you wanted to write and ask if they want to overwrite it. "
+                    f"If yes, call confirm_write. If no, call cancel_write."
+                ),
+                data={"path": str(resolved), "pending": True},
+            )
+
+
+# ── Confirm / cancel pending write tools ──────────────────────────────────────
+
+class ConfirmWriteTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "confirm_write"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Confirm a held file write after the user has approved overwriting. "
+            "Only call this after write_file returned a 'held' result AND "
+            "the user has explicitly said yes to overwriting. "
+            "Args: (none beyond session_id)"
+        )
+
+    async def run(self, session_id: str = "", **kwargs) -> ToolResult:
+        ok, msg = release_pending(session_id)
+        return ToolResult(success=ok, output=msg)
+
+
+class CancelWriteTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "cancel_write"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Cancel a held file write — user declined the overwrite. "
+            "Args: (none beyond session_id)"
+        )
+
+    async def run(self, session_id: str = "", **kwargs) -> ToolResult:
+        discarded = discard_pending(session_id)
         return ToolResult(
             success=True,
-            output=f"Written: {resolved} ({len(content)} chars)",
-            data={"path": str(resolved), "size": len(content)},
+            output="Write cancelled." if discarded else "No pending write to cancel.",
         )
 
 
@@ -223,14 +330,14 @@ class AppendFileTool(BaseTool):
     def description(self) -> str:
         return (
             "Append text to a file without overwriting it. "
-            "Use for adding notes, logging observations, or adding to a list. "
-            "Creates the file if it doesn't exist. "
-            "For structured JSON files, use write_file instead "
-            "(read → modify → write is safer for JSON). "
-            "Paths are relative to /data/personality/ or /data/notes/. "
+            "Creates the file and any parent directories if missing. "
+            "Safe — never destroys existing content. "
+            "Prefer this over write_file when adding to an existing document. "
+            "For JSON files use write_file (read → modify → write is safer). "
+            "Paths relative to /data/ — e.g. 'notes/thoughts.txt'. "
             "Args: "
-            "path (str) — file path to append to. "
-            "content (str) — text to append. A newline is added before content if the file is non-empty."
+            "path (str) — file path. "
+            "content (str) — text to append."
         )
 
     async def run(
@@ -245,29 +352,22 @@ class AppendFileTool(BaseTool):
         if not content:
             return ToolResult(success=False, output="Need content to append.")
 
-        resolved = _resolve_and_validate(path)
-        if resolved is None:
-            return ToolResult(
-                success=False,
-                output=f"Path '{path}' is outside my data directory."
-            )
+        resolved, error = _resolve(path)
+        if error:
+            return ToolResult(success=False, output=error)
 
         try:
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            existing = ""
-            if resolved.exists():
-                existing = resolved.read_text(encoding="utf-8")
-
+            existing = resolved.read_text(encoding="utf-8") if resolved.exists() else ""
             separator = "\n" if existing and not existing.endswith("\n") else ""
             resolved.write_text(existing + separator + content, encoding="utf-8")
+            return ToolResult(
+                success=True,
+                output=f"Appended {len(content)} chars to {resolved}",
+                data={"path": str(resolved), "appended": len(content)},
+            )
         except Exception as e:
             return ToolResult(success=False, output=f"Append failed: {e}")
-
-        return ToolResult(
-            success=True,
-            output=f"Appended to {resolved} ({len(content)} chars)",
-            data={"path": str(resolved), "appended": len(content)},
-        )
 
 
 # ── List tool ─────────────────────────────────────────────────────────────────
@@ -280,54 +380,42 @@ class ListFilesTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "List files in a directory within your data directory. "
-            "Use to see what headmate files exist, what notes you've written, "
-            "or what's in any directory you have access to. "
-            "Paths are relative to /data/personality/ or /data/notes/. "
-            "Pass an empty path or '.' to list the top-level personality directory. "
-            "Args: path (str) — directory path to list (default: personality root)."
+            "List files and directories under /data/. "
+            "Pass empty path or '.' to list /data/ itself. "
+            "Args: path (str) — directory to list (relative to /data/ or absolute)."
         )
 
     async def run(self, path: str = "", session_id: str = "", **kwargs) -> ToolResult:
-        # Default to personality dir
-        if not path or path in (".", ""):
-            target = _PERSONALITY_DIR
+        if not path or path.strip() in (".", ""):
+            target = _DATA_ROOT
+            err = ""
         else:
-            target = _resolve_and_validate(path)
-            if target is None:
-                return ToolResult(
-                    success=False,
-                    output=f"Path '{path}' is outside my data directory."
-                )
+            target, err = _resolve(path)
+            if err:
+                return ToolResult(success=False, output=err)
 
         if not target.exists():
             return ToolResult(
                 success=True,
-                output=f"Directory doesn't exist yet: {target}",
-                data={"files": [], "dirs": []}
+                output=f"{target}: (does not exist yet)",
+                data={"files": [], "dirs": []},
             )
-
         if not target.is_dir():
             return ToolResult(
                 success=False,
-                output=f"'{path}' is a file, not a directory. Use read_file to read it."
+                output=f"'{path}' is a file — use read_file to read it.",
             )
 
         try:
-            entries = sorted(target.iterdir())
-            files = [e.name for e in entries if e.is_file()]
-            dirs  = [e.name + "/" for e in entries if e.is_dir()]
-            all_entries = dirs + files
-
-            if not all_entries:
-                output = f"{target}: (empty)"
-            else:
-                output = f"{target}:\n" + "\n".join(f"  {e}" for e in all_entries)
-
+            entries  = sorted(target.iterdir())
+            dirs     = [e.name + "/" for e in entries if e.is_dir()]
+            files    = [e.name for e in entries if e.is_file()]
+            listing  = dirs + files
+            output   = f"{target}:\n" + "\n".join(f"  {e}" for e in listing) if listing else f"{target}: (empty)"
             return ToolResult(
                 success=True,
                 output=output,
-                data={"files": files, "dirs": dirs, "path": str(target)},
+                data={"dirs": dirs, "files": files, "path": str(target)},
             )
         except Exception as e:
             return ToolResult(success=False, output=f"List failed: {e}")
@@ -343,14 +431,11 @@ class DeleteFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Delete a file from your data directory. "
-            "Use with care — this is permanent. "
-            "Requires confirm=true to actually delete. "
-            "Cannot delete directories, only files. "
-            "Paths are relative to /data/personality/ or /data/notes/. "
+            "Delete a file under /data/. Permanent — cannot be undone. "
+            "Requires confirm=True. Cannot delete directories. "
             "Args: "
-            "path (str) — file path to delete. "
-            "confirm (bool) — must be true to actually delete."
+            "path (str) — file to delete. "
+            "confirm (bool) — must be true."
         )
 
     async def run(
@@ -365,32 +450,24 @@ class DeleteFileTool(BaseTool):
         if not confirm:
             return ToolResult(
                 success=False,
-                output="Set confirm=true to delete. This is permanent."
+                output="Set confirm=true to delete. This cannot be undone.",
             )
 
-        resolved = _resolve_and_validate(path)
-        if resolved is None:
-            return ToolResult(
-                success=False,
-                output=f"Path '{path}' is outside my data directory."
-            )
+        resolved, error = _resolve(path)
+        if error:
+            return ToolResult(success=False, output=error)
 
         if not resolved.exists():
             return ToolResult(success=False, output=f"File not found: {resolved}")
-
         if resolved.is_dir():
-            return ToolResult(
-                success=False,
-                output="That's a directory. I can only delete individual files."
-            )
+            return ToolResult(success=False, output="That's a directory — can only delete files.")
 
         try:
             resolved.unlink()
+            return ToolResult(
+                success=True,
+                output=f"Deleted: {resolved}",
+                data={"path": str(resolved)},
+            )
         except Exception as e:
             return ToolResult(success=False, output=f"Delete failed: {e}")
-
-        return ToolResult(
-            success=True,
-            output=f"Deleted: {resolved}",
-            data={"path": str(resolved)},
-        )

@@ -302,7 +302,11 @@ class SessionManager:
                         path=path_str,
                         chars=len(content),
                         success=result.success,
+                        output=result.output[:120],
                     )
+                    if not result.success:
+                        log_error("SessionManager",
+                            f"rumination write failed for '{path_str}': {result.output}")
                 except Exception as e:
                     log_error("SessionManager", "rumination file write failed", exc=e)
 
