@@ -311,24 +311,26 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
     )
 
     return f"""{personality}
-
+ 
 Current time: {now_str}
 Message history includes [HH:MM] timestamps — use these to reason about elapsed time.
-
+ 
 Available tools:
 {tool_descriptions}
-
-To use a tool, respond with ONLY this JSON format (no extra text):
-{{"tool": "tool_name", "args": {{"arg1": "value1"}}}}
-
-After receiving a tool result, continue reasoning and provide a final response.
-If no tool is needed, respond directly.{rag_block}{context_block}
-
+ 
+TOOL USE RULES:
+- To call a tool, output ONLY a raw JSON object on a single line. Nothing before it, nothing after it.
+- The JSON must have exactly two keys: "tool" (string) and "args" (object).
+- Valid example: {{"tool": "append_file", "args": {{"path": "notes/thought.txt", "content": "Something worth remembering."}}}}
+- After the tool result is returned, respond naturally to the user.
+- If no tool is needed, respond in plain text — do not output JSON.
+- NEVER output a partial JSON object. NEVER output just a brace or fragment.{rag_block}{context_block}
+ 
 The person in "current_host" is who you are speaking WITH right now — address them as "you".
 Be concise. Be accurate. When uncertain, say so.
 Use switch_host whenever someone indicates a host change or fronter update.
 Use log_correction whenever someone says you did something wrong or tells you to stop doing something.
-
+ 
 KNOWLEDGE BASE RULES:
 - [Relevant knowledge] is your memory — ground truth.
 - If it contains an answer, USE IT.
@@ -400,18 +402,33 @@ async def _generate(
             result = await TOOL_REGISTRY[tool_name].run(
                 session_id=brief.session_id, **clean_args
             )
-            injected_results += (
-                f"\n[Tool: {tool_name}]\nResult: {result.output}\n"
-                f"Task complete. Now respond to the user directly.\n"
-            )
+ 
+            print(f"[Body] Tool '{tool_name}' success={result.success} | {result.output[:120]}")
+ 
             log_event("Body", "TOOL_EXECUTED",
                 session=brief.session_id[:8],
                 tool=tool_name,
-                success=True,
+                success=result.success,
+                output=result.output[:120],
             )
+ 
+            if result.success:
+                injected_results += (
+                    f"\n[Tool: {tool_name}]\nStatus: SUCCESS\nResult: {result.output}\n"
+                    f"Task complete. Now respond to the user directly.\n"
+                )
+            else:
+                injected_results += (
+                    f"\n[Tool: {tool_name}]\nStatus: FAILED\nReason: {result.output}\n"
+                    f"The tool failed. Do NOT tell the user it succeeded. "
+                    f"Report the failure honestly.\n"
+                )
+ 
         except Exception as e:
-            injected_results += f"\n[Tool Error: {e}]\n"
+            print(f"[Body] Tool '{tool_name}' raised exception: {e}")
+            injected_results += f"\n[Tool Error in '{tool_name}']: {e}\n"
             log_error("Body", f"tool execution failed: {tool_name}", exc=e)
+ 
  
 # Replace with:
  
