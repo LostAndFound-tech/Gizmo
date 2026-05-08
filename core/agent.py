@@ -333,6 +333,8 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         for t in TOOL_REGISTRY.values()
     )
 
+    tool_example = '{"tool": "append_file", "args": {"path": "notes/thought.txt", "content": "Something worth remembering."}}'
+
     return f"""{personality}
 
 Current time: {now_str}
@@ -344,7 +346,7 @@ Available tools:
 TOOL USE RULES:
 - To call a tool, output ONLY a raw JSON object on a single line. Nothing before it, nothing after it.
 - The JSON must have exactly two keys: "tool" (string) and "args" (object).
-- Valid example: {{"tool": "append_file", "args": {{"path": "notes/thought.txt", "content": "Something worth remembering."}}}}
+- Valid example: {tool_example}
 - After the tool result is returned, respond naturally to the user.
 - If no tool is needed, respond in plain text — do not output JSON.
 - NEVER output a partial JSON object. NEVER output just a brace or fragment.{rag_block}{headmate_block}{context_block}
