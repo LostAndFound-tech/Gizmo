@@ -43,14 +43,9 @@ from memory.history import get_session
 # ── Quiet mode ────────────────────────────────────────────────────────────────
 
 _quiet: dict[str, Optional[float]] = {}
-# session_id → expiry timestamp (None = indefinite)
 
 
 def set_quiet(session_id: str, duration_seconds: Optional[float] = None) -> None:
-    """
-    Enter quiet mode for a session.
-    duration_seconds=None means indefinite — cleared by clear_quiet() or explicit request.
-    """
     expiry = time.time() + duration_seconds if duration_seconds else None
     _quiet[session_id] = expiry
     log_event("Agent", "QUIET_SET",
@@ -61,14 +56,12 @@ def set_quiet(session_id: str, duration_seconds: Optional[float] = None) -> None
 
 
 def clear_quiet(session_id: str) -> None:
-    """Exit quiet mode."""
     if session_id in _quiet:
         del _quiet[session_id]
         log_event("Agent", "QUIET_CLEARED", session=session_id[:8])
 
 
 def is_quiet(session_id: str) -> bool:
-    """Check if a session is in quiet mode. Auto-clears expired timers."""
     if session_id not in _quiet:
         return False
     expiry = _quiet[session_id]
@@ -80,9 +73,6 @@ def is_quiet(session_id: str) -> bool:
 
 
 # ── Pending insights queue ────────────────────────────────────────────────────
-# Components can enqueue unsolicited messages here.
-# The membrane drains this after each user-triggered response,
-# and the background loop drains it during idle periods.
 
 _pending: dict[str, asyncio.Queue] = {}
 
@@ -97,13 +87,9 @@ async def enqueue(
     session_id: str,
     message: str,
     source: str = "unknown",
-    priority: int = 5,          # 1 = highest, 10 = lowest
+    priority: int = 5,
     emergency: bool = False,
 ) -> None:
-    """
-    Any component can enqueue an unsolicited message here.
-    Emergency=True bypasses quiet mode.
-    """
     queue = _get_pending(session_id)
     await queue.put({
         "message": message,
@@ -122,20 +108,17 @@ async def enqueue(
 
 
 # ── Push function ─────────────────────────────────────────────────────────────
-# Set by server.py on startup so components can push to connected clients.
 
 _push_fn = None
 
 
 def set_push_fn(fn) -> None:
-    """Register the server's push-to-all function."""
     global _push_fn
     _push_fn = fn
     log("Agent", "push function registered")
 
 
 async def push(message: str) -> None:
-    """Push a message to all connected clients."""
     if _push_fn is None:
         log("Agent", f"push skipped — no push function registered: {message[:40]}")
         return
@@ -148,11 +131,6 @@ async def push(message: str) -> None:
 # ── Emergency check ───────────────────────────────────────────────────────────
 
 def _is_emergency(message: str) -> bool:
-    """
-    One question. High bar. Binary.
-    Does something need to be done RIGHT NOW?
-    Time-sensitive, consequence if ignored, action required.
-    """
     import re
     _EMERGENCY_PATTERNS = re.compile(
         r"\b(storm|tornado|hurricane|flood|fire|emergency|911|ambulance|"
@@ -166,14 +144,9 @@ def _is_emergency(message: str) -> bool:
 # ── Quiet message detection ───────────────────────────────────────────────────
 
 def _is_quiet_request(message: str) -> Optional[float]:
-    """
-    Detect explicit quiet requests.
-    Returns duration in seconds, or 0 for indefinite, or None if not a quiet request.
-    """
     import re
     msg = message.lower().strip()
 
-    # "quiet for X minutes/hours"
     timed = re.search(
         r"(quiet|silence|shh|hush|stop talking).{0,20}"
         r"(\d+)\s*(minute|min|hour|hr)",
@@ -185,19 +158,17 @@ def _is_quiet_request(message: str) -> Optional[float]:
         seconds = amount * 3600 if "hour" in unit or unit == "hr" else amount * 60
         return float(seconds)
 
-    # "I need quiet" / "please be quiet" / "stop" etc.
     indefinite = re.search(
         r"\b(quiet|silence|shh+|hush|stop|leave me alone|not now)\b",
         msg
     )
     if indefinite:
-        return 0.0  # indefinite
+        return 0.0
 
     return None
 
 
 # ── Hold messages ─────────────────────────────────────────────────────────────
-# Sent when the user seems impatient and Gizmo needs more time.
 
 _HOLD_MESSAGES = [
     "give me a sec",
@@ -219,11 +190,6 @@ def _next_hold_message(session_id: str) -> str:
 # ── Core routing ──────────────────────────────────────────────────────────────
 
 async def _get_facts(brief: Brief) -> dict:
-    """
-    Mind: retrieve relevant facts for this brief.
-    Tiered: Librarian → RAG → Web search.
-    LLM only fires for synthesis when confidence is insufficient.
-    """
     try:
         from core.mind import mind
         facts = await mind.query(brief)
@@ -240,11 +206,6 @@ async def _get_facts(brief: Brief) -> dict:
 
 
 async def _get_direction(brief: Brief, facts: dict) -> dict:
-    """
-    Ego: assemble direction for Body.
-    v1: builds system prompt from brief + facts.
-    Future: Id read, Empath brief, full Ego reasoning.
-    """
     try:
         direction = _build_system_prompt(brief, facts)
         log_event("Agent", "DIRECTION_BUILT",
@@ -261,15 +222,13 @@ async def _get_direction(brief: Brief, facts: dict) -> dict:
 
 
 def _build_system_prompt(brief: Brief, facts: dict) -> str:
-    """
-    Assemble system prompt from brief and facts.
-    v1: reads personality.txt as cold-start seed.
-    Future: reads from Id tensor directly.
-    """
     import os
+    import re
+    import json
+    from pathlib import Path
     from core.timezone import tz_now
 
-    # Personality — v1 reads file, future reads Id
+    # ── Personality seed ──────────────────────────────────────────────────────
     personality = "You are Gizmo, a persistent AI companion."
     personality_path = os.path.join(
         os.path.dirname(__file__), "..", "personality.txt"
@@ -284,11 +243,75 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
 
     now_str = tz_now().strftime("%A %Y-%m-%d %H:%M %Z")
 
-    # RAG knowledge block
+    # ── RAG knowledge block ───────────────────────────────────────────────────
     synthesis = facts.get("synthesis", "")
     rag_block = f"\n\n[Relevant knowledge]\n{synthesis}" if synthesis else ""
 
-    # Situational context from brief
+    # ── Headmate file — injected every message ────────────────────────────────
+    headmate_block = ""
+    if brief.headmate:
+        try:
+            personality_dir = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
+            headmate_path = personality_dir / "headmates" / f"{brief.headmate.lower()}.json"
+            if headmate_path.exists():
+                data = json.loads(headmate_path.read_text(encoding="utf-8"))
+                name = data.get("name", brief.headmate).title()
+                lines = [f"[What I know about {name}]"]
+
+                baseline = data.get("baseline", {})
+                for k, v in baseline.items():
+                    if k == "observations":
+                        continue
+                    if v not in ("unknown", 0, 0.0, "", None):
+                        lines.append(f"  {k}: {v}")
+
+                moments = data.get("moments_of_note", [])
+                if moments:
+                    lines.append("  Known facts:")
+                    for m in moments[-8:]:
+                        clean = re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(m))
+                        lines.append(f"    - {clean}")
+
+                patterns = data.get("observed_patterns", [])
+                if patterns:
+                    lines.append("  Observed patterns:")
+                    for p in patterns[-3:]:
+                        if isinstance(p, dict):
+                            lines.append(f"    - {p.get('pattern', str(p))}")
+                        else:
+                            lines.append(f"    - {p}")
+
+                corrections = data.get("corrections", [])
+                if corrections:
+                    lines.append("  Corrections from this person:")
+                    for c in corrections[-3:]:
+                        if isinstance(c, dict):
+                            lines.append(f"    - {c.get('rule', str(c))}")
+                        else:
+                            lines.append(f"    - {c}")
+
+                prefs = data.get("interaction_prefs", {})
+                pref_lines = []
+                for field in ("tone", "pacing", "checkins", "humor", "distress"):
+                    v = prefs.get(field)
+                    if v:
+                        pref_lines.append(f"    {field}: {v}")
+                persona = prefs.get("persona")
+                explicit = [e for e in prefs.get("explicit", []) if e]
+                if persona or pref_lines or explicit:
+                    lines.append("  How they want to be engaged:")
+                    if persona:
+                        lines.append(f"    {persona}")
+                    lines.extend(pref_lines)
+                    for e in explicit:
+                        lines.append(f"    - {e}")
+
+                if len(lines) > 1:
+                    headmate_block = "\n\n" + "\n".join(lines)
+        except Exception as e:
+            print(f"[Agent] headmate inject failed: {e}")
+
+    # ── Situational context ───────────────────────────────────────────────────
     context_lines = []
     if brief.headmate:
         context_lines.append(f"  current_host: {brief.headmate}")
@@ -303,7 +326,7 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         if context_lines else ""
     )
 
-    # Tool descriptions — v1 keeps tool registry
+    # ── Tools ─────────────────────────────────────────────────────────────────
     from core.agent_tools import TOOL_REGISTRY
     tool_descriptions = "\n".join(
         f"- {t.name}: {t.description}"
@@ -311,26 +334,26 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
     )
 
     return f"""{personality}
- 
+
 Current time: {now_str}
 Message history includes [HH:MM] timestamps — use these to reason about elapsed time.
- 
+
 Available tools:
 {tool_descriptions}
- 
+
 TOOL USE RULES:
 - To call a tool, output ONLY a raw JSON object on a single line. Nothing before it, nothing after it.
 - The JSON must have exactly two keys: "tool" (string) and "args" (object).
 - Valid example: {{"tool": "append_file", "args": {{"path": "notes/thought.txt", "content": "Something worth remembering."}}}}
 - After the tool result is returned, respond naturally to the user.
 - If no tool is needed, respond in plain text — do not output JSON.
-- NEVER output a partial JSON object. NEVER output just a brace or fragment.{rag_block}{context_block}
- 
+- NEVER output a partial JSON object. NEVER output just a brace or fragment.{rag_block}{headmate_block}{context_block}
+
 The person in "current_host" is who you are speaking WITH right now — address them as "you".
 Be concise. Be accurate. When uncertain, say so.
 Use switch_host whenever someone indicates a host change or fronter update.
 Use log_correction whenever someone says you did something wrong or tells you to stop doing something.
- 
+
 KNOWLEDGE BASE RULES:
 - [Relevant knowledge] is your memory — ground truth.
 - If it contains an answer, USE IT.
@@ -343,11 +366,6 @@ async def _generate(
     direction: dict,
     history,
 ) -> AsyncGenerator[str, None]:
-    """
-    Body: generate response tokens.
-    v1: thin wrapper around existing LLM + tool loop.
-    Future: full Body component with Ego watching output.
-    """
     import json
     import re
 
@@ -370,11 +388,14 @@ async def _generate(
 
         response = await llm.generate(working, system_prompt=system_prompt)
 
+        # Log raw output so we can see exactly what DeepSeek generates
+        print(f"[Body] raw='{response[:300]}'")
+
         # Check for tool call
         tool_call = _parse_tool_call(response)
 
         if tool_call is None:
-            # No tool call — this is the final response
+            # No tool call — final response
             response = _strip_tool_calls(response)
             log_event("Body", "GENERATED",
                 session=brief.session_id[:8],
@@ -402,16 +423,16 @@ async def _generate(
             result = await TOOL_REGISTRY[tool_name].run(
                 session_id=brief.session_id, **clean_args
             )
- 
-            print(f"[Body] Tool '{tool_name}' success={result.success} | {result.output[:120]}")
- 
+
+            print(f"[Body] tool='{tool_name}' success={result.success} | {result.output[:120]}")
+
             log_event("Body", "TOOL_EXECUTED",
                 session=brief.session_id[:8],
                 tool=tool_name,
                 success=result.success,
                 output=result.output[:120],
             )
- 
+
             if result.success:
                 injected_results += (
                     f"\n[Tool: {tool_name}]\nStatus: SUCCESS\nResult: {result.output}\n"
@@ -423,66 +444,54 @@ async def _generate(
                     f"The tool failed. Do NOT tell the user it succeeded. "
                     f"Report the failure honestly.\n"
                 )
- 
+
         except Exception as e:
-            print(f"[Body] Tool '{tool_name}' raised exception: {e}")
+            print(f"[Body] tool='{tool_name}' exception: {e}")
             injected_results += f"\n[Tool Error in '{tool_name}']: {e}\n"
             log_error("Body", f"tool execution failed: {tool_name}", exc=e)
- 
- 
-# Replace with:
- 
-        clean_args = {k: v for k, v in tool_args.items() if k != "session_id"}
-        try:
-            result = await TOOL_REGISTRY[tool_name].run(
-                session_id=brief.session_id, **clean_args
-            )
- 
-            # Log to Render so we can see exactly what happened
-            print(f"[Body] Tool '{tool_name}' success={result.success} | {result.output[:120]}")
- 
-            log_event("Body", "TOOL_EXECUTED",
+
+        tool_calls += 1
+
+        # One-shot tools respond immediately
+        if tool_name in ("switch_host", "log_correction", "alter_wheel"):
+            working[-1] = {
+                "role": "user",
+                "content": brief.message + injected_results,
+            }
+            final = await llm.generate(working, system_prompt=system_prompt)
+            final = _strip_tool_calls(final)
+            log_event("Body", "ONE_SHOT_TOOL_RESPONSE",
                 session=brief.session_id[:8],
                 tool=tool_name,
-                success=result.success,
-                output=result.output[:120],
             )
- 
-            if result.success:
-                injected_results += (
-                    f"\n[Tool: {tool_name}]\nStatus: SUCCESS\nResult: {result.output}\n"
-                    f"Task complete. Now respond to the user directly.\n"
-                )
-            else:
-                injected_results += (
-                    f"\n[Tool: {tool_name}]\nStatus: FAILED\nReason: {result.output}\n"
-                    f"The tool failed. Do NOT tell the user it succeeded. "
-                    f"Report what went wrong honestly and try to fix it if possible.\n"
-                )
- 
-        except Exception as e:
-            print(f"[Body] Tool '{tool_name}' raised exception: {e}")
-            injected_results += f"\n[Tool Error in '{tool_name}']: {e}\n"
-            log_error("Body", f"tool execution failed: {tool_name}", exc=e)
+            yield final
+            return
+
+    # Exhausted tool calls — generate anyway
+    log_event("Body", "MAX_TOOL_CALLS_REACHED", session=brief.session_id[:8])
+    async for token in llm.stream(messages, system_prompt=system_prompt):
+        yield token
 
 
 def _parse_tool_call(text: str) -> Optional[dict]:
-    import json, re
+    import json
+    import re
     text = text.strip()
-    
+
     try:
         data = json.loads(text)
         if "tool" in data:
             return data
     except json.JSONDecodeError:
         pass
-    print(f"[Body] LLM raw output: {re[:200]}")
+
     match = re.search(r'\{.*?"tool".*?\}', text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
             pass
+
     return None
 
 
@@ -508,10 +517,6 @@ class Agent:
         context: Optional[dict] = None,
         source: str = "user",
     ) -> AsyncGenerator[str, None]:
-        """
-        Main entry point. Called by server.py for every incoming message.
-        Yields response chunks for streaming.
-        """
         t_start = time.monotonic()
         ctx = context or {}
 
@@ -552,7 +557,6 @@ class Agent:
         direction_task = asyncio.create_task(_get_direction_stub(brief))
 
         facts     = await facts_task
-        # Direction needs facts — sequential for now, parallel once Ego is its own component
         direction = await _get_direction(brief, facts)
         direction_task.cancel()
 
@@ -561,7 +565,7 @@ class Agent:
         async for chunk in _generate(brief, direction, history):
             response_text += chunk
 
-        # ── 4. Ego — watch output (v1: no-op, future: correction check) ───────
+        # ── 4. Ego — watch output (v1: no-op) ─────────────────────────────────
         # TODO: Ego checks output before it leaves
 
         # ── 5. Archivist — close loop ─────────────────────────────────────────
@@ -582,19 +586,14 @@ class Agent:
             response_words=len(response_text.split()),
         )
 
-        # Yield in chunks for streaming
         chunk_size = 8
         for i in range(0, len(response_text), chunk_size):
             yield response_text[i:i + chunk_size]
 
-        # ── 7. Drain pending insights (non-emergency, non-quiet) ──────────────
+        # ── 7. Drain pending insights ─────────────────────────────────────────
         await self._drain_pending(session_id)
 
     async def _drain_pending(self, session_id: str) -> None:
-        """
-        After a response, check if any component queued an unsolicited message.
-        Respects quiet mode — only emergencies break through.
-        """
         queue = _get_pending(session_id)
         while not queue.empty():
             try:
@@ -606,7 +605,6 @@ class Agent:
             message   = item.get("message", "")
             source    = item.get("source", "unknown")
 
-            # Quiet mode gate
             if is_quiet(session_id) and not emergency:
                 log_event("Agent", "PENDING_HELD",
                     session=session_id[:8],
@@ -614,7 +612,6 @@ class Agent:
                     reason="quiet_mode",
                     preview=message[:40],
                 )
-                # Put it back — still relevant later
                 await queue.put(item)
                 break
 
