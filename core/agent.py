@@ -412,28 +412,41 @@ async def _generate(
         except Exception as e:
             injected_results += f"\n[Tool Error: {e}]\n"
             log_error("Body", f"tool execution failed: {tool_name}", exc=e)
-
-        tool_calls += 1
-
-        # One-shot tools respond immediately
-        if tool_name in ("switch_host", "log_correction", "alter_wheel"):
-            working[-1] = {
-                "role": "user",
-                "content": brief.message + injected_results,
-            }
-            final = await llm.generate(working, system_prompt=system_prompt)
-            final = _strip_tool_calls(final)
-            log_event("Body", "ONE_SHOT_TOOL_RESPONSE",
+ 
+# Replace with:
+ 
+        clean_args = {k: v for k, v in tool_args.items() if k != "session_id"}
+        try:
+            result = await TOOL_REGISTRY[tool_name].run(
+                session_id=brief.session_id, **clean_args
+            )
+ 
+            # Log to Render so we can see exactly what happened
+            print(f"[Body] Tool '{tool_name}' success={result.success} | {result.output[:120]}")
+ 
+            log_event("Body", "TOOL_EXECUTED",
                 session=brief.session_id[:8],
                 tool=tool_name,
+                success=result.success,
+                output=result.output[:120],
             )
-            yield final
-            return
-
-    # Exhausted tool calls — generate anyway
-    log_event("Body", "MAX_TOOL_CALLS_REACHED", session=brief.session_id[:8])
-    async for token in llm.stream(messages, system_prompt=system_prompt):
-        yield token
+ 
+            if result.success:
+                injected_results += (
+                    f"\n[Tool: {tool_name}]\nStatus: SUCCESS\nResult: {result.output}\n"
+                    f"Task complete. Now respond to the user directly.\n"
+                )
+            else:
+                injected_results += (
+                    f"\n[Tool: {tool_name}]\nStatus: FAILED\nReason: {result.output}\n"
+                    f"The tool failed. Do NOT tell the user it succeeded. "
+                    f"Report what went wrong honestly and try to fix it if possible.\n"
+                )
+ 
+        except Exception as e:
+            print(f"[Body] Tool '{tool_name}' raised exception: {e}")
+            injected_results += f"\n[Tool Error in '{tool_name}']: {e}\n"
+            log_error("Body", f"tool execution failed: {tool_name}", exc=e)
 
 
 def _parse_tool_call(text: str) -> Optional[dict]:
