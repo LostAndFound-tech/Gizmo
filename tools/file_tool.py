@@ -474,6 +474,9 @@ class DeleteFileTool(BaseTool):
     ) -> ToolResult:
         if not path:
             return ToolResult(success=False, output="Need a file path.")
+        # Coerce string "true"/"false" from marker system
+        if isinstance(confirm, str):
+            confirm = confirm.lower() in ("true", "yes", "1")
         if not confirm:
             return ToolResult(
                 success=False,

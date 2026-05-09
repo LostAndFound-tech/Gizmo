@@ -91,7 +91,9 @@ class MemoryWriteTool(BaseTool):
             "collection (str) — 'conscious' or 'memory'. Default: 'conscious'. "
             "content (str) — what to remember. "
             "subject (str) — who this is about (headmate name, 'self', etc). "
-            "tags (str) — optional comma-separated tags (e.g. 'observation,jess,emotion')."
+            "type (str) — category: reflection, observation, relationship, fact, "
+            "question, private, moment, thought, note. Default: note. "
+            "tags (str) — optional comma-separated tags."
         )
 
     async def run(
@@ -99,6 +101,7 @@ class MemoryWriteTool(BaseTool):
         collection: str = "conscious",
         content: str = "",
         subject: str = "",
+        type: str = "",
         tags: str = "",
         session_id: str = "",
         **kwargs,
@@ -110,7 +113,16 @@ class MemoryWriteTool(BaseTool):
         if collection not in VALID_COLLECTIONS:
             collection = CONSCIOUS_COLLECTION
 
-        now     = datetime.now().isoformat(timespec="seconds")
+        # Normalize type
+        valid_types = {
+            "reflection", "observation", "relationship", "fact",
+            "question", "private", "moment", "thought", "note"
+        }
+        entry_type = type.lower().strip() if type else "note"
+        if entry_type not in valid_types:
+            entry_type = "note"
+
+        now      = datetime.now().isoformat(timespec="seconds")
         entry_id = f"{collection[:3]}_{uuid.uuid4().hex[:12]}"
 
         try:
@@ -119,6 +131,7 @@ class MemoryWriteTool(BaseTool):
                 documents=[content],
                 metadatas=[{
                     "subject":    subject.lower().strip() if subject else "",
+                    "type":       entry_type,
                     "tags":       tags.strip() if tags else "",
                     "written_at": now,
                     "session_id": session_id or "",
@@ -172,6 +185,11 @@ class MemoryReadTool(BaseTool):
     ) -> ToolResult:
         if not query:
             return ToolResult(success=False, output="Need a query to search.")
+
+        # Coerce string args from marker system
+        if isinstance(n, str):
+            try: n = int(n)
+            except: n = 5
 
         collection = collection.lower().strip()
         subject    = subject.lower().strip() if subject else ""
@@ -275,6 +293,11 @@ class MemoryListTool(BaseTool):
         session_id: str = "",
         **kwargs,
     ) -> ToolResult:
+        # Coerce string args from marker system
+        if isinstance(n, str):
+            try: n = int(n)
+            except: n = 10
+
         collection = collection.lower().strip()
         subject    = subject.lower().strip() if subject else ""
 

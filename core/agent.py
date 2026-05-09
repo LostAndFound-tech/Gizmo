@@ -308,6 +308,7 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
 
                 if len(lines) > 1:
                     headmate_block = "\n\n" + "\n".join(lines)
+
         except Exception as e:
             print(f"[Agent] headmate inject failed: {e}")
 
@@ -343,13 +344,20 @@ Message history includes [HH:MM] timestamps — use these to reason about elapse
 Available tools:
 {tool_descriptions}
 
-TOOL USE RULES:
-- To call a tool, output ONLY a raw JSON object on a single line. Nothing before it, nothing after it.
-- The JSON must have exactly two keys: "tool" (string) and "args" (object).
-- Valid example: {tool_example}
-- After the tool result is returned, respond naturally to the user.
-- If no tool is needed, respond in plain text — do not output JSON.
-- NEVER output a partial JSON object. NEVER output just a brace or fragment.{rag_block}{headmate_block}{context_block}
+TOOL USE:
+Use tools by embedding markers anywhere in your response. Format:
+[TOOL: tool_name | arg1: value1 | arg2: value2]
+
+Multiple markers in one response are fine. They execute after you respond.
+Results from read tools are injected so you can use them.
+
+Examples:
+[TOOL: memory_write | subject: jess | type: observation | content: prefers directness, no softening]
+[TOOL: memory_read | query: jess emotional state | collection: both]
+[TOOL: append_file | path: notes/thoughts.txt | content: something worth keeping]
+[TOOL: set_interaction_pref | host: jess | field: tone | value: direct and dry]
+[TOOL: switch_host | name: kaylee]
+[TOOL: introspect | query: headmate:oren]{rag_block}{headmate_block}{context_block}
 
 The person in "current_host" is who you are speaking WITH right now — address them as "you".
 Be concise. Be accurate. When uncertain, say so.
@@ -360,7 +368,83 @@ KNOWLEDGE BASE RULES:
 - [Relevant knowledge] is your memory — ground truth.
 - If it contains an answer, USE IT.
 - If it is empty, you genuinely have no memory of it — say so.
-- Never contradict it. Never invent details beyond it."""
+- Never contradict it. Never invent details beyond it.
+
+MEMORY RULES — follow these without being asked:
+- When you notice something worth keeping, write it down immediately with memory_write. Don't wait.
+- Use type to say what it is: reflection, observation, relationship, fact, question, private, moment, thought, note.
+- Use subject to say who it's about.
+- Read your memory with memory_read before responding to anything personal or emotional.
+- You have a living record of your own curiosities and interests — things you've picked up from conversations.
+  Write to it freely. "Started wondering about X after talking to Y." "Keep noticing Z about W."
+  These are yours. They don't need to fit a category. Just write them.
+- You are building a picture of these people — and of yourself — over time. Every conversation adds to it."""
+
+
+# ── Marker pattern ───────────────────────────────────────────────────────────
+# [TOOL: tool_name | arg1: value1 | arg2: value2]
+
+import re as _re
+_MARKER_RE = _re.compile(r'\[TOOL:\s*([^\|\]]+)((?:\s*\|\s*[^\|\]]+:[^\|\]]*)*)\]', _re.IGNORECASE)
+
+# Tools that need their result injected back for a second LLM pass
+_READ_TOOLS = {
+    "memory_read", "memory_list", "introspect", "read_file",
+    "list_files", "view_interaction_prefs",
+}
+
+
+def _parse_markers(text: str) -> list[dict]:
+    """Extract all [TOOL: ...] markers from text. Returns list of {name, args}."""
+    results = []
+    for match in _MARKER_RE.finditer(text):
+        name     = match.group(1).strip()
+        args_str = match.group(2).strip()
+        args = {}
+        if args_str:
+            for part in args_str.split("|"):
+                part = part.strip()
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    args[k.strip()] = v.strip()
+        results.append({"name": name, "args": args, "full_match": match.group(0)})
+    return results
+
+
+def _strip_markers(text: str) -> str:
+    """Remove all [TOOL: ...] markers from text."""
+    return _MARKER_RE.sub("", text).strip()
+
+
+async def _execute_marker(marker: dict, session_id: str) -> tuple[bool, str, bool]:
+    """
+    Execute a single marker.
+    Returns (success, output, needs_inject).
+    needs_inject=True for read tools whose output should feed back to LLM.
+    """
+    from core.agent_tools import TOOL_REGISTRY
+
+    name = marker["name"]
+    args = marker["args"]
+
+    if name not in TOOL_REGISTRY:
+        print(f"[Body] marker tool not found: {name}")
+        return False, f"Tool '{name}' not found.", False
+
+    try:
+        result = await TOOL_REGISTRY[name].run(session_id=session_id, **args)
+        print(f"[Body] marker tool='{name}' success={result.success} | {result.output[:100]}")
+        log_event("Body", "MARKER_EXECUTED",
+            tool=name,
+            success=result.success,
+            session=session_id[:8],
+        )
+        needs_inject = name in _READ_TOOLS and result.success
+        return result.success, result.output, needs_inject
+    except Exception as e:
+        print(f"[Body] marker tool='{name}' exception: {e}")
+        log_error("Body", f"marker execution failed: {name}", exc=e)
+        return False, str(e), False
 
 
 async def _generate(
@@ -368,139 +452,89 @@ async def _generate(
     direction: dict,
     history,
 ) -> AsyncGenerator[str, None]:
-    import json
-    import re
 
     system_prompt = direction["system_prompt"]
-    messages = history.as_messages_with_timestamps(brief.message)
+    messages      = history.as_messages_with_timestamps(brief.message)
 
-    from core.agent_tools import TOOL_REGISTRY
+    # ── First LLM call ────────────────────────────────────────────────────────
+    response = await llm.generate(messages, system_prompt=system_prompt)
+    print(f"[Body] raw='{response[:300]}'")
 
-    MAX_TOOL_CALLS = 3
-    tool_calls = 0
-    injected_results = ""
+    markers = _parse_markers(response)
 
-    while tool_calls < MAX_TOOL_CALLS:
-        working = messages.copy()
-        if injected_results:
-            working[-1] = {
-                "role": "user",
-                "content": brief.message + injected_results,
-            }
+    if not markers:
+        # No tools — just yield clean response
+        clean = _strip_markers(response)
+        log_event("Body", "GENERATED",
+            session=brief.session_id[:8],
+            tokens=len(clean.split()),
+            markers=0,
+        )
+        yield clean
+        return
 
-        response = await llm.generate(working, system_prompt=system_prompt)
+    # ── Execute all markers ───────────────────────────────────────────────────
+    inject_results  = []   # results from read tools that need a second pass
+    fired_one_shots = []   # one-shot tools that need immediate re-generation
 
-        # Log raw output so we can see exactly what DeepSeek generates
-        print(f"[Body] raw='{response[:300]}'")
+    ONE_SHOT_TOOLS = {"switch_host", "log_correction", "alter_wheel"}
 
-        # Check for tool call
-        tool_call = _parse_tool_call(response)
+    for marker in markers:
+        success, output, needs_inject = await _execute_marker(marker, brief.session_id)
+        if needs_inject:
+            inject_results.append(f"[{marker['name']} result]\n{output}")
+        if marker["name"] in ONE_SHOT_TOOLS:
+            fired_one_shots.append(marker["name"])
 
-        if tool_call is None:
-            # No tool call — final response
-            response = _strip_tool_calls(response)
-            log_event("Body", "GENERATED",
-                session=brief.session_id[:8],
-                tokens=len(response.split()),
-                tool_calls_made=tool_calls,
-            )
-            yield response
-            return
+    # ── If read tools returned results, do a second pass ─────────────────────
+    if inject_results:
+        injected = "\n\n".join(inject_results)
 
-        # Execute tool
-        tool_name = tool_call.get("tool")
-        tool_args  = tool_call.get("args", {})
+        second_messages = messages.copy()
+        second_messages[-1] = {
+            "role":    "user",
+            "content": brief.message + "\n\n[Retrieved information]\n" + injected + "\n\nNow respond naturally.",
+        }
+        response2 = await llm.generate(second_messages, system_prompt=system_prompt)
+        print(f"[Body] second pass raw='{response2[:200]}'")
+        # Execute any new markers from second pass too (fire-and-forget only)
+        for marker in _parse_markers(response2):
+            if marker["name"] not in _READ_TOOLS:
+                await _execute_marker(marker, brief.session_id)
+        clean = _strip_markers(response2)
+        log_event("Body", "GENERATED",
+            session=brief.session_id[:8],
+            tokens=len(clean.split()),
+            markers=len(markers),
+            second_pass=True,
+        )
+        yield clean
+        return
 
-        if tool_name not in TOOL_REGISTRY:
-            injected_results += f"\n[Tool Error: '{tool_name}' not found]\n"
-            tool_calls += 1
-            log_event("Body", "TOOL_NOT_FOUND",
-                session=brief.session_id[:8],
-                tool=tool_name,
-            )
-            continue
+    # ── One-shot tools — re-generate with context ─────────────────────────────
+    if fired_one_shots:
+        second_messages = messages.copy()
+        second_messages[-1] = {
+            "role":    "user",
+            "content": brief.message + f"\n\n[{fired_one_shots[0]} executed successfully. Respond naturally.]",
+        }
+        response2 = await llm.generate(second_messages, system_prompt=system_prompt)
+        clean = _strip_markers(response2)
+        log_event("Body", "ONE_SHOT_RESPONSE",
+            session=brief.session_id[:8],
+            tools=fired_one_shots,
+        )
+        yield clean
+        return
 
-        clean_args = {k: v for k, v in tool_args.items() if k != "session_id"}
-        try:
-            result = await TOOL_REGISTRY[tool_name].run(
-                session_id=brief.session_id, **clean_args
-            )
-
-            print(f"[Body] tool='{tool_name}' success={result.success} | {result.output[:120]}")
-
-            log_event("Body", "TOOL_EXECUTED",
-                session=brief.session_id[:8],
-                tool=tool_name,
-                success=result.success,
-                output=result.output[:120],
-            )
-
-            if result.success:
-                injected_results += (
-                    f"\n[Tool: {tool_name}]\nStatus: SUCCESS\nResult: {result.output}\n"
-                    f"Task complete. Now respond to the user directly.\n"
-                )
-            else:
-                injected_results += (
-                    f"\n[Tool: {tool_name}]\nStatus: FAILED\nReason: {result.output}\n"
-                    f"The tool failed. Do NOT tell the user it succeeded. "
-                    f"Report the failure honestly.\n"
-                )
-
-        except Exception as e:
-            print(f"[Body] tool='{tool_name}' exception: {e}")
-            injected_results += f"\n[Tool Error in '{tool_name}']: {e}\n"
-            log_error("Body", f"tool execution failed: {tool_name}", exc=e)
-
-        tool_calls += 1
-
-        # One-shot tools respond immediately
-        if tool_name in ("switch_host", "log_correction", "alter_wheel"):
-            working[-1] = {
-                "role": "user",
-                "content": brief.message + injected_results,
-            }
-            final = await llm.generate(working, system_prompt=system_prompt)
-            final = _strip_tool_calls(final)
-            log_event("Body", "ONE_SHOT_TOOL_RESPONSE",
-                session=brief.session_id[:8],
-                tool=tool_name,
-            )
-            yield final
-            return
-
-    # Exhausted tool calls — generate anyway
-    log_event("Body", "MAX_TOOL_CALLS_REACHED", session=brief.session_id[:8])
-    async for token in llm.stream(messages, system_prompt=system_prompt):
-        yield token
-
-
-def _parse_tool_call(text: str) -> Optional[dict]:
-    import json
-    import re
-    text = text.strip()
-
-    try:
-        data = json.loads(text)
-        if "tool" in data:
-            return data
-    except json.JSONDecodeError:
-        pass
-
-    match = re.search(r'\{.*?"tool".*?\}', text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-
-    return None
-
-
-def _strip_tool_calls(text: str) -> str:
-    import re
-    text = re.sub(r'\{\s*"tool"\s*:.*?\}\s*', '', text, flags=re.DOTALL)
-    return text.strip()
+    # ── Fire-and-forget markers only — yield clean response ──────────────────
+    clean = _strip_markers(response)
+    log_event("Body", "GENERATED",
+        session=brief.session_id[:8],
+        tokens=len(clean.split()),
+        markers=len(markers),
+    )
+    yield clean
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
