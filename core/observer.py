@@ -11,19 +11,11 @@ Extraction strategy: heuristic-first, LLM fallback.
   - LLM only fires if message has factual signal words AND heuristics found nothing
   - If LLM is down/slow, heuristics still work — memory keeps filling in
 
-Heuristic patterns:
-  "[Name] is [attribute]"           → fact about Name
-  "[Name] is a/an [noun]"           → species/role/occupation
-  "[Name] is [age] years old"       → age
-  "[Name] works as/at [place]"      → occupation
-  "[Name]'s [attribute] is [value]" → attribute
-  "I'm [age] years old"             → speaker age
-  "I work as/at [role]"             → speaker occupation
-  "I'm a/an [noun]"                 → speaker species/role
-  "I [like/love/hate] [thing]"      → speaker preference
+Facts are written to:
+  1. Entity JSON files (headmates/externals/pets) — human-readable backup
+  2. memory ChromaDB collection — live queryable store, used by Mind
 
-Facts are attributed to their SUBJECT, not the speaker.
-Only lasting personal facts are kept — no session metadata.
+The JSON files are the backup. ChromaDB is the source of truth.
 """
 
 import asyncio
@@ -31,6 +23,8 @@ import json
 import os
 import re
 import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -53,6 +47,7 @@ _SKIP_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 def _should_extract(message: str) -> bool:
     words = message.split()
     if len(words) < 4:
@@ -71,6 +66,7 @@ _JUNK_RE = re.compile(
     r"is (a |the )?(current |active )?fronter)\b",
     re.IGNORECASE,
 )
+
 
 def _is_junk(fact: str) -> bool:
     if _JUNK_RE.search(fact):
@@ -153,7 +149,6 @@ def _existing_facts(data: dict, entity_type: str) -> set:
 
 # ── Heuristic extraction ──────────────────────────────────────────────────────
 
-# "[Name] is [something]" — third person
 _IS_RE = re.compile(
     r'\b([A-Z][a-z]{1,20})\s+is\s+'
     r'(?!currently |now |still |just |also |the one)'
@@ -161,27 +156,23 @@ _IS_RE = re.compile(
     re.MULTILINE,
 )
 
-# "[Name]'s [attribute]"
 _POSSESSIVE_RE = re.compile(
     r"\b([A-Z][a-z]{1,20})'s\s+([a-z][^.!?,\n]{3,60})(?:\.|,|!|\?|$|\n)",
     re.MULTILINE,
 )
 
-# "[Name] works as/at/in/for [role]"
 _WORK_RE = re.compile(
     r"\b([A-Z][a-z]{1,20})\s+(?:works?|worked)\s+(?:as|at|in|for)\s+"
     r"([^.!?,\n]{4,60})(?:\.|,|!|\?|$|\n)",
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Speaker self-descriptions
-_SELF_AGE_RE    = re.compile(r"\bI'?m\s+(\d+)\s+years?\s+old\b", re.IGNORECASE)
-_SELF_WORK_RE   = re.compile(r"\bI\s+(?:work|worked)\s+(?:as|at|in|for)\s+([^.!?,\n]{4,60})(?:\.|,|$)", re.IGNORECASE)
-_SELF_IS_RE     = re.compile(r"\bI'?m\s+(?:a|an)\s+([\w][^.!?,\n]{2,60})(?:\.|,|!|\?|$)", re.IGNORECASE)
-_SELF_PREF_RE   = re.compile(r"\bI\s+(like|love|hate|prefer|enjoy|adore|despise)\s+([^.!?,\n]{3,60})(?:\.|,|$)", re.IGNORECASE)
-_SELF_FROM_RE   = re.compile(r"\bI'?(?:m from|come from|was born in|grew up in|'?m\s+from)\s+([^.!?,\n]{3,80})(?:\.|,|$)", re.IGNORECASE)
+_SELF_AGE_RE  = re.compile(r"\bI'?m\s+(\d+)\s+years?\s+old\b", re.IGNORECASE)
+_SELF_WORK_RE = re.compile(r"\bI\s+(?:work|worked)\s+(?:as|at|in|for)\s+([^.!?,\n]{4,60})(?:\.|,|$)", re.IGNORECASE)
+_SELF_IS_RE   = re.compile(r"\bI'?m\s+(?:a|an)\s+([\w][^.!?,\n]{2,60})(?:\.|,|!|\?|$)", re.IGNORECASE)
+_SELF_PREF_RE = re.compile(r"\bI\s+(like|love|hate|prefer|enjoy|adore|despise)\s+([^.!?,\n]{3,60})(?:\.|,|$)", re.IGNORECASE)
+_SELF_FROM_RE = re.compile(r"\bI'?(?:m from|come from|was born in|grew up in|'?m\s+from)\s+([^.!?,\n]{3,80})(?:\.|,|$)", re.IGNORECASE)
 
-# Junk predicates — after "is" these aren't real facts
 _JUNK_PRED_RE = re.compile(
     r"^(here|there|back|online|around|available|ready|gone|away|"
     r"fine|good|ok|okay|great|tired|busy|free|sure|right|wrong|that|this|"
@@ -209,12 +200,8 @@ _NOT_NAMES = {
 }
 
 
-def _heuristic_extract(message: str, fronters: list[str], known: set) -> dict:
-    """
-    Extract facts using regex patterns. Zero LLM calls.
-    Returns {name_lower: [fact_str, ...]}
-    """
-    facts: dict[str, list[str]] = {}
+def _heuristic_extract(message: str, fronters: list, known: set) -> dict:
+    facts: dict[str, list] = {}
     speaker = fronters[0].lower() if fronters else None
 
     def add(name: str, fact: str) -> None:
@@ -228,56 +215,39 @@ def _heuristic_extract(message: str, fronters: list[str], known: set) -> dict:
         if fact.lower() not in [f.lower() for f in facts[n]]:
             facts[n].append(fact)
 
-    # Third-person: "[Name] is [something]"
     for m in _IS_RE.finditer(message):
         name = m.group(1)
         predicate = m.group(2).strip().rstrip(".,;!? ")
-        if name in _NOT_NAMES:
+        if name in _NOT_NAMES or _JUNK_PRED_RE.match(predicate):
             continue
-        if _JUNK_PRED_RE.match(predicate):
-            continue
-        if len(predicate.split()) >= 1:
-            add(name, f"is {predicate}")
+        add(name, f"is {predicate}")
 
-    # "[Name]'s [attribute]"
     for m in _POSSESSIVE_RE.finditer(message):
         name = m.group(1)
         attr = m.group(2).strip().rstrip(".,;!? ")
-        if name in _NOT_NAMES:
+        if name in _NOT_NAMES or len(attr.split()) < 2:
             continue
-        if len(attr.split()) >= 2:
-            add(name, f"{name}'s {attr}")
+        add(name, f"{name}'s {attr}")
 
-    # "[Name] works as/at [role]"
     for m in _WORK_RE.finditer(message):
         name = m.group(1)
         role = m.group(2).strip().rstrip(".,;!? ")
-        if name in _NOT_NAMES:
-            continue
-        add(name, f"works {role}")
+        if name not in _NOT_NAMES:
+            add(name, f"works {role}")
 
-    # Speaker self-descriptions
     if speaker and speaker in known:
         for m in _SELF_AGE_RE.finditer(message):
             add(speaker, f"is {m.group(1)} years old")
-
         for m in _SELF_WORK_RE.finditer(message):
-            role = m.group(1).strip().rstrip(".,;!? ")
-            add(speaker, f"works {role}")
-
+            add(speaker, f"works {m.group(1).strip().rstrip('.,;!? ')}")
         for m in _SELF_IS_RE.finditer(message):
             noun = m.group(1).strip().rstrip(".,;!? ")
             if not _JUNK_PRED_RE.match(noun):
                 add(speaker, f"is a {noun}")
-
         for m in _SELF_PREF_RE.finditer(message):
-            verb = m.group(1)
-            thing = m.group(2).strip().rstrip(".,;!? ")
-            add(speaker, f"{verb}s {thing}")
-
+            add(speaker, f"{m.group(1)}s {m.group(2).strip().rstrip('.,;!? ')}")
         for m in _SELF_FROM_RE.finditer(message):
-            place = m.group(1).strip().rstrip(".,;!? ")
-            add(speaker, f"is from {place}")
+            add(speaker, f"is from {m.group(1).strip().rstrip('.,;!? ')}")
 
     return facts
 
@@ -294,19 +264,12 @@ _FACTUAL_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Message length threshold for "rich" messages worth LLM even if heuristics found something
 _RICH_MESSAGE_WORDS = 20
 
-def _worth_llm_fallback(message: str, heuristic_results: dict) -> bool:
-    """
-    Call LLM if:
-    - Heuristics found nothing AND message has factual signals, OR
-    - Message is rich (20+ words) AND has factual signals
-      (LLM catches what patterns miss in complex sentences)
-    """
-    words = len(message.split())
-    has_signal = bool(_FACTUAL_SIGNAL_RE.search(message))
 
+def _worth_llm_fallback(message: str, heuristic_results: dict) -> bool:
+    words     = len(message.split())
+    has_signal = bool(_FACTUAL_SIGNAL_RE.search(message))
     if not has_signal:
         return False
     if not heuristic_results and words >= 8:
@@ -316,20 +279,10 @@ def _worth_llm_fallback(message: str, heuristic_results: dict) -> bool:
     return False
 
 
-async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> dict:
-    """
-    LLM fallback. Returns bullet points per person — more reliable than JSON.
-    Format:
-      [name]
-      - fact one
-      - fact two
-    """
-    entity_list = ", ".join(sorted(known))
-    fronter_list = ", ".join(f.title() for f in fronters) if fronters else "unknown"
-
-    # Primary speaker is always fronters[0]
+async def _llm_extract(message: str, fronters: list, known: set, llm) -> dict:
+    entity_list     = ", ".join(sorted(known))
     primary_speaker = fronters[0].title() if fronters else "unknown"
-    other_fronters = [f.title() for f in fronters[1:]] if len(fronters) > 1 else []
+    other_fronters  = [f.title() for f in fronters[1:]] if len(fronters) > 1 else []
     fronter_context = f"Primary speaker: {primary_speaker}"
     if other_fronters:
         fronter_context += f" (also present: {', '.join(other_fronters)})"
@@ -348,10 +301,6 @@ async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> di
             f"- Only lasting facts: age, species, occupation, origin, dreams, preferences, relationships\n"
             f"- Skip: who is fronting/hosting, session metadata, observation counts\n"
             f"- Only use names from: {entity_list}\n\n"
-            f"Example:\n"
-            f"[{primary_speaker.lower()}]\n"
-            f"- is 19 years old\n"
-            f"- dreams of being a preschool teacher\n\n"
             f"If no lasting facts exist, write nothing."
         )
     }]
@@ -370,8 +319,7 @@ async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> di
         if not result or not result.strip():
             return {}
 
-        # Parse: [name] headers + bullet points
-        facts: dict[str, list[str]] = {}
+        facts: dict[str, list] = {}
         current_name = None
 
         for line in result.splitlines():
@@ -379,7 +327,6 @@ async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> di
             if not line:
                 continue
 
-            # Name header — [name] or **name** or name:
             name_match = re.match(
                 r'^\[([^\]]+)\]$|^\*\*([^*]+)\*\*$|^([a-z][a-z]{1,20}):$',
                 line, re.IGNORECASE
@@ -394,7 +341,6 @@ async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> di
                     current_name = candidate
                 continue
 
-            # Bullet point
             if current_name and (line.startswith("- ") or line.startswith("• ")):
                 fact = line[2:].strip()
                 if fact and not _is_junk(fact) and len(fact.split()) >= 2:
@@ -413,12 +359,18 @@ async def _llm_extract(message: str, fronters: list[str], known: set, llm) -> di
         return {}
 
 
-# ── File writer ───────────────────────────────────────────────────────────────
+# ── Memory writer — writes to both JSON and ChromaDB ─────────────────────────
 
-def _write_facts(name: str, facts: list[str]) -> int:
-    """Write extracted facts. Returns count written."""
+def _write_facts(name: str, facts: list) -> int:
+    """
+    Write extracted facts to entity JSON file AND memory ChromaDB collection.
+    Returns count written.
+    JSON = human-readable backup.
+    ChromaDB = live queryable store used by Mind.
+    """
     from core.timezone import tz_now
-    timestamp = tz_now().strftime("%Y-%m-%d %H:%M %Z")
+    timestamp  = tz_now().strftime("%Y-%m-%d %H:%M %Z")
+    now_iso    = datetime.now().isoformat(timespec="seconds")
 
     entity_type = _get_entity_type(name)
     if not entity_type:
@@ -429,7 +381,8 @@ def _write_facts(name: str, facts: list[str]) -> int:
         return 0
 
     existing = _existing_facts(data, entity_type)
-    written = 0
+    written  = 0
+    new_facts = []
 
     for fact in facts:
         fact = fact.strip()
@@ -440,6 +393,7 @@ def _write_facts(name: str, facts: list[str]) -> int:
         if any(fact_lower[:40] in ex or ex[:40] in fact_lower for ex in existing):
             continue
 
+        # Write to JSON
         if entity_type == "headmate":
             age_match = re.search(r'\b(\d+)\s+years?\s+old\b', fact_lower)
             if age_match:
@@ -448,6 +402,7 @@ def _write_facts(name: str, facts: list[str]) -> int:
                     data.setdefault("baseline", {})["age"] = fact
                     existing.add(fact_lower)
                     written += 1
+                    new_facts.append(fact)
                     continue
 
             data.setdefault("moments_of_note", []).append(f"[{timestamp}] {fact}")
@@ -458,54 +413,53 @@ def _write_facts(name: str, facts: list[str]) -> int:
 
         existing.add(fact_lower)
         written += 1
+        new_facts.append(fact)
 
     if written > 0:
         if data.get("note", "").startswith("Cold start"):
             obs = data.get("baseline", {}).get("observations", written)
             data["note"] = f"Actively observed — {obs} exchanges logged."
         _save_entity(name, entity_type, data)
+
         log_event("Observer", "FACTS_WRITTEN",
             name=name,
             type=entity_type,
             count=written,
-            facts=[f[:60] for f in facts[:3]],
+            facts=[f[:60] for f in new_facts[:3]],
         )
- 
-        # Also write each fact to memory ChromaDB collection
+
+        # Write to memory ChromaDB collection
         try:
             from tools.memory_tool import _get_collection, MEMORY_COLLECTION
-            from core.timezone import tz_now
-            col       = _get_collection(MEMORY_COLLECTION)
-            now       = tz_now().isoformat(timespec="seconds")
-            import uuid
-            for fact in facts:
-                fact = fact.strip()
-                if not fact:
-                    continue
+            col = _get_collection(MEMORY_COLLECTION)
+
+            for fact in new_facts:
                 col.add(
                     documents=[fact],
                     metadatas=[{
-                        "subject":    name.lower(),
+                        "subject":     name.lower(),
+                        "type":        "fact",
                         "entity_type": entity_type,
-                        "written_at": now,
-                        "source":     "observer",
-                        "tags":       f"fact,{entity_type},{name.lower()}",
+                        "written_at":  now_iso,
+                        "source":      "observer",
+                        "tags":        f"fact,{entity_type},{name.lower()}",
                     }],
-                    ids=[f"mem_{uuid.uuid4().hex[:12]}"],
+                    ids=[f"obs_{uuid.uuid4().hex[:12]}"],
                 )
+
+            log_event("Observer", "MEMORY_WRITTEN",
+                name=name,
+                count=len(new_facts),
+            )
         except Exception as e:
-            print(f"[Observer] memory collection write failed: {e}")
- 
+            log_error("Observer", f"memory collection write failed for {name}", exc=e)
+
     return written
 
 
 # ── File cleaner ──────────────────────────────────────────────────────────────
 
 def clean_junk_facts(name: str) -> int:
-    """
-    Remove junk facts from an existing entity file.
-    Returns count removed. Can be called manually or via a tool.
-    """
     entity_type = _get_entity_type(name)
     if not entity_type:
         return 0
@@ -518,23 +472,21 @@ def clean_junk_facts(name: str) -> int:
 
     if entity_type == "headmate":
         original = data.get("moments_of_note", [])
-        cleaned = [m for m in original if not _is_junk(
+        cleaned  = [m for m in original if not _is_junk(
             re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(m))
         )]
         removed = len(original) - len(cleaned)
         data["moments_of_note"] = cleaned
 
-        # Fix bad baseline entries
         baseline = data.get("baseline", {})
         for key in list(baseline.keys()):
             val = str(baseline.get(key, ""))
             if key == "age" and not re.search(r'\d', val):
                 baseline[key] = "unknown"
                 removed += 1
-
     else:
         original = data.get("observed_facts", [])
-        cleaned = [f for f in original if not _is_junk(
+        cleaned  = [f for f in original if not _is_junk(
             re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(f))
         )]
         removed = len(original) - len(cleaned)
@@ -542,16 +494,12 @@ def clean_junk_facts(name: str) -> int:
 
     if removed > 0:
         _save_entity(name, entity_type, data)
-        log_event("Observer", "JUNK_CLEANED",
-            name=name,
-            removed=removed,
-        )
+        log_event("Observer", "JUNK_CLEANED", name=name, removed=removed)
 
     return removed
 
 
 def clean_all_junk() -> dict:
-    """Clean junk facts from all entity files. Returns {name: count_removed}."""
     results = {}
     for d, etype in [(_HEADMATES_DIR, "headmate"), (_EXTERNAL_DIR, "external"), (_PETS_DIR, "pet")]:
         if not d.exists():
@@ -570,7 +518,7 @@ def clean_all_junk() -> dict:
 async def observe(
     user_message: str,
     gizmo_response: str,
-    fronters: list[str],
+    fronters: list,
     session_id: str,
     llm,
 ) -> None:
@@ -578,10 +526,7 @@ async def observe(
     Main entry point. Called by Archivist.receive_outgoing().
     Never raises — errors logged and swallowed.
     """
-    if not fronters:
-        return
-
-    if not _should_extract(user_message):
+    if not fronters or not _should_extract(user_message):
         return
 
     t_start = time.monotonic()
@@ -591,11 +536,9 @@ async def observe(
         if not known:
             return
 
-        # Step 1: Heuristic extraction — always, zero cost
-        facts = _heuristic_extract(user_message, fronters, known)
+        facts  = _heuristic_extract(user_message, fronters, known)
         source = "heuristic"
 
-        # Step 2: LLM fallback — only if heuristics missed real content
         if _worth_llm_fallback(user_message, facts):
             llm_facts = await _llm_extract(user_message, fronters, known, llm)
             if llm_facts:
@@ -617,8 +560,7 @@ async def observe(
 
         total_written = 0
         for name, name_facts in facts.items():
-            written = _write_facts(name, name_facts)
-            total_written += written
+            total_written += _write_facts(name, name_facts)
 
         log_event("Observer", "COMPLETE",
             session=session_id[:8],
