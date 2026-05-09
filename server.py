@@ -186,6 +186,12 @@ async def start_background_services():
         print("[Server] Session manager started")
     except Exception as e:
         print(f"[Server] Session manager failed: {e}")
+    try:
+        from core.session_manager import session_manager
+        await session_manager.start(llm, push_fn=_push_to_all)
+        print("[Server] Session manager started")
+    except Exception as e:
+        print(f"[Server] Session manager failed: {e}")
 
 
 async def _drain_reminders(queue):

@@ -2,11 +2,15 @@
 core/conversation_archive.py
 Writes closed sessions to disk as dated conversation logs.
 
+Transcripts are written incrementally — one exchange at a time via
+append_exchange() — so the file is always current and session close
+just needs to run the summary pass on what's already there.
+
 Structure:
   /data/conversations/
     YYYY-MM-DD/
-      index.json                      — all sessions today, searchable
-      session_<timestamp>.txt         — raw transcript
+      index.json                       — all sessions today, searchable
+      session_<timestamp>.txt          — raw transcript (written incrementally)
       session_<timestamp>_summary.json — summary + metadata
 
 index.json schema:
@@ -23,13 +27,12 @@ index.json schema:
         "message_count": int,
         "opened_at": str,
         "closed_at": str,
-        "summary": str       — one-line snippet for quick recall
+        "mood": str,
+        "summary": str,
+        "unresolved": str | null
       }
     ]
   }
-
-Mind reads index.json first on temporal queries — cheap.
-Full transcripts only loaded when specifically needed.
 """
 
 import json
@@ -44,21 +47,20 @@ from core.log import log, log_event, log_error
 _CONVERSATIONS_DIR = Path(os.getenv("CONVERSATIONS_DIR", "/data/conversations"))
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Path helpers ──────────────────────────────────────────────────────────────
 
-def _today_dir() -> Path:
-    date_str = datetime.now().strftime("%Y-%m-%d")
+def _date_dir(date_str: str) -> Path:
     d = _CONVERSATIONS_DIR / date_str
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def _date_dir(date_str: str) -> Path:
-    return _CONVERSATIONS_DIR / date_str
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 def _index_path(date_str: str) -> Path:
-    return _date_dir(date_str) / "index.json"
+    return _CONVERSATIONS_DIR / date_str / "index.json"
 
 
 def _load_index(date_str: str) -> dict:
@@ -81,20 +83,89 @@ def _save_index(date_str: str, index: dict) -> None:
         log_error("Archive", f"failed to save index for {date_str}", exc=e)
 
 
+# ── Transcript path helpers ───────────────────────────────────────────────────
+
+def _transcript_path(session_id: str, opened_at: float) -> Path:
+    """Deterministic path for a session's transcript."""
+    date_str  = datetime.fromtimestamp(opened_at).strftime("%Y-%m-%d")
+    timestamp = int(opened_at)
+    return _date_dir(date_str) / f"session_{timestamp}.txt"
+
+
+# ── Incremental write — called per exchange ───────────────────────────────────
+
+def append_exchange(
+    session_id: str,
+    opened_at: float,
+    user_message: str,
+    gizmo_response: str,
+    host: str,
+    timestamp: float = None,
+) -> None:
+    """
+    Append a single exchange to the transcript file.
+    Creates the file with a header on first call.
+    Called by archivist.receive_outgoing() after every exchange.
+    Never raises — errors logged and swallowed.
+    """
+    if not user_message and not gizmo_response:
+        return
+
+    ts = timestamp or time.time()
+    time_str = datetime.fromtimestamp(ts).strftime("%H:%M")
+    speaker  = (host or "User").title()
+    path     = _transcript_path(session_id, opened_at)
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write header if file is new
+        if not path.exists():
+            date_str   = datetime.fromtimestamp(opened_at).strftime("%Y-%m-%d")
+            opened_str = datetime.fromtimestamp(opened_at).strftime("%H:%M:%S")
+            header = (
+                f"Session: {session_id}\n"
+                f"Date: {date_str}\n"
+                f"Opened: {opened_str}\n"
+                f"Host: {speaker}\n"
+                f"\n{'─' * 60}\n\n"
+            )
+            path.write_text(header, encoding="utf-8")
+
+        # Append the exchange
+        existing = path.read_text(encoding="utf-8")
+        exchange = (
+            f"[{time_str}] {speaker}: {user_message.strip()}\n"
+            f"[{time_str}] Gizmo: {gizmo_response.strip()}\n\n"
+        )
+        path.write_text(existing + exchange, encoding="utf-8")
+
+    except Exception as e:
+        log_error("Archive", f"append_exchange failed for {session_id[:8]}", exc=e)
+
+
 # ── Summary generation ────────────────────────────────────────────────────────
 
 async def _generate_summary(
     transcript: str,
-    hosts: list[str],
-    topics: list[str],
+    hosts: list,
+    topics: list,
     llm,
 ) -> dict:
     """
-    Run a summary pass on the closed session transcript.
-    Returns a dict with summary, mood, unresolved, notable.
+    Run a summary pass on the transcript.
+    Returns dict with summary, mood, unresolved, notable.
     """
-    # Trim transcript if very long — last 4000 chars is enough for summary
-    excerpt = transcript[-4000:] if len(transcript) > 4000 else transcript
+    # Use last 6000 chars — enough for a real summary without blowing context
+    excerpt = transcript[-6000:] if len(transcript) > 6000 else transcript
+
+    if not excerpt.strip():
+        return {
+            "summary": "No transcript content.",
+            "mood": "unknown",
+            "unresolved": None,
+            "notable": [],
+        }
 
     host_str = ", ".join(h.title() for h in hosts) if hosts else "unknown"
 
@@ -103,12 +174,14 @@ async def _generate_summary(
         "content": (
             f"This is a conversation transcript involving {host_str}.\n\n"
             f"{excerpt}\n\n"
-            f"Summarize this conversation. Respond with ONLY valid JSON, no markdown:\n"
+            f"Summarize this conversation in detail. What was actually discussed? "
+            f"What did each person say, share, or feel? What matters here?\n\n"
+            f"Respond with ONLY valid JSON, no markdown:\n"
             f'{{\n'
-            f'  "summary": "2-3 sentence plain summary of what was discussed",\n'
-            f'  "mood": "overall emotional tone of the conversation",\n'
+            f'  "summary": "detailed summary of what was actually discussed and what mattered",\n'
+            f'  "mood": "overall emotional tone",\n'
             f'  "unresolved": "anything left hanging or unfinished, or null",\n'
-            f'  "notable": ["any facts or moments worth remembering long-term"]\n'
+            f'  "notable": ["specific facts, moments, or things worth remembering long-term"]\n'
             f'}}'
         )
     }]
@@ -117,128 +190,105 @@ async def _generate_summary(
         raw = await llm.generate(
             prompt,
             system_prompt=(
-                "You summarize conversation transcripts concisely and factually. "
+                "You summarize conversation transcripts in detail. "
+                "Capture what was actually said and what mattered. "
                 "JSON only. No markdown. No preamble."
             ),
-            max_new_tokens=300,
+            max_new_tokens=600,
             temperature=0.2,
         )
-        raw = raw.strip().strip("```json").strip("```").strip()
+        raw = raw.strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+            raw = raw.rsplit("```", 1)[0].strip()
         return json.loads(raw)
     except Exception as e:
-        log_error("Archive", "summary generation failed", exc=e)
+        log_error("Archive", f"summary generation failed: {e}", exc=None)
         return {
-            "summary": "Summary unavailable.",
+            "summary": "Summary generation failed.",
             "mood": "unknown",
             "unresolved": None,
             "notable": [],
         }
 
 
-# ── Main archive function ─────────────────────────────────────────────────────
+# ── Session close — finalize and summarize ────────────────────────────────────
 
-async def archive_session(
+async def finalize_session(
     session_id: str,
-    history,                    # ConversationHistory
-    hosts: list[str],
-    topics: list[str],
     opened_at: float,
     closed_at: float,
+    hosts: list,
+    topics: list,
+    message_count: int,
     llm,
 ) -> Optional[str]:
     """
-    Archive a closed session to disk.
-    Returns the transcript filename on success, None on failure.
-
     Called by session_manager when a session closes.
+    Reads the already-written transcript, generates a summary, updates the index.
+    Returns the transcript filename on success, None on failure.
     """
-    messages = history.as_list() if hasattr(history, "as_list") else []
-    if not messages:
-        log_event("Archive", "SKIP_EMPTY", session=session_id[:8])
+    path = _transcript_path(session_id, opened_at)
+
+    if not path.exists():
+        log_event("Archive", "SKIP_NO_TRANSCRIPT", session=session_id[:8])
         return None
 
-    now = datetime.now()
-    date_str  = now.strftime("%Y-%m-%d")
-    timestamp = int(closed_at)
+    transcript = path.read_text(encoding="utf-8")
+    if not transcript.strip():
+        log_event("Archive", "SKIP_EMPTY_TRANSCRIPT", session=session_id[:8])
+        return None
 
-    # ── Build transcript ──────────────────────────────────────────────────────
-    lines = [
-        f"Session: {session_id}",
-        f"Date: {date_str}",
-        f"Opened: {datetime.fromtimestamp(opened_at).strftime('%H:%M:%S')}",
-        f"Closed: {datetime.fromtimestamp(closed_at).strftime('%H:%M:%S')}",
-        f"Hosts: {', '.join(h.title() for h in hosts) if hosts else 'unknown'}",
-        f"Topics: {', '.join(topics) if topics else 'none'}",
-        f"Messages: {len(messages)}",
-        "",
-        "─" * 60,
-        "",
-    ]
-
-    for msg in messages:
-        role    = msg.get("role", "unknown")
-        content = msg.get("content", "").strip()
-        ts      = msg.get("timestamp", "")
-
-        if role == "user":
-            speaker = hosts[0].title() if hosts else "User"
-        else:
-            speaker = "Gizmo"
-
-        time_str = ""
-        if ts:
-            try:
-                time_str = f"[{datetime.fromisoformat(str(ts)).strftime('%H:%M')}] "
-            except Exception:
-                pass
-
-        lines.append(f"{time_str}{speaker}: {content}")
-        lines.append("")
-
-    transcript = "\n".join(lines)
-
-    # ── Write transcript ──────────────────────────────────────────────────────
+    date_str  = datetime.fromtimestamp(opened_at).strftime("%Y-%m-%d")
+    timestamp = int(opened_at)
     transcript_filename = f"session_{timestamp}.txt"
-    transcript_path = _date_dir(date_str) / transcript_filename
+
+    # Append closing line to transcript
     try:
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        transcript_path.write_text(transcript, encoding="utf-8")
-        log_event("Archive", "TRANSCRIPT_WRITTEN",
-            session=session_id[:8],
-            file=transcript_filename,
-            messages=len(messages),
+        closed_str = datetime.fromtimestamp(closed_at).strftime("%H:%M:%S")
+        path.write_text(
+            transcript + f"{'─' * 60}\nClosed: {closed_str}\n",
+            encoding="utf-8"
         )
     except Exception as e:
-        log_error("Archive", "failed to write transcript", exc=e)
-        return None
+        log_error("Archive", "failed to write closing line", exc=e)
 
-    # ── Generate summary ──────────────────────────────────────────────────────
+    # Generate summary
     summary_data = await _generate_summary(transcript, hosts, topics, llm)
     summary_data.update({
-        "session_id":    session_id,
-        "timestamp":     timestamp,
-        "hosts":         hosts,
-        "topics":        topics,
-        "message_count": len(messages),
-        "opened_at":     datetime.fromtimestamp(opened_at).isoformat(),
-        "closed_at":     datetime.fromtimestamp(closed_at).isoformat(),
+        "session_id":      session_id,
+        "timestamp":       timestamp,
+        "hosts":           hosts,
+        "topics":          topics,
+        "message_count":   message_count,
+        "opened_at":       datetime.fromtimestamp(opened_at).isoformat(),
+        "closed_at":       datetime.fromtimestamp(closed_at).isoformat(),
         "transcript_file": transcript_filename,
     })
 
+    # Write summary file
     summary_filename = f"session_{timestamp}_summary.json"
     summary_path = _date_dir(date_str) / summary_filename
     try:
         summary_path.write_text(json.dumps(summary_data, indent=2), encoding="utf-8")
         log_event("Archive", "SUMMARY_WRITTEN",
             session=session_id[:8],
-            file=summary_filename,
             mood=summary_data.get("mood", "unknown"),
+            summary_preview=summary_data.get("summary", "")[:80],
         )
     except Exception as e:
         log_error("Archive", "failed to write summary", exc=e)
 
-    # ── Update daily index ────────────────────────────────────────────────────
+    # Update daily index
     index = _load_index(date_str)
+
+    # Remove any existing entry for this session
+    index["sessions"] = [
+        s for s in index["sessions"]
+        if s.get("session_id") != session_id
+    ]
+
     index["sessions"].append({
         "session_id":    session_id,
         "timestamp":     timestamp,
@@ -246,21 +296,23 @@ async def archive_session(
         "summary_file":  summary_filename,
         "hosts":         hosts,
         "topics":        topics,
-        "message_count": len(messages),
+        "message_count": message_count,
         "opened_at":     datetime.fromtimestamp(opened_at).strftime("%H:%M"),
         "closed_at":     datetime.fromtimestamp(closed_at).strftime("%H:%M"),
         "summary":       summary_data.get("summary", ""),
         "mood":          summary_data.get("mood", "unknown"),
         "unresolved":    summary_data.get("unresolved"),
+        "notable":       summary_data.get("notable", []),
     })
+
     _save_index(date_str, index)
 
-    log_event("Archive", "SESSION_ARCHIVED",
+    log_event("Archive", "SESSION_FINALIZED",
         session=session_id[:8],
         date=date_str,
         hosts=hosts,
-        topics=topics,
-        messages=len(messages),
+        messages=message_count,
+        transcript=transcript_filename,
     )
 
     return transcript_filename
@@ -269,9 +321,7 @@ async def archive_session(
 # ── Read helpers for Mind ─────────────────────────────────────────────────────
 
 def get_today_index() -> dict:
-    """Return today's session index. Used by Mind for temporal queries."""
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    return _load_index(date_str)
+    return _load_index(_today_str())
 
 
 def get_index_for_date(date_str: str) -> dict:
@@ -279,8 +329,7 @@ def get_index_for_date(date_str: str) -> dict:
 
 
 def read_transcript(date_str: str, filename: str) -> Optional[str]:
-    """Read a full transcript. Only called when Mind needs the full text."""
-    path = _date_dir(date_str) / filename
+    path = _CONVERSATIONS_DIR / date_str / filename
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -292,9 +341,7 @@ def read_transcript(date_str: str, filename: str) -> Optional[str]:
 
 def get_today_summary_for_prompt() -> str:
     """
-    Return a compact summary of today's sessions for injection into
-    the rumination prompt or system prompt.
-    Returns empty string if no sessions today.
+    Compact summary of today's sessions for rumination prompt.
     """
     index = get_today_index()
     sessions = index.get("sessions", [])
@@ -303,9 +350,9 @@ def get_today_summary_for_prompt() -> str:
 
     lines = [f"Today's conversations ({len(sessions)} session{'s' if len(sessions) != 1 else ''}):"]
     for s in sessions:
-        hosts   = ", ".join(h.title() for h in s.get("hosts", []))
+        hosts      = ", ".join(h.title() for h in s.get("hosts", []))
         time_range = f"{s.get('opened_at', '?')}–{s.get('closed_at', '?')}"
-        summary = s.get("summary", "")
+        summary    = s.get("summary", "")
         unresolved = s.get("unresolved")
         line = f"  [{time_range}] {hosts}: {summary}"
         if unresolved:

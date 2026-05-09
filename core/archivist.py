@@ -502,6 +502,17 @@ class Archivist:
                 )
         except Exception as e:
             log_error("Archivist", "close signal detection failed", exc=e)
+
+        try:
+            from core.session_manager import session_manager, is_close_signal
+            if is_close_signal(message):
+                session_manager.signal_close(session_id)
+                log_event("Archivist", "CLOSE_SIGNAL_DETECTED",
+                    session=session_id[:8],
+                    preview=message[:40],
+                )
+        except Exception as e:
+            log_error("Archivist", "close signal detection failed", exc=e)
             
         return brief
 
@@ -528,6 +539,32 @@ class Archivist:
             history.add("assistant", message, context=ctx)
         except Exception as e:
             log_error("Archivist", "failed to save outgoing message to history", exc=e)
+        try:
+            from core.conversation_archive import append_exchange
+            from core.session_manager import session_manager
+            state = session_manager._sessions.get(session_id)
+            opened_at = state.opened_at if state else time.time()
+            fronters = list(ctx.get("fronters") or [])
+            host = fronters[0] if fronters else ""
+            append_exchange(
+                session_id=session_id,
+                opened_at=opened_at,
+                user_message=user_message,
+                gizmo_response=message,
+                host=host,
+                timestamp=time.time(),
+            )
+            try:
+                from core.session_manager import session_manager
+                session_manager.touch(
+                    session_id=session_id,
+                    hosts=fronters,
+                    topics=topics,
+                )
+            except Exception as e:
+                log_error("Archivist", "session_manager.touch failed", exc=e)
+        except Exception as e:
+            log_error("Archivist", "append_exchange failed", exc=e)
 
         log_event(
             "Archivist", "OUTGOING",

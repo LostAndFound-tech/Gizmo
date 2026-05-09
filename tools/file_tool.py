@@ -25,7 +25,11 @@ from typing import Optional
 
 from tools.base_tool import BaseTool, ToolResult
 
-_DATA_ROOT = Path(os.getenv("DATA_ROOT", "/data"))
+_DATA_ROOT       = Path(os.getenv("DATA_ROOT", "/data"))
+_PERSONALITY_DIR = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
+
+# Notes live under personality — not a separate root
+_NOTES_DIR = _PERSONALITY_DIR / "notes"
 
 _MAX_READ_BYTES  = 32_000
 _MAX_WRITE_BYTES = 64_000
@@ -36,7 +40,7 @@ _SUBJECT_SAMPLE  = 300   # chars sent to subject-match LLM call
 
 def _resolve(path_str: str) -> tuple[Optional[Path], str]:
     """
-    Resolve path to absolute within /data/.
+    Resolve path to absolute within /data/personality/.
     Returns (resolved, error). On success error is "".
     """
     if not path_str or not path_str.strip():
@@ -47,17 +51,17 @@ def _resolve(path_str: str) -> tuple[Optional[Path], str]:
     candidate = (
         Path(path_str).resolve()
         if path_str.startswith("/")
-        else (_DATA_ROOT / path_str).resolve()
+        else (_PERSONALITY_DIR / path_str).resolve()
     )
 
     try:
-        candidate.relative_to(_DATA_ROOT.resolve())
+        candidate.relative_to(_PERSONALITY_DIR.resolve())
         return candidate, ""
     except ValueError:
         return None, (
-            f"'{path_str}' is outside /data/. "
-            f"Use relative paths like 'notes/x.txt' or "
-            f"'personality/headmates/oren.json'."
+            f"'{path_str}' is outside /data/personality/. "
+            f"Use relative paths like 'notes/x.txt', "
+            f"'headmates/oren.json', 'personality.txt'."
         )
 
 
@@ -87,6 +91,23 @@ def _write_raw(path: Path, content: str) -> tuple[bool, str]:
         return True, f"Written: {path} ({len(content)} chars)"
     except Exception as e:
         return False, f"Write failed: {e}"
+
+
+async def _register_conscious(path: Path, content: str) -> None:
+    """
+    Register a written file in the conscious layer.
+    Fire-and-forget — never blocks, never raises.
+    """
+    try:
+        import asyncio
+        from core.conscious import conscious
+        asyncio.ensure_future(conscious.register(
+            path=str(path),
+            content=content,
+            subject=path.stem.lower().replace("-", " ").replace("_", " "),
+        ))
+    except Exception:
+        pass
 
 
 # ── Subject match ─────────────────────────────────────────────────────────────
@@ -156,10 +177,10 @@ class ReadFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Read a file from your data directory (/data/). "
+            "Read a file from your personality directory (/data/personality/). "
             "ALWAYS use this before writing to check what's already there. "
-            "Paths are relative to /data/ — e.g. 'notes/thoughts.txt', "
-            "'personality/headmates/oren.json', 'personality/personality.txt'. "
+            "Paths are relative to /data/personality/ — e.g. 'notes/thoughts.txt', "
+            "'headmates/oren.json', 'personality.txt'. "
             "Args: path (str) — file path to read."
         )
 
@@ -200,15 +221,15 @@ class WriteFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Write content to a file under /data/. "
+            "Write content to a file under /data/personality/. "
             "New files are written immediately. "
             "Existing files: content is checked against what's already there — "
             "if same subject, overwrites silently. "
             "If different subject, write is held and you must ask the user to confirm. "
             "For JSON files, content must be valid JSON. "
             "ALWAYS read the file first if you think it might already exist. "
-            "Paths relative to /data/ — e.g. 'notes/x.txt', "
-            "'personality/headmates/oren.json'. "
+            "Paths relative to /data/personality/ — e.g. 'notes/x.txt', "
+            "'headmates/oren.json'. "
             "Args: "
             "path (str) — file path. "
             "content (str) — full content to write."
@@ -249,6 +270,8 @@ class WriteFileTool(BaseTool):
         # New file — write immediately
         if not resolved.exists():
             ok, msg = _write_raw(resolved, content)
+            if ok:
+                await _register_conscious(resolved, content)
             return ToolResult(success=ok, output=msg, data={"path": str(resolved)})
 
         # Existing file — subject check
@@ -262,6 +285,8 @@ class WriteFileTool(BaseTool):
 
         if same:
             ok, msg = _write_raw(resolved, content)
+            if ok:
+                await _register_conscious(resolved, content)
             return ToolResult(success=ok, output=msg, data={"path": str(resolved)})
         else:
             # Hold the write — different subject detected
@@ -334,7 +359,7 @@ class AppendFileTool(BaseTool):
             "Safe — never destroys existing content. "
             "Prefer this over write_file when adding to an existing document. "
             "For JSON files use write_file (read → modify → write is safer). "
-            "Paths relative to /data/ — e.g. 'notes/thoughts.txt'. "
+            "Paths relative to /data/personality/ — e.g. 'notes/thoughts.txt'. "
             "Args: "
             "path (str) — file path. "
             "content (str) — text to append."
@@ -360,7 +385,9 @@ class AppendFileTool(BaseTool):
             resolved.parent.mkdir(parents=True, exist_ok=True)
             existing = resolved.read_text(encoding="utf-8") if resolved.exists() else ""
             separator = "\n" if existing and not existing.endswith("\n") else ""
-            resolved.write_text(existing + separator + content, encoding="utf-8")
+            full_content = existing + separator + content
+            resolved.write_text(full_content, encoding="utf-8")
+            await _register_conscious(resolved, full_content)
             return ToolResult(
                 success=True,
                 output=f"Appended {len(content)} chars to {resolved}",
@@ -380,14 +407,14 @@ class ListFilesTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "List files and directories under /data/. "
-            "Pass empty path or '.' to list /data/ itself. "
-            "Args: path (str) — directory to list (relative to /data/ or absolute)."
+            "List files and directories under /data/personality/. "
+            "Pass empty path or '.' to list the personality root. "
+            "Args: path (str) — directory to list (relative to /data/personality/)."
         )
 
     async def run(self, path: str = "", session_id: str = "", **kwargs) -> ToolResult:
         if not path or path.strip() in (".", ""):
-            target = _DATA_ROOT
+            target = _PERSONALITY_DIR
             err = ""
         else:
             target, err = _resolve(path)
@@ -431,10 +458,10 @@ class DeleteFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Delete a file under /data/. Permanent — cannot be undone. "
+            "Delete a file under /data/personality/. Permanent — cannot be undone. "
             "Requires confirm=True. Cannot delete directories. "
             "Args: "
-            "path (str) — file to delete. "
+            "path (str) — file to delete (relative to /data/personality/). "
             "confirm (bool) — must be true."
         )
 

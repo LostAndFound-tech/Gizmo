@@ -279,6 +279,50 @@ class Mind:
                 "topics_queried": topics,
                 "chunks":         [],
             }
+        
+        # ── Tier 1.5: Conscious layer — semantic file index ───────────────────
+        # Searches Gizmo's written files by description embedding.
+        # Returns file paths → reads actual content → adds to RAG chunks.
+        # Cheap: searches descriptions only, reads files on hit.
+        conscious_text = ""
+        try:
+            from core.conscious import conscious
+            conscious_results = conscious.search(
+                query=query,
+                n=3,
+                subject=(headmate or "").lower(),
+            )
+            if not conscious_results:
+                # Also try without subject filter
+                conscious_results = conscious.search(query=query, n=3)
+ 
+            if conscious_results:
+                parts = []
+                for r in conscious_results:
+                    if r.get("distance", 1.0) < 1.0:  # relevance threshold
+                        file_content = conscious.read_file(r["path"])
+                        if file_content:
+                            parts.append(
+                                f"[{r['description']}]\n{file_content[:600]}"
+                            )
+                if parts:
+                    conscious_text = "\n\n".join(parts)
+                    log_event("Mind", "CONSCIOUS_HIT",
+                        session=session_id[:8],
+                        files=len(parts),
+                        query=query[:60],
+                    )
+        except Exception as e:
+            log_error("Mind", "conscious layer query failed", exc=e)
+ 
+        if conscious_text:
+            return {
+                "synthesis":      conscious_text,
+                "confidence":     0.75,
+                "source":         "conscious",
+                "topics_queried": topics,
+                "chunks":         [],
+            }
 
         # ── Tier 2: RAG ───────────────────────────────────────────────────────
         rag_result     = await _query_rag(topics, query, fronters, session_id)

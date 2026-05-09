@@ -37,9 +37,9 @@ from typing import Callable, Optional
 
 from core.log import log, log_event, log_error
 
-SESSION_TIMEOUT      = int(60 * 60 * 2)   # 2 hours silence → close
+SESSION_TIMEOUT      = int(60 * 15)        # 15 minutes silence → close
 WATCHDOG_INTERVAL    = 300                  # check every 5 minutes
-RUMINATION_EVERY     = 6                    # ruminate every Nth tick (~30 min)
+RUMINATION_EVERY     = 3                    # ruminate every Nth tick (~15 min)
 
 # Explicit close signal patterns
 _CLOSE_RE = re.compile(
@@ -170,16 +170,15 @@ class SessionManager:
             return
 
         try:
-            from core.conversation_archive import archive_session
-            from memory.history import get_session
+            from core.conversation_archive import finalize_session
 
-            history = get_session(session_id)
-            await archive_session(
+            await finalize_session(
                 session_id=session_id,
-                history=history,
+                
                 hosts=state.hosts,
                 topics=state.topics,
                 opened_at=state.opened_at,
+                message_count=state.message_count,
                 closed_at=time.time(),
                 llm=self._llm,
             )
