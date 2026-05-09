@@ -323,13 +323,11 @@ async def finalize_session(
 
             # Build the entry content — summary + link
             entry_content = (
-                f"Conversation with {hosts_str} on {date_str} ({opened_str}–{closed_str})
-"
+                f"Conversation with {hosts_str} on {date_str} ({opened_str}\u2013{closed_str})\n"
                 f"{summary_text}"
             )
             if summary_data.get("unresolved"):
-                entry_content += f"
-Unresolved: {summary_data['unresolved']}"
+                entry_content += f"\nUnresolved: {summary_data['unresolved']}"
 
             entry_metadata = {
                 "type":             "conversation_summary",
