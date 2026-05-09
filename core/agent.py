@@ -228,18 +228,42 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
     from pathlib import Path
     from core.timezone import tz_now
 
-    # ── Personality seed ──────────────────────────────────────────────────────
+    # ── Personality seed — assembled from conscious collection ───────────────
+    # Generic by default. Fills in over time from conversation and rumination.
+    # "I want you to act like X" → memory_write type:persona subject:self → here.
     personality = "You are Gizmo, a persistent AI companion."
-    personality_path = os.path.join(
-        os.path.dirname(__file__), "..", "personality.txt"
-    )
     try:
-        with open(personality_path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-            if content:
-                personality = content
-    except FileNotFoundError:
-        pass
+        from tools.memory_tool import _get_collection, CONSCIOUS_COLLECTION
+        col   = _get_collection(CONSCIOUS_COLLECTION)
+        count = col.count()
+        if count > 0:
+            self_entries = col.get(
+                where={"subject": {"$eq": "self"}},
+                limit=20,
+            )
+            docs  = self_entries.get("documents", [])
+            metas = self_entries.get("metadatas", [])
+            if docs:
+                # Order: persona first, then scenario, then likes/dislikes, then rest
+                type_order = ["persona", "scenario", "self_likes", "self_dislikes"]
+                by_type = {}
+                for doc, meta in zip(docs, metas):
+                    t = meta.get("type", "note")
+                    by_type.setdefault(t, []).append(doc)
+
+                parts = []
+                for t in type_order:
+                    if t in by_type:
+                        parts.extend(by_type[t])
+                # anything else
+                for t, entries in by_type.items():
+                    if t not in type_order:
+                        parts.extend(entries)
+
+                if parts:
+                    personality = "\n\n".join(parts)
+    except Exception as e:
+        print(f"[Agent] conscious seed load failed: {e}")
 
     now_str = tz_now().strftime("%A %Y-%m-%d %H:%M %Z")
 
