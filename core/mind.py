@@ -280,46 +280,85 @@ class Mind:
                 "chunks":         [],
             }
         
-        # ── Tier 1.5: Conscious layer — semantic file index ───────────────────
-        # Searches Gizmo's written files by description embedding.
-        # Returns file paths → reads actual content → adds to RAG chunks.
-        # Cheap: searches descriptions only, reads files on hit.
-        conscious_text = ""
+        # ── Tier 1.5: Memory collections ─────────────────────────────────────
+        # Query conscious (Gizmo's thoughts) and memory (datapoints) first.
+        # These are more personal and relevant than general RAG chunks.
+        memory_text = ""
         try:
-            from core.conscious import conscious
-            conscious_results = conscious.search(
-                query=query,
-                n=3,
-                subject=(headmate or "").lower(),
-            )
-            if not conscious_results:
-                # Also try without subject filter
-                conscious_results = conscious.search(query=query, n=3)
+            from tools.memory_tool import _get_collection, CONSCIOUS_COLLECTION, MEMORY_COLLECTION
+            from core.rag import _EMBED_FN
  
-            if conscious_results:
-                parts = []
-                for r in conscious_results:
-                    if r.get("distance", 1.0) < 1.0:  # relevance threshold
-                        file_content = conscious.read_file(r["path"])
-                        if file_content:
-                            parts.append(
-                                f"[{r['description']}]\n{file_content[:600]}"
-                            )
-                if parts:
-                    conscious_text = "\n\n".join(parts)
-                    log_event("Mind", "CONSCIOUS_HIT",
-                        session=session_id[:8],
-                        files=len(parts),
-                        query=query[:60],
-                    )
+            all_hits = []
+ 
+            for col_name in [CONSCIOUS_COLLECTION, MEMORY_COLLECTION]:
+                try:
+                    col   = _get_collection(col_name)
+                    count = col.count()
+                    if count == 0:
+                        continue
+ 
+                    k = min(4, count)
+                    kwargs_q = {"query_texts": [query], "n_results": k}
+                    if headmate:
+                        kwargs_q["where"] = {"subject": {"$eq": headmate.lower()}}
+ 
+                    results = col.query(**kwargs_q)
+                    docs  = results.get("documents", [[]])[0]
+                    metas = results.get("metadatas", [[]])[0]
+                    dists = results.get("distances", [[]])[0]
+ 
+                    for doc, meta, dist in zip(docs, metas, dists):
+                        if dist < 1.1:
+                            all_hits.append({
+                                "text":       doc,
+                                "collection": col_name,
+                                "subject":    meta.get("subject", ""),
+                                "distance":   dist,
+                            })
+                except Exception:
+                    pass
+ 
+            if not all_hits and headmate:
+                # Retry without subject filter
+                for col_name in [CONSCIOUS_COLLECTION, MEMORY_COLLECTION]:
+                    try:
+                        col   = _get_collection(col_name)
+                        count = col.count()
+                        if count == 0:
+                            continue
+                        k = min(3, count)
+                        results = col.query(query_texts=[query], n_results=k)
+                        docs  = results.get("documents", [[]])[0]
+                        metas = results.get("metadatas", [[]])[0]
+                        dists = results.get("distances", [[]])[0]
+                        for doc, meta, dist in zip(docs, metas, dists):
+                            if dist < 1.0:
+                                all_hits.append({
+                                    "text":       doc,
+                                    "collection": col_name,
+                                    "subject":    meta.get("subject", ""),
+                                    "distance":   dist,
+                                })
+                    except Exception:
+                        pass
+ 
+            if all_hits:
+                all_hits.sort(key=lambda h: h["distance"])
+                memory_text = "\n\n".join(h["text"] for h in all_hits[:6])
+                log_event("Mind", "MEMORY_HIT",
+                    session=session_id[:8],
+                    hits=len(all_hits),
+                    query=query[:60],
+                )
+ 
         except Exception as e:
-            log_error("Mind", "conscious layer query failed", exc=e)
+            log_error("Mind", "memory collection query failed", exc=e)
  
-        if conscious_text:
+        if memory_text:
             return {
-                "synthesis":      conscious_text,
-                "confidence":     0.75,
-                "source":         "conscious",
+                "synthesis":      memory_text,
+                "confidence":     0.8,
+                "source":         "memory",
                 "topics_queried": topics,
                 "chunks":         [],
             }

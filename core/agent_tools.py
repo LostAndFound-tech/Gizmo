@@ -11,9 +11,6 @@ Future: tool forge registers tools here dynamically.
 from core.log import log
 from tools.introspect_tool import IntrospectTool
 
-# Import surviving tools
-# (others deleted — switch_host and correction_tool are temporary
-#  until Archivist and Id absorb them)
 try:
     from tools.switch_host import SwitchHostTool
     _switch = SwitchHostTool()
@@ -38,25 +35,49 @@ except Exception as e:
     _view_prefs = None
 
 try:
+    from tools.memory_tool import (
+        MemoryWriteTool,
+        MemoryReadTool,
+        MemoryListTool,
+        MemoryDeleteTool,
+    )
+    _memory_write  = MemoryWriteTool()
+    _memory_read   = MemoryReadTool()
+    _memory_list   = MemoryListTool()
+    _memory_delete = MemoryDeleteTool()
+except Exception as e:
+    log("Agent", f"WARNING: memory_tool failed to load: {e}")
+    _memory_write  = None
+    _memory_read   = None
+    _memory_list   = None
+    _memory_delete = None
+
+try:
     from tools.file_tool import (
         ReadFileTool,
         WriteFileTool,
         AppendFileTool,
         ListFilesTool,
         DeleteFileTool,
+        ConfirmWriteTool,
+        CancelWriteTool,
     )
-    _read_file   = ReadFileTool()
-    _write_file  = WriteFileTool()
-    _append_file = AppendFileTool()
-    _list_files  = ListFilesTool()
-    _delete_file = DeleteFileTool()
+    _read_file     = ReadFileTool()
+    _write_file    = WriteFileTool()
+    _append_file   = AppendFileTool()
+    _list_files    = ListFilesTool()
+    _delete_file   = DeleteFileTool()
+    _confirm_write = ConfirmWriteTool()
+    _cancel_write  = CancelWriteTool()
 except Exception as e:
     log("Agent", f"WARNING: file_tool failed to load: {e}")
-    _read_file   = None
-    _write_file  = None
-    _append_file = None
-    _list_files  = None
-    _delete_file = None
+    _read_file     = None
+    _write_file    = None
+    _append_file   = None
+    _list_files    = None
+    _delete_file   = None
+    _confirm_write = None
+    _cancel_write  = None
 
 # Build registry — skip any tools that failed to load
 TOOL_REGISTRY = {
@@ -68,6 +89,10 @@ TOOL_REGISTRY = {
 for tool in [
     _switch,
     _correction,
+    _memory_write,
+    _memory_read,
+    _memory_list,
+    _memory_delete,
     _set_prefs,
     _view_prefs,
     _read_file,
@@ -75,6 +100,8 @@ for tool in [
     _append_file,
     _list_files,
     _delete_file,
+    _confirm_write,
+    _cancel_write,
 ]:
     if tool is not None:
         TOOL_REGISTRY[tool.name] = tool

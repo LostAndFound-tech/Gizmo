@@ -470,7 +470,32 @@ def _write_facts(name: str, facts: list[str]) -> int:
             count=written,
             facts=[f[:60] for f in facts[:3]],
         )
-
+ 
+        # Also write each fact to memory ChromaDB collection
+        try:
+            from tools.memory_tool import _get_collection, MEMORY_COLLECTION
+            from core.timezone import tz_now
+            col       = _get_collection(MEMORY_COLLECTION)
+            now       = tz_now().isoformat(timespec="seconds")
+            import uuid
+            for fact in facts:
+                fact = fact.strip()
+                if not fact:
+                    continue
+                col.add(
+                    documents=[fact],
+                    metadatas=[{
+                        "subject":    name.lower(),
+                        "entity_type": entity_type,
+                        "written_at": now,
+                        "source":     "observer",
+                        "tags":       f"fact,{entity_type},{name.lower()}",
+                    }],
+                    ids=[f"mem_{uuid.uuid4().hex[:12]}"],
+                )
+        except Exception as e:
+            print(f"[Observer] memory collection write failed: {e}")
+ 
     return written
 
 
