@@ -307,6 +307,92 @@ async def finalize_session(
 
     _save_index(date_str, index)
 
+    # ── Ingest summary into each host's ChromaDB collection ──────────────────
+    # This is what makes conversations retrievable by Mind.
+    # Each host gets an entry in their personal collection AND in memory.
+    summary_text = summary_data.get("summary", "")
+    if summary_text and summary_text not in ("Summary unavailable.", "No transcript content.", "Summary generation failed."):
+        try:
+            from tools.memory_tool import _get_collection, MEMORY_COLLECTION
+            import uuid as _uuid
+
+            opened_str = datetime.fromtimestamp(opened_at).strftime("%H:%M")
+            closed_str = datetime.fromtimestamp(closed_at).strftime("%H:%M")
+            hosts_str  = ", ".join(h.title() for h in hosts)
+            transcript_link = f"/data/conversations/{date_str}/{transcript_filename}"
+
+            # Build the entry content — summary + link
+            entry_content = (
+                f"Conversation with {hosts_str} on {date_str} ({opened_str}–{closed_str})
+"
+                f"{summary_text}"
+            )
+            if summary_data.get("unresolved"):
+                entry_content += f"
+Unresolved: {summary_data['unresolved']}"
+
+            entry_metadata = {
+                "type":             "conversation_summary",
+                "subject":          hosts[0].lower() if hosts else "",
+                "hosts":            ", ".join(hosts),
+                "date":             date_str,
+                "session_id":       session_id,
+                "transcript_file":  transcript_link,
+                "mood":             summary_data.get("mood", "unknown"),
+                "written_at":       datetime.fromtimestamp(closed_at).isoformat(timespec="seconds"),
+                "tags":             f"conversation,{','.join(hosts)}",
+            }
+
+            # Write to memory collection (primary)
+            mem_col = _get_collection(MEMORY_COLLECTION)
+            mem_col.add(
+                documents=[entry_content],
+                metadatas=[entry_metadata],
+                ids=[f"conv_{session_id[:16]}"],
+            )
+
+            # Also write to each host's personal collection
+            try:
+                from core.rag import RAGStore
+                for host in hosts:
+                    host_store = RAGStore(collection_name=host.lower())
+                    host_store.ingest_texts(
+                        [entry_content],
+                        metadatas=[entry_metadata],
+                        ids=[f"conv_{session_id[:16]}_{host.lower()}"],
+                    )
+            except Exception as e:
+                log_error("Archive", f"failed to ingest into host collections: {e}", exc=None)
+
+            # Write notable facts to memory too
+            for notable in summary_data.get("notable", []):
+                if notable and len(notable) > 10:
+                    try:
+                        mem_col.add(
+                            documents=[notable],
+                            metadatas=[{
+                                "type":       "fact",
+                                "subject":    hosts[0].lower() if hosts else "",
+                                "date":       date_str,
+                                "session_id": session_id,
+                                "written_at": datetime.fromtimestamp(closed_at).isoformat(timespec="seconds"),
+                                "tags":       f"notable,conversation,{','.join(hosts)}",
+                                "source":     "conversation_summary",
+                            }],
+                            ids=[f"notable_{session_id[:12]}_{_uuid.uuid4().hex[:8]}"],
+                        )
+                    except Exception:
+                        pass
+
+            log_event("Archive", "SUMMARY_INGESTED",
+                session=session_id[:8],
+                hosts=hosts,
+                collections=["memory"] + [h.lower() for h in hosts],
+            )
+
+        except Exception as e:
+            log_error("Archive", f"failed to ingest summary into ChromaDB: {e}", exc=None)
+
     log_event("Archive", "SESSION_FINALIZED",
         session=session_id[:8],
         date=date_str,
