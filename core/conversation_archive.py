@@ -423,24 +423,28 @@ def read_transcript(date_str: str, filename: str) -> Optional[str]:
         return None
 
 
+import random
+
 def get_today_summary_for_prompt() -> str:
     """
     Compact summary of today's sessions for rumination prompt.
+    Picks a random session — resolved or not — so rumination ranges
+    across the day rather than fixating on unresolved threads.
     """
     index = get_today_index()
     sessions = index.get("sessions", [])
     if not sessions:
         return ""
 
-    lines = [f"Today's conversations ({len(sessions)} session{'s' if len(sessions) != 1 else ''}):"]
-    for s in sessions:
-        hosts      = ", ".join(h.title() for h in s.get("hosts", []))
-        time_range = f"{s.get('opened_at', '?')}–{s.get('closed_at', '?')}"
-        summary    = s.get("summary", "")
-        unresolved = s.get("unresolved")
-        line = f"  [{time_range}] {hosts}: {summary}"
-        if unresolved:
-            line += f" (unresolved: {unresolved})"
-        lines.append(line)
+    # Pick a random session rather than listing all with unresolved surfaced
+    session = random.choice(sessions)
 
-    return "\n".join(lines)
+    hosts      = ", ".join(h.title() for h in session.get("hosts", []))
+    time_range = f"{session.get('opened_at', '?')}–{session.get('closed_at', '?')}"
+    summary    = session.get("summary", "")
+
+    total = len(sessions)
+    line = f"Today has had {total} conversation{'s' if total != 1 else ''}. One of them:\n"
+    line += f"  [{time_range}] {hosts}: {summary}"
+
+    return line
