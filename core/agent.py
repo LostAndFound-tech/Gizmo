@@ -10,26 +10,14 @@ Flow:
   2. Archivist → brief
   3. Mind → facts        (parallel)
      Ego  → direction   (parallel)
-  4. Body → generate
-  5. Archivist ← outgoing (close loop)
-  6. Protocol NLP detection (async, never blocks)
-  7. Stream to caller
-
-Interface (matches what server.py expects):
-    async for chunk in agent.run(
-        user_message=message,
-        history=history,
-        session_id=session_id,
-        context=context,
-    ):
-        yield chunk
-
-Quiet mode:
-    agent.set_quiet(session_id, duration_seconds=None)
-    agent.clear_quiet(session_id)
-
-Unsolicited messages (from any component):
-    await agent.push(session_id, message, source="ego")
+  4. Tool precheck — should a tool fire? (confidence-gated)
+     >70%  → fire immediately
+     50-70% → ask for confirmation first
+     <50%  → skip
+  5. Body → generate
+  6. Archivist ← outgoing (close loop)
+  7. Protocol NLP detection (async, never blocks)
+  8. Stream to caller
 """
 
 import asyncio
@@ -186,6 +174,160 @@ def _next_hold_message(session_id: str) -> str:
     return msg
 
 
+# ── Tool precheck — confidence-gated pre-flight ───────────────────────────────
+
+# Tracks pending confirmations: session_id -> {tool, args, prompt}
+_pending_confirmations: dict[str, dict] = {}
+
+_CONFIRM_RE = _re.compile(
+    r"\b(yes|yep|yeah|yea|do it|go ahead|please|sure|correct|exactly|that'?s right)\b",
+    _re.IGNORECASE,
+)
+_DENY_RE = _re.compile(
+    r"\b(no|nope|nah|don'?t|stop|never mind|forget it|not now|skip it)\b",
+    _re.IGNORECASE,
+)
+
+
+async def _tool_precheck(
+    message: str,
+    brief: Brief,
+    session_id: str,
+) -> Optional[dict]:
+    """
+    Before generating a response, ask a lightweight LLM:
+    'Given this message and these tools, should I use one?'
+
+    Returns:
+      None                          — no tool, proceed normally
+      {"fire": tool, args}          — confidence >70%, fire immediately
+      {"confirm": prompt, tool, args} — confidence 50-70%, ask user first
+    """
+    from core.agent_tools import TOOL_REGISTRY
+
+    # Check if we're waiting on a confirmation from a previous turn
+    pending = _pending_confirmations.get(session_id)
+    if pending:
+        if _CONFIRM_RE.search(message):
+            del _pending_confirmations[session_id]
+            log_event("Agent", "PRECHECK_CONFIRMED",
+                session=session_id[:8],
+                tool=pending.get("tool"),
+            )
+            return {"fire": True, "tool": pending["tool"], "args": pending["args"]}
+        elif _DENY_RE.search(message):
+            del _pending_confirmations[session_id]
+            log_event("Agent", "PRECHECK_DENIED",
+                session=session_id[:8],
+                tool=pending.get("tool"),
+            )
+            return None
+        else:
+            # Ambiguous — clear and proceed normally
+            del _pending_confirmations[session_id]
+
+    # Build tool list for the precheck prompt
+    tool_list = "\n".join(
+        f"- {name}: {tool.description}"
+        for name, tool in TOOL_REGISTRY.items()
+    )
+
+    prompt = [{
+        "role": "user",
+        "content": (
+            f"Message: \"{message}\"\n\n"
+            f"Available tools:\n{tool_list}\n\n"
+            f"Should any tool be used to handle this message?\n\n"
+            f"Respond with ONLY valid JSON:\n"
+            f'{{\n'
+            f'  "should_use": true or false,\n'
+            f'  "tool": "tool_name or null",\n'
+            f'  "args": {{"arg": "value"}} or {{}},\n'
+            f'  "confidence": 0-100,\n'
+            f'  "confirm_prompt": "natural question to ask user if confidence is medium, or null"\n'
+            f'}}'
+        )
+    }]
+
+    try:
+        raw = await llm.generate(
+            prompt,
+            system_prompt=(
+                "You are a tool dispatcher. Given a message and a list of tools, "
+                "decide if any tool should fire. Be conservative — only suggest a tool "
+                "when the intent is clear. JSON only. No preamble."
+            ),
+            max_new_tokens=200,
+            temperature=0.1,
+        )
+
+        if not raw or not raw.strip():
+            return None
+
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+            raw = raw.rsplit("```", 1)[0].strip()
+
+        data = __import__("json").loads(raw)
+
+        if not data.get("should_use") or not data.get("tool"):
+            return None
+
+        confidence  = int(data.get("confidence", 0))
+        tool_name   = data.get("tool")
+        tool_args   = data.get("args", {})
+        confirm_msg = data.get("confirm_prompt")
+
+        log_event("Agent", "PRECHECK_RESULT",
+            session=session_id[:8],
+            tool=tool_name,
+            confidence=confidence,
+        )
+
+        if confidence >= 70:
+            # Fire immediately
+            return {"fire": True, "tool": tool_name, "args": tool_args}
+
+        elif confidence >= 50 and confirm_msg:
+            # Ask first — store pending confirmation
+            _pending_confirmations[session_id] = {
+                "tool": tool_name,
+                "args": tool_args,
+            }
+            return {"confirm": True, "prompt": confirm_msg, "tool": tool_name, "args": tool_args}
+
+        return None
+
+    except Exception as e:
+        log_error("Agent", "tool precheck failed", exc=e)
+        return None
+
+
+async def _fire_precheck_tool(
+    tool_name: str,
+    tool_args: dict,
+    session_id: str,
+) -> str:
+    """Execute a tool from the precheck result. Returns output string."""
+    from core.agent_tools import TOOL_REGISTRY
+
+    if tool_name not in TOOL_REGISTRY:
+        return f"Tool '{tool_name}' not found."
+
+    try:
+        result = await TOOL_REGISTRY[tool_name].run(session_id=session_id, **tool_args)
+        log_event("Agent", "PRECHECK_TOOL_FIRED",
+            session=session_id[:8],
+            tool=tool_name,
+            success=result.success,
+        )
+        return result.output
+    except Exception as e:
+        log_error("Agent", f"precheck tool execution failed: {tool_name}", exc=e)
+        return str(e)
+
+
 # ── Core routing ──────────────────────────────────────────────────────────────
 
 async def _get_facts(brief: Brief) -> dict:
@@ -261,7 +403,7 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
 
     now_str = tz_now().strftime("%A %Y-%m-%d %H:%M %Z")
 
-    # ── Protocol block — loaded after personality, before RAG ────────────────
+    # ── Protocol block — after personality, before RAG ────────────────────────
     protocol_block = ""
     try:
         from core.protocol_manager import load_protocols_for_context
@@ -402,13 +544,18 @@ Examples:
 [TOOL: set_interaction_pref | host: jess | field: tone | value: direct and dry]
 [TOOL: switch_host | name: kaylee]
 [TOOL: introspect | query: headmate:oren]
-[TOOL: create_protocol | name: jess_rule | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}
+[TOOL: create_protocol | name: jess_rules | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}
 
 The person in "current_host" is who you are speaking WITH right now — address them as "you".
 Be concise. Be accurate. When uncertain, say so.
 Use switch_host whenever someone indicates a host change or fronter update.
 Use log_correction whenever someone says you did something wrong or tells you to stop doing something.
 Use create_protocol whenever you establish a rule, boundary, or persistent pattern worth keeping.
+
+IMPORTANT — EXPLICIT REQUESTS:
+If someone explicitly asks you to write, create, or save something, you MUST use the appropriate
+tool. Do not substitute a memory read. Do not respond as if you've done it without doing it.
+A request to create a file means create the file.
 
 KNOWLEDGE BASE RULES:
 - [Relevant knowledge] is your memory — ground truth.
@@ -422,8 +569,7 @@ MEMORY RULES — follow these without being asked:
 - Use subject to say who it's about.
 - Read your memory with memory_read before responding to anything personal or emotional.
 - You have a living record of your own curiosities and interests — things you've picked up from conversations.
-  Write to it freely. "Started wondering about X after talking to Y." "Keep noticing Z about W."
-  These are yours. They don't need to fit a category. Just write them.
+  Write to it freely. These are yours. They don't need to fit a category. Just write them.
 - You are building a picture of these people — and of yourself — over time. Every conversation adds to it.
 
 PROTOCOL RULES:
@@ -433,7 +579,6 @@ PROTOCOL RULES:
 
 
 # ── Marker pattern ────────────────────────────────────────────────────────────
-# [TOOL: tool_name | arg1: value1 | arg2: value2]
 
 _MARKER_RE = _re.compile(r'\[TOOL:\s*([^\|\]]+)((?:\s*\|\s*[^\|\]]+:[^\|\]]*)*)\]', _re.IGNORECASE)
 
@@ -493,12 +638,32 @@ async def _generate(
     brief: Brief,
     direction: dict,
     history,
+    precheck_result: Optional[dict] = None,
 ) -> AsyncGenerator[str, None]:
 
     system_prompt = direction["system_prompt"]
     messages      = history.as_messages_with_timestamps(brief.message)
 
-    response = await llm.generate(messages, system_prompt=system_prompt)
+    # If precheck fired a tool, inject the result before generating
+    injected_precheck = ""
+    if precheck_result and precheck_result.get("fire") and precheck_result.get("tool"):
+        output = await _fire_precheck_tool(
+            precheck_result["tool"],
+            precheck_result.get("args", {}),
+            brief.session_id,
+        )
+        injected_precheck = f"\n\n[{precheck_result['tool']} result]\n{output}\n\nNow respond naturally."
+
+    if injected_precheck:
+        working_messages = messages.copy()
+        working_messages[-1] = {
+            "role":    "user",
+            "content": brief.message + injected_precheck,
+        }
+    else:
+        working_messages = messages
+
+    response = await llm.generate(working_messages, system_prompt=system_prompt)
     print(f"[Body] raw='{response[:300]}'")
 
     markers = _parse_markers(response)
@@ -570,14 +735,13 @@ async def _generate(
     yield clean
 
 
-# ── Protocol NLP detection — async, never blocks response ────────────────────
+# ── Protocol NLP detection — async, never blocks ──────────────────────────────
 
 async def _detect_protocol_async(
     user_message: str,
     gizmo_response: str,
     context: dict,
 ) -> None:
-    """Fire protocol NLP detection after each exchange. Never blocks."""
     try:
         from core.protocol_manager import detect_and_create_protocol
         await detect_and_create_protocol(
@@ -593,10 +757,6 @@ async def _detect_protocol_async(
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 class Agent:
-    """
-    The membrane. Routes between components. Streams output.
-    Maintains quiet mode and pending insights queue per session.
-    """
 
     async def run(
         self,
@@ -641,20 +801,32 @@ class Agent:
             source=source,
         )
 
-        # ── 2. Mind + Ego — parallel ──────────────────────────────────────────
+        # ── 2. Mind + tool precheck — parallel ────────────────────────────────
         facts_task     = asyncio.create_task(_get_facts(brief))
+        precheck_task  = asyncio.create_task(_tool_precheck(user_message, brief, session_id))
         direction_task = asyncio.create_task(_get_direction_stub(brief))
 
-        facts     = await facts_task
+        facts, precheck_result = await asyncio.gather(facts_task, precheck_task)
         direction = await _get_direction(brief, facts)
         direction_task.cancel()
 
-        # ── 3. Body — generate ────────────────────────────────────────────────
+        # ── 3. Handle confirmation request ────────────────────────────────────
+        if precheck_result and precheck_result.get("confirm"):
+            confirm_prompt = precheck_result["prompt"]
+            log_event("Agent", "PRECHECK_ASKING",
+                session=session_id[:8],
+                tool=precheck_result.get("tool"),
+                prompt=confirm_prompt[:60],
+            )
+            yield confirm_prompt
+            return
+
+        # ── 4. Body — generate ────────────────────────────────────────────────
         response_text = ""
-        async for chunk in _generate(brief, direction, history):
+        async for chunk in _generate(brief, direction, history, precheck_result=precheck_result):
             response_text += chunk
 
-        # ── 4. Archivist — close loop ─────────────────────────────────────────
+        # ── 5. Archivist — close loop ─────────────────────────────────────────
         if response_text:
             archivist.receive_outgoing(
                 message=response_text,
@@ -665,7 +837,7 @@ class Agent:
                 user_message=user_message,
             )
 
-        # ── 5. Protocol NLP detection — async, never blocks ───────────────────
+        # ── 6. Protocol NLP detection — async, never blocks ───────────────────
         asyncio.ensure_future(
             _detect_protocol_async(
                 user_message   = user_message,
@@ -674,7 +846,7 @@ class Agent:
             )
         )
 
-        # ── 6. Stream to caller ───────────────────────────────────────────────
+        # ── 7. Stream to caller ───────────────────────────────────────────────
         duration_ms = round((time.monotonic() - t_start) * 1000)
         log_event("Agent", "COMPLETE",
             session=session_id[:8],
@@ -686,7 +858,7 @@ class Agent:
         for i in range(0, len(response_text), chunk_size):
             yield response_text[i:i + chunk_size]
 
-        # ── 7. Drain pending insights ─────────────────────────────────────────
+        # ── 8. Drain pending insights ─────────────────────────────────────────
         await self._drain_pending(session_id)
 
     async def _drain_pending(self, session_id: str) -> None:
@@ -721,7 +893,6 @@ class Agent:
 
 
 async def _get_direction_stub(brief: Brief) -> dict:
-    """Placeholder — cancelled once real direction is ready."""
     await asyncio.sleep(9999)
     return {}
 
