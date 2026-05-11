@@ -176,7 +176,6 @@ def _next_hold_message(session_id: str) -> str:
 
 # ── Tool precheck — confidence-gated pre-flight ───────────────────────────────
 
-# Tracks pending confirmations: session_id -> {tool, args, prompt}
 _pending_confirmations: dict[str, dict] = {}
 
 _CONFIRM_RE = _re.compile(
@@ -199,9 +198,9 @@ async def _tool_precheck(
     'Given this message and these tools, should I use one?'
 
     Returns:
-      None                          — no tool, proceed normally
-      {"fire": tool, args}          — confidence >70%, fire immediately
-      {"confirm": prompt, tool, args} — confidence 50-70%, ask user first
+      None                            — no tool, proceed normally
+      {"fire": True, tool, args}      — confidence >70%, fire immediately
+      {"confirm": True, prompt, ...}  — confidence 50-70%, ask user first
     """
     from core.agent_tools import TOOL_REGISTRY
 
@@ -223,21 +222,27 @@ async def _tool_precheck(
             )
             return None
         else:
-            # Ambiguous — clear and proceed normally
             del _pending_confirmations[session_id]
 
-    # Build tool list for the precheck prompt
     tool_list = "\n".join(
         f"- {name}: {tool.description}"
         for name, tool in TOOL_REGISTRY.items()
     )
+
+    # Explicit write intent — lower the confidence threshold
+    explicit_write = bool(_re.search(
+        r"\b(write|create|save|make|add|put|store)\b.{0,30}\b(file|rule|protocol|note|list)\b",
+        message,
+        _re.IGNORECASE,
+    ))
 
     prompt = [{
         "role": "user",
         "content": (
             f"Message: \"{message}\"\n\n"
             f"Available tools:\n{tool_list}\n\n"
-            f"Should any tool be used to handle this message?\n\n"
+            f"Should any tool be used to handle this message?\n"
+            f"{'NOTE: This message explicitly requests a write/create action. Prefer write tools.' if explicit_write else ''}\n\n"
             f"Respond with ONLY valid JSON:\n"
             f'{{\n'
             f'  "should_use": true or false,\n'
@@ -255,7 +260,8 @@ async def _tool_precheck(
             system_prompt=(
                 "You are a tool dispatcher. Given a message and a list of tools, "
                 "decide if any tool should fire. Be conservative — only suggest a tool "
-                "when the intent is clear. JSON only. No preamble."
+                "when the intent is clear. For explicit write/create requests, confidence "
+                "should be 80+. JSON only. No preamble."
             ),
             max_new_tokens=200,
             temperature=0.1,
@@ -279,18 +285,21 @@ async def _tool_precheck(
         tool_args   = data.get("args", {})
         confirm_msg = data.get("confirm_prompt")
 
+        # Explicit write requests: treat 50+ as fire
+        threshold = 50 if explicit_write else 70
+
         log_event("Agent", "PRECHECK_RESULT",
             session=session_id[:8],
             tool=tool_name,
             confidence=confidence,
+            explicit_write=explicit_write,
+            threshold=threshold,
         )
 
-        if confidence >= 70:
-            # Fire immediately
+        if confidence >= threshold:
             return {"fire": True, "tool": tool_name, "args": tool_args}
 
         elif confidence >= 50 and confirm_msg:
-            # Ask first — store pending confirmation
             _pending_confirmations[session_id] = {
                 "tool": tool_name,
                 "args": tool_args,
@@ -309,7 +318,6 @@ async def _fire_precheck_tool(
     tool_args: dict,
     session_id: str,
 ) -> str:
-    """Execute a tool from the precheck result. Returns output string."""
     from core.agent_tools import TOOL_REGISTRY
 
     if tool_name not in TOOL_REGISTRY:
@@ -552,10 +560,15 @@ Use switch_host whenever someone indicates a host change or fronter update.
 Use log_correction whenever someone says you did something wrong or tells you to stop doing something.
 Use create_protocol whenever you establish a rule, boundary, or persistent pattern worth keeping.
 
-IMPORTANT — EXPLICIT REQUESTS:
-If someone explicitly asks you to write, create, or save something, you MUST use the appropriate
-tool. Do not substitute a memory read. Do not respond as if you've done it without doing it.
-A request to create a file means create the file.
+EXPLICIT REQUEST RULES:
+- If someone asks you to write, create, save, or make a file — do it. Do not read first.
+- Do not substitute a memory read for a file write. They are different actions.
+- Do not check if a file exists before writing a protocol. append_file and create_protocol
+  handle existing files safely. Just write.
+- Protocol files go to /data/personality/protocols/ — never to headmate folders.
+- Headmate files (/data/personality/headmates/) are read-only reference. Never write there
+  in response to a user request.
+- A request to create a file means create the file. Confirm after, not before.
 
 KNOWLEDGE BASE RULES:
 - [Relevant knowledge] is your memory — ground truth.
@@ -575,6 +588,8 @@ MEMORY RULES — follow these without being asked:
 PROTOCOL RULES:
 - [Active Protocols] are your own rules and commitments — follow them without being reminded.
 - When you establish a rule or boundary in conversation, use create_protocol to make it permanent.
+- Protocols always write to /data/personality/protocols/ — never anywhere else.
+- Never read before writing a protocol. Write first. append_file handles duplicates safely.
 - Protocols persist across sessions. You wrote them. They are yours."""
 
 
@@ -652,7 +667,11 @@ async def _generate(
             precheck_result.get("args", {}),
             brief.session_id,
         )
-        injected_precheck = f"\n\n[{precheck_result['tool']} result]\n{output}\n\nNow respond naturally."
+        injected_precheck = (
+            f"\n\n[{precheck_result['tool']} executed]\n{output}"
+            f"\n\nThe tool above has already run. Now respond to the original request: "
+            f'"{brief.message}"'
+        )
 
     if injected_precheck:
         working_messages = messages.copy()
@@ -694,7 +713,13 @@ async def _generate(
         second_messages = messages.copy()
         second_messages[-1] = {
             "role":    "user",
-            "content": brief.message + "\n\n[Retrieved information]\n" + injected + "\n\nNow respond naturally.",
+            "content": (
+                f"{brief.message}"
+                f"\n\n[Retrieved information]\n{injected}"
+                f"\n\nYou have read the above. Now complete the original request: "
+                f'"{brief.message}". If the request was to write or create something, '
+                f"do it now using the appropriate write tool. Do not stop at reading."
+            ),
         }
         response2 = await llm.generate(second_messages, system_prompt=system_prompt)
         print(f"[Body] second pass raw='{response2[:200]}'")
@@ -802,8 +827,8 @@ class Agent:
         )
 
         # ── 2. Mind + tool precheck — parallel ────────────────────────────────
-        facts_task     = asyncio.create_task(_get_facts(brief))
-        precheck_task  = asyncio.create_task(_tool_precheck(user_message, brief, session_id))
+        facts_task    = asyncio.create_task(_get_facts(brief))
+        precheck_task = asyncio.create_task(_tool_precheck(user_message, brief, session_id))
         direction_task = asyncio.create_task(_get_direction_stub(brief))
 
         facts, precheck_result = await asyncio.gather(facts_task, precheck_task)
