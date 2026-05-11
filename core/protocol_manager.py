@@ -14,17 +14,13 @@ Protocol types:
   - "both"        — contains context AND instructions
 
 Registry: /data/personality/protocols/registry.json
-Protocol files: /data/personality/protocols/<name>.md (or any path he chooses)
+Protocol files: /data/personality/protocols/<name>.md
 
 Per-headmate lists: /data/personality/headmates/<name>.json
   "protocols" field: list of protocol paths always loaded for that headmate
 
-Load order in agent:
-  1. Personality seed
-  2. Per-headmate protocols (always load, no judgement needed)
-  3. Global protocols — matched by tags/description against current context
-  4. RAG / memory
-  5. Response
+All paths are resolved lazily inside functions — never at module level —
+so env vars are always current when the code runs.
 """
 
 import json
@@ -36,19 +32,30 @@ from typing import Optional
 
 from core.log import log, log_event, log_error
 
-_PERSONALITY_DIR  = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
-_PROTOCOLS_DIR    = _PERSONALITY_DIR / "protocols"
-_HEADMATES_DIR    = _PERSONALITY_DIR / "headmates"
-_REGISTRY_PATH    = _PROTOCOLS_DIR / "registry.json"
 
-_FAILED_SUMMARY   = {"No transcript content.", "Summary generation failed.", "Summary unavailable."}
+# ── Lazy path helpers ─────────────────────────────────────────────────────────
+
+def _personality_dir() -> Path:
+    return Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
+
+def _protocols_dir() -> Path:
+    p = _personality_dir() / "protocols"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _headmates_dir() -> Path:
+    return _personality_dir() / "headmates"
+
+def _registry_path() -> Path:
+    return _protocols_dir() / "registry.json"
 
 
 # ── Registry helpers ──────────────────────────────────────────────────────────
 
 def _load_registry() -> dict:
+    path = _registry_path()
     try:
-        return json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {"protocols": []}
     except Exception as e:
@@ -57,9 +64,10 @@ def _load_registry() -> dict:
 
 
 def _save_registry(registry: dict) -> None:
+    path = _registry_path()
     try:
-        _PROTOCOLS_DIR.mkdir(parents=True, exist_ok=True)
-        _REGISTRY_PATH.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(registry, indent=2), encoding="utf-8")
     except Exception as e:
         log_error("ProtocolManager", "failed to save registry", exc=e)
 
@@ -70,24 +78,23 @@ def create_protocol(
     name: str,
     content: str,
     description: str,
-    tags: list[str],
+    tags: list,
     protocol_type: str = "both",
-    headmates: list[str] = None,
+    headmates: list = None,
 ) -> dict:
     """
     Create a new protocol file and register it.
-    Called by Gizmo (via tool) or by the NLP detection pass.
-
+    All paths resolved lazily so env vars are always current.
     Returns: {"success": bool, "path": str, "message": str}
     """
-    _PROTOCOLS_DIR.mkdir(parents=True, exist_ok=True)
+    protocols_dir = _protocols_dir()
 
     # Sanitize filename
     safe_name = re.sub(r"[^\w\-]", "_", name.lower().strip())
     if not safe_name:
         return {"success": False, "path": "", "message": "Invalid protocol name"}
 
-    path = _PROTOCOLS_DIR / f"{safe_name}.md"
+    path = protocols_dir / f"{safe_name}.md"
 
     # Write file
     try:
@@ -100,13 +107,19 @@ def create_protocol(
             f"\n---\n\n"
         )
         path.write_text(header + content.strip(), encoding="utf-8")
+        print(f"[ProtocolManager] wrote {path} ({path.stat().st_size} bytes)")
     except Exception as e:
         log_error("ProtocolManager", f"failed to write protocol file: {name}", exc=e)
         return {"success": False, "path": str(path), "message": str(e)}
 
+    # Verify the file actually exists
+    if not path.exists():
+        msg = f"Write appeared to succeed but file not found at {path}"
+        log_error("ProtocolManager", msg, exc=None)
+        return {"success": False, "path": str(path), "message": msg}
+
     # Register
     registry = _load_registry()
-    # Remove any existing entry with same name
     registry["protocols"] = [
         p for p in registry["protocols"]
         if p.get("name") != name
@@ -141,7 +154,7 @@ def create_protocol(
 
 def _add_to_headmate_list(headmate: str, protocol_path: str) -> None:
     """Add a protocol path to a headmate's always-load list."""
-    hm_file = _HEADMATES_DIR / f"{headmate.lower()}.json"
+    hm_file = _headmates_dir() / f"{headmate.lower()}.json"
     if not hm_file.exists():
         return
     try:
@@ -168,28 +181,23 @@ def _read_protocol_file(path: str) -> Optional[str]:
 
 
 def _score_protocol(protocol: dict, context: dict, message: str) -> int:
-    """
-    Score a protocol's relevance to the current context without an LLM call.
-    Higher score = more relevant.
-    """
+    """Score a protocol's relevance without an LLM call."""
     score = 0
-    tags     = [t.lower() for t in protocol.get("tags", [])]
-    desc     = protocol.get("description", "").lower()
+    tags      = [t.lower() for t in protocol.get("tags", [])]
+    desc      = protocol.get("description", "").lower()
     headmates = [h.lower() for h in protocol.get("headmates", [])]
 
-    current_host = (context.get("current_host") or "").lower()
-    fronters     = [f.lower() for f in (context.get("fronters") or [])]
-    topics       = [t.lower() for t in (context.get("topics") or [])]
+    current_host  = (context.get("current_host") or "").lower()
+    fronters      = [f.lower() for f in (context.get("fronters") or [])]
+    topics        = [t.lower() for t in (context.get("topics") or [])]
     message_lower = message.lower()
 
-    # Headmate match — strong signal
     if current_host and current_host in headmates:
         score += 10
     for f in fronters:
         if f in headmates:
             score += 5
 
-    # Tag match against topics
     for tag in tags:
         if any(tag in t for t in topics):
             score += 3
@@ -198,11 +206,9 @@ def _score_protocol(protocol: dict, context: dict, message: str) -> int:
         if tag in current_host:
             score += 2
 
-    # Description keyword match against message
     desc_words = set(desc.split())
     msg_words  = set(message_lower.split())
-    overlap    = desc_words & msg_words
-    score += len(overlap)
+    score += len(desc_words & msg_words)
 
     return score
 
@@ -215,20 +221,17 @@ def load_protocols_for_context(
     """
     Load relevant protocols for the current context.
     Returns a formatted string block for injection into the system prompt.
-
-    Always loads: per-headmate protocol lists
-    Conditionally loads: global protocols scored by relevance
     """
-    current_host = (context.get("current_host") or "").lower()
+    current_host  = (context.get("current_host") or "").lower()
     loaded_paths: set[str] = set()
     blocks: list[str] = []
 
-    registry = _load_registry()
+    registry     = _load_registry()
     all_protocols = [p for p in registry.get("protocols", []) if p.get("active", True)]
 
     # ── Per-headmate always-load ──────────────────────────────────────────────
     if current_host:
-        hm_file = _HEADMATES_DIR / f"{current_host}.json"
+        hm_file = _headmates_dir() / f"{current_host}.json"
         if hm_file.exists():
             try:
                 data = json.loads(hm_file.read_text(encoding="utf-8"))
@@ -254,7 +257,7 @@ def load_protocols_for_context(
     scored.sort(key=lambda x: x[0], reverse=True)
 
     for score, protocol in scored[:max_global]:
-        path = protocol.get("path", "")
+        path    = protocol.get("path", "")
         content = _read_protocol_file(path)
         if content:
             blocks.append(f"[Protocol — {protocol['name']}]\n{content}")
@@ -274,7 +277,6 @@ def load_protocols_for_context(
 
 # ── NLP detection pass ────────────────────────────────────────────────────────
 
-# Signals that a rule, boundary, or protocol-worthy moment just happened
 _PROTOCOL_SIGNAL_RE = re.compile(
     r"\b("
     r"I('ve| have) decided|I('m| am) deciding|"
@@ -303,17 +305,14 @@ async def detect_and_create_protocol(
 ) -> Optional[dict]:
     """
     NLP pass after each exchange. Checks if a protocol-worthy moment just happened.
-    If so, drafts and creates the protocol automatically.
     Never raises — errors logged and swallowed.
     """
     combined = f"{gizmo_response}\n{user_message}"
 
-    # Fast heuristic gate — if no signal words, skip LLM call entirely
     if not _PROTOCOL_SIGNAL_RE.search(combined):
         return None
 
     current_host = (context.get("current_host") or "unknown").lower()
-    fronters     = [f.lower() for f in (context.get("fronters") or [])]
 
     prompt = [{
         "role": "user",
