@@ -2,20 +2,11 @@
 tools/protocol_tool.py
 
 Gives Gizmo the ability to explicitly create a protocol during conversation.
-Auto-creation happens via the NLP detection pass in protocol_manager.py.
-This tool is for when Gizmo decides consciously to create one.
-
-Usage (Gizmo calls this as a tool):
-  {"tool": "create_protocol", "args": {
-    "name": "jess_exclamation_rule",
-    "content": "Jess must always use exclamation points when acknowledging instructions.",
-    "description": "Jess acknowledgment style rule",
-    "tags": ["jess", "communication", "rules"],
-    "type": "instruction",
-    "headmates": ["jess"]
-  }}
+Returns immediately with a holding response, does the work async,
+then pushes the result back to the client when done.
 """
 
+import asyncio
 from tools.base_tool import BaseTool, ToolResult
 
 
@@ -24,6 +15,7 @@ class CreateProtocolTool(BaseTool):
     description = (
         "Create a persistent protocol — a rule, boundary, or piece of information "
         "I want to remember and apply in future conversations. "
+        "Returns immediately and confirms when done. "
         "Use this when I've established something that should persist beyond this session."
     )
     args_schema = {
@@ -46,9 +38,10 @@ class CreateProtocolTool(BaseTool):
         headmates: list = None,
         **kwargs,
     ) -> ToolResult:
-        try:
-            from core.protocol_manager import create_protocol
-            result = create_protocol(
+        # Fire the actual work async — never blocks the response
+        asyncio.ensure_future(
+            _write_protocol_and_push(
+                session_id    = session_id,
                 name          = name,
                 content       = content,
                 description   = description,
@@ -56,9 +49,57 @@ class CreateProtocolTool(BaseTool):
                 protocol_type = type,
                 headmates     = headmates or [],
             )
-            return ToolResult(
-                success = result["success"],
-                output  = result["message"],
+        )
+
+        # Return immediately so response isn't held
+        return ToolResult(
+            success = True,
+            output  = f"On it — writing '{name}' now.",
+        )
+
+
+async def _write_protocol_and_push(
+    session_id: str,
+    name: str,
+    content: str,
+    description: str,
+    tags: list,
+    protocol_type: str,
+    headmates: list,
+) -> None:
+    """
+    Does the actual file write async, then pushes confirmation back to the client.
+    """
+    try:
+        from core.protocol_manager import create_protocol
+        result = create_protocol(
+            name          = name,
+            content       = content,
+            description   = description,
+            tags          = tags,
+            protocol_type = protocol_type,
+            headmates     = headmates,
+        )
+
+        if result["success"]:
+            headmate_note = ""
+            if headmates:
+                names = " or ".join(h.title() for h in headmates)
+                headmate_note = f" I'll load it automatically whenever {names} is here."
+
+            push_message = (
+                f"Done — wrote '{name}'.{headmate_note}\n\n"
+                f"Here's what I saved:\n\n{content}"
             )
-        except Exception as e:
-            return ToolResult(success=False, output=f"Protocol creation failed: {e}")
+        else:
+            push_message = f"Couldn't write '{name}' — {result['message']}"
+
+        from core.agent import push
+        await push(push_message)
+
+    except Exception as e:
+        try:
+            from core.agent import push
+            await push(f"Something went wrong writing '{name}' — {e}")
+        except Exception:
+            print(f"[ProtocolTool] push failed after write error: {e}")
