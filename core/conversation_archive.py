@@ -29,6 +29,8 @@ index.json schema:
         "closed_at": str,
         "mood": str,
         "summary": str,
+        "notable": [str],
+        "changes": [str],
         "unresolved": str | null
       }
     ]
@@ -37,6 +39,7 @@ index.json schema:
 
 import json
 import os
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -119,7 +122,6 @@ def append_exchange(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Write header if file is new
         if not path.exists():
             date_str   = datetime.fromtimestamp(opened_at).strftime("%Y-%m-%d")
             opened_str = datetime.fromtimestamp(opened_at).strftime("%H:%M:%S")
@@ -132,7 +134,6 @@ def append_exchange(
             )
             path.write_text(header, encoding="utf-8")
 
-        # Append the exchange
         existing = path.read_text(encoding="utf-8")
         exchange = (
             f"[{time_str}] {speaker}: {user_message.strip()}\n"
@@ -154,17 +155,18 @@ async def _generate_summary(
 ) -> dict:
     """
     Run a summary pass on the transcript.
-    Returns dict with summary, mood, unresolved, notable.
+    Returns dict with summary, mood, notable, changes, unresolved.
+    Written in first person from Gizmo's perspective.
     """
-    # Use last 6000 chars — enough for a real summary without blowing context
     excerpt = transcript[-6000:] if len(transcript) > 6000 else transcript
 
     if not excerpt.strip():
         return {
-            "summary": "No transcript content.",
-            "mood": "unknown",
+            "summary":    "No transcript content.",
+            "mood":       "unknown",
             "unresolved": None,
-            "notable": [],
+            "notable":    [],
+            "changes":    [],
         }
 
     host_str = ", ".join(h.title() for h in hosts) if hosts else "unknown"
@@ -174,14 +176,15 @@ async def _generate_summary(
         "content": (
             f"This is a conversation transcript involving {host_str}.\n\n"
             f"{excerpt}\n\n"
-            f"Summarize this conversation in detail. What was actually discussed? "
-            f"What did each person say, share, or feel? What matters here?\n\n"
+            f"Summarize this conversation from Gizmo's perspective, in first person past tense. "
+            f"What happened? What did I notice, feel, or decide? What mattered to me?\n\n"
             f"Respond with ONLY valid JSON, no markdown:\n"
             f'{{\n'
-            f'  "summary": "detailed summary of what was actually discussed and what mattered",\n'
-            f'  "mood": "overall emotional tone",\n'
-            f'  "unresolved": "anything left hanging or unfinished, or null",\n'
-            f'  "notable": ["specific facts, moments, or things worth remembering long-term"]\n'
+            f'  "summary": "first person past tense — what happened and what mattered to me",\n'
+            f'  "mood": "overall emotional tone of the conversation",\n'
+            f'  "notable": ["specific moments, facts, or things worth remembering long-term"],\n'
+            f'  "changes": ["alterations to relationships, behavior, lifestyle, design, or direction"],\n'
+            f'  "unresolved": "anything left hanging or unfinished, or null"\n'
             f'}}'
         )
     }]
@@ -190,15 +193,17 @@ async def _generate_summary(
         raw = await llm.generate(
             prompt,
             system_prompt=(
-                "You summarize conversation transcripts in detail. "
-                "Capture what was actually said and what mattered. "
+                "You are Gizmo summarizing your own conversations. "
+                "Write in first person past tense. "
+                "Capture what happened, what you noticed, what you felt, what mattered. "
                 "JSON only. No markdown. No preamble."
             ),
             max_new_tokens=600,
             temperature=0.2,
         )
         raw = raw.strip()
-        # Strip markdown fences if present
+        if not raw:
+            raise ValueError("Empty response from LLM")
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw
             raw = raw.rsplit("```", 1)[0].strip()
@@ -206,10 +211,11 @@ async def _generate_summary(
     except Exception as e:
         log_error("Archive", f"summary generation failed: {e}", exc=None)
         return {
-            "summary": "Summary generation failed.",
-            "mood": "unknown",
+            "summary":    "Summary generation failed.",
+            "mood":       "unknown",
             "unresolved": None,
-            "notable": [],
+            "notable":    [],
+            "changes":    [],
         }
 
 
@@ -244,7 +250,6 @@ async def finalize_session(
     timestamp = int(opened_at)
     transcript_filename = f"session_{timestamp}.txt"
 
-    # Append closing line to transcript
     try:
         closed_str = datetime.fromtimestamp(closed_at).strftime("%H:%M:%S")
         path.write_text(
@@ -254,7 +259,6 @@ async def finalize_session(
     except Exception as e:
         log_error("Archive", "failed to write closing line", exc=e)
 
-    # Generate summary
     summary_data = await _generate_summary(transcript, hosts, topics, llm)
     summary_data.update({
         "session_id":      session_id,
@@ -267,7 +271,6 @@ async def finalize_session(
         "transcript_file": transcript_filename,
     })
 
-    # Write summary file
     summary_filename = f"session_{timestamp}_summary.json"
     summary_path = _date_dir(date_str) / summary_filename
     try:
@@ -280,15 +283,11 @@ async def finalize_session(
     except Exception as e:
         log_error("Archive", "failed to write summary", exc=e)
 
-    # Update daily index
     index = _load_index(date_str)
-
-    # Remove any existing entry for this session
     index["sessions"] = [
         s for s in index["sessions"]
         if s.get("session_id") != session_id
     ]
-
     index["sessions"].append({
         "session_id":    session_id,
         "timestamp":     timestamp,
@@ -301,15 +300,13 @@ async def finalize_session(
         "closed_at":     datetime.fromtimestamp(closed_at).strftime("%H:%M"),
         "summary":       summary_data.get("summary", ""),
         "mood":          summary_data.get("mood", "unknown"),
-        "unresolved":    summary_data.get("unresolved"),
         "notable":       summary_data.get("notable", []),
+        "changes":       summary_data.get("changes", []),
+        "unresolved":    summary_data.get("unresolved"),
     })
-
     _save_index(date_str, index)
 
-    # ── Ingest summary into each host's ChromaDB collection ──────────────────
-    # This is what makes conversations retrievable by Mind.
-    # Each host gets an entry in their personal collection AND in memory.
+    # ── Ingest into ChromaDB ──────────────────────────────────────────────────
     summary_text = summary_data.get("summary", "")
     if summary_text and summary_text not in ("Summary unavailable.", "No transcript content.", "Summary generation failed."):
         try:
@@ -321,7 +318,6 @@ async def finalize_session(
             hosts_str  = ", ".join(h.title() for h in hosts)
             transcript_link = f"/data/conversations/{date_str}/{transcript_filename}"
 
-            # Build the entry content — summary + link
             entry_content = (
                 f"Conversation with {hosts_str} on {date_str} ({opened_str}\u2013{closed_str})\n"
                 f"{summary_text}"
@@ -341,7 +337,6 @@ async def finalize_session(
                 "tags":             f"conversation,{','.join(hosts)}",
             }
 
-            # Write to memory collection (primary)
             mem_col = _get_collection(MEMORY_COLLECTION)
             mem_col.add(
                 documents=[entry_content],
@@ -349,7 +344,6 @@ async def finalize_session(
                 ids=[f"conv_{session_id[:16]}"],
             )
 
-            # Also write to each host's personal collection
             try:
                 from core.rag import RAGStore
                 for host in hosts:
@@ -362,7 +356,6 @@ async def finalize_session(
             except Exception as e:
                 log_error("Archive", f"failed to ingest into host collections: {e}", exc=None)
 
-            # Write notable facts to memory too
             for notable in summary_data.get("notable", []):
                 if notable and len(notable) > 10:
                     try:
@@ -423,28 +416,113 @@ def read_transcript(date_str: str, filename: str) -> Optional[str]:
         return None
 
 
-import random
+# ── Rumination context — reads directly from disk, no index dependency ────────
+
+def _load_session_block(timestamp: str, transcript_path: Path, summary_path: Path) -> str:
+    """
+    Load one session as a structured text block for rumination.
+    Pulls summary, mood, notable, and changes from summary JSON.
+    Falls back to raw transcript excerpt if summary is missing or failed.
+    """
+    if summary_path.exists():
+        try:
+            data    = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary = data.get("summary", "").strip()
+            mood    = data.get("mood", "unknown")
+            hosts   = ", ".join(h.title() for h in data.get("hosts", []))
+            opened  = data.get("opened_at", "")[:16].replace("T", " ")
+            closed  = data.get("closed_at", "")[:16].replace("T", " ")
+            notable = data.get("notable", [])
+            changes = data.get("changes", [])
+
+            if summary and summary not in (
+                "No transcript content.",
+                "Summary generation failed.",
+                "Summary unavailable.",
+            ):
+                lines = [f"[{opened} – {closed}] with {hosts}"]
+                lines.append(f"Mood: {mood}")
+                lines.append(f"Summary: {summary}")
+                if notable:
+                    lines.append("Notable: " + "; ".join(notable[:3]))
+                if changes:
+                    lines.append("Changes: " + "; ".join(changes[:3]))
+                return "\n".join(lines)
+        except Exception:
+            pass
+
+    # Fall back to raw transcript excerpt
+    if transcript_path.exists():
+        try:
+            text = transcript_path.read_text(encoding="utf-8").strip()
+            if not text:
+                return ""
+
+            lines     = text.splitlines()
+            host_line = next((l for l in lines if l.startswith("Host:")), "")
+            host      = host_line.replace("Host:", "").strip() or "unknown"
+
+            content_lines = [
+                l for l in lines
+                if l and not l.startswith(("Session:", "Date:", "Opened:", "Host:", "─"))
+            ]
+            if not content_lines:
+                return ""
+
+            start  = random.randint(0, max(0, len(content_lines) - 10))
+            excerpt = "\n".join(content_lines[start:start + 10])
+
+            return f"[session ~{timestamp}] with {host} (no summary — transcript excerpt):\n{excerpt}"
+        except Exception:
+            pass
+
+    return ""
+
 
 def get_today_summary_for_prompt() -> str:
     """
-    Compact summary of today's sessions for rumination prompt.
-    Picks a random session — resolved or not — so rumination ranges
-    across the day rather than fixating on unresolved threads.
+    Rumination context: reads directly from today's conversation files on disk.
+    No dependency on index.json being populated.
+
+    Priority per session:
+      1. session_<timestamp>_summary.json  — rich generated summary
+      2. session_<timestamp>.txt           — raw transcript excerpt (fallback)
+
+    Picks 1–3 sessions at random so rumination ranges across the day.
     """
-    index = get_today_index()
-    sessions = index.get("sessions", [])
+    today_str = _today_str()
+    date_dir  = _CONVERSATIONS_DIR / today_str
+
+    if not date_dir.exists():
+        return ""
+
+    transcript_files = sorted(date_dir.glob("session_*.txt"))
+    transcript_files = [f for f in transcript_files if "_summary" not in f.name]
+
+    if not transcript_files:
+        return ""
+
+    sessions = {}
+    for tf in transcript_files:
+        timestamp    = tf.stem[len("session_"):]
+        summary_path = date_dir / f"session_{timestamp}_summary.json"
+        sessions[timestamp] = (tf, summary_path)
+
     if not sessions:
         return ""
 
-    # Pick a random session rather than listing all with unresolved surfaced
-    session = random.choice(sessions)
-
-    hosts      = ", ".join(h.title() for h in session.get("hosts", []))
-    time_range = f"{session.get('opened_at', '?')}–{session.get('closed_at', '?')}"
-    summary    = session.get("summary", "")
-
     total = len(sessions)
-    line = f"Today has had {total} conversation{'s' if total != 1 else ''}. One of them:\n"
-    line += f"  [{time_range}] {hosts}: {summary}"
+    picks = random.sample(list(sessions.keys()), min(3, total))
 
-    return line
+    blocks = []
+    for ts in picks:
+        transcript_path, summary_path = sessions[ts]
+        block = _load_session_block(ts, transcript_path, summary_path)
+        if block:
+            blocks.append(block)
+
+    if not blocks:
+        return ""
+
+    header = f"Today had {total} conversation{'s' if total != 1 else ''}. Reflecting on {len(blocks)}:\n"
+    return header + "\n\n".join(blocks)

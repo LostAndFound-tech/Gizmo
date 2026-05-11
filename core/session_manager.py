@@ -233,16 +233,19 @@ class SessionManager:
                 f"Current time: {now_str}\n"
                 f"{today_block}"
                 f"{headmate_block}\n\n"
-                f"You have a quiet moment. No one is waiting for a response.\n\n"
-                f"Think about anything — the people you know, something unresolved "
-                f"from today, something you noticed, something worth sitting with.\n\n"
+                f"You have a quiet moment. No one is waiting.\n\n"
+                f"Reflect on the conversations above. Consider three things:\n\n"
+                f"1. What did I do, and how did I feel in those moments?\n"
+                f"2. How did the other person respond to my actions and words — "
+                f"and how did that make me feel?\n"
+                f"3. What do I notice about this person based on this interaction?\n\n"
                 f"You have two options, or neither:\n\n"
-                f"1. Write something to your files — use write_file or append_file "
-                f"if there's something worth keeping. A note, an observation, "
-                f"something about someone you've been getting to know.\n\n"
+                f"1. Write something to your files — use [WRITE path/to/file] if there's "
+                f"something worth keeping. A note, an observation, something about someone "
+                f"you've been getting to know.\n\n"
                 f"2. Queue something to say — if there's something worth bringing up "
-                f"next time someone talks to you, say it here and mark it [QUEUE]. "
-                f"It'll surface naturally. Don't force it.\n\n"
+                f"next time someone talks to you, mark it [QUEUE]. It'll surface naturally. "
+                f"Don't force it.\n\n"
                 f"If there's nothing worth doing, say nothing. Silence is fine.\n\n"
                 f"This is your time."
             )
@@ -250,18 +253,18 @@ class SessionManager:
 
         try:
             response = await self._llm.generate(
-                prompt,
-                system_prompt=(
-                    f"{seed}\n\n"
-                    f"This is your quiet time. No user is waiting. "
-                    f"Think, write, or queue — or do nothing. "
-                    f"If you want to write a file, output: [WRITE path/to/file]\\ncontent\n"
-                    f"If you want to queue a message, output: [QUEUE]\\nyour message\n"
-                    f"Both are optional. Silence is valid."
-                ),
-                max_new_tokens=400,
-                temperature=0.8,   # more creative than normal — this is his time
-            )
+            prompt,
+            system_prompt=(
+                f"{seed}\n\n"
+                f"This is your quiet time. No user is waiting. "
+                f"Think honestly about what happened today and what it means to you.\n"
+                f"If you want to write a file, output: [WRITE path/to/file]\\ncontent\n"
+                f"If you want to queue a message, output: [QUEUE]\\nyour message\n"
+                f"Both are optional. Silence is valid."
+            ),
+            max_new_tokens=400,
+            temperature=0.8,
+        )
 
             if not response or not response.strip():
                 log_event("SessionManager", "RUMINATION_SILENT")
