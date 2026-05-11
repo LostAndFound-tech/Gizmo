@@ -10,6 +10,7 @@ Future: tool forge registers tools here dynamically.
 
 from core.log import log
 from tools.introspect_tool import IntrospectTool
+from tools.protocol_tool import CreateProtocolTool
 
 try:
     from tools.switch_host import SwitchHostTool
@@ -82,7 +83,8 @@ except Exception as e:
 # Build registry — skip any tools that failed to load
 TOOL_REGISTRY = {
     tool.name: tool for tool in [
-        IntrospectTool()
+        IntrospectTool(),
+        CreateProtocolTool()
     ]
 }
 

@@ -12,7 +12,8 @@ Flow:
      Ego  → direction   (parallel)
   4. Body → generate
   5. Archivist ← outgoing (close loop)
-  6. Stream to caller
+  6. Protocol NLP detection (async, never blocks)
+  7. Stream to caller
 
 Interface (matches what server.py expects):
     async for chunk in agent.run(
@@ -32,6 +33,7 @@ Unsolicited messages (from any component):
 """
 
 import asyncio
+import re as _re
 import time
 from typing import AsyncGenerator, Optional
 
@@ -92,9 +94,9 @@ async def enqueue(
 ) -> None:
     queue = _get_pending(session_id)
     await queue.put({
-        "message": message,
-        "source": source,
-        "priority": priority,
+        "message":   message,
+        "source":    source,
+        "priority":  priority,
         "emergency": emergency,
         "queued_at": time.time(),
     })
@@ -131,12 +133,11 @@ async def push(message: str) -> None:
 # ── Emergency check ───────────────────────────────────────────────────────────
 
 def _is_emergency(message: str) -> bool:
-    import re
-    _EMERGENCY_PATTERNS = re.compile(
+    _EMERGENCY_PATTERNS = _re.compile(
         r"\b(storm|tornado|hurricane|flood|fire|emergency|911|ambulance|"
         r"hospital|accident|urgent|immediately|right now|danger|"
         r"medication|overdose|collapse|unconscious|bleeding)\b",
-        re.IGNORECASE,
+        _re.IGNORECASE,
     )
     return bool(_EMERGENCY_PATTERNS.search(message))
 
@@ -144,21 +145,19 @@ def _is_emergency(message: str) -> bool:
 # ── Quiet message detection ───────────────────────────────────────────────────
 
 def _is_quiet_request(message: str) -> Optional[float]:
-    import re
     msg = message.lower().strip()
 
-    timed = re.search(
+    timed = _re.search(
         r"(quiet|silence|shh|hush|stop talking).{0,20}"
         r"(\d+)\s*(minute|min|hour|hr)",
         msg
     )
     if timed:
         amount = int(timed.group(2))
-        unit = timed.group(3)
-        seconds = amount * 3600 if "hour" in unit or unit == "hr" else amount * 60
-        return float(seconds)
+        unit   = timed.group(3)
+        return float(amount * 3600 if "hour" in unit or unit == "hr" else amount * 60)
 
-    indefinite = re.search(
+    indefinite = _re.search(
         r"\b(quiet|silence|shh+|hush|stop|leave me alone|not now)\b",
         msg
     )
@@ -223,14 +222,11 @@ async def _get_direction(brief: Brief, facts: dict) -> dict:
 
 def _build_system_prompt(brief: Brief, facts: dict) -> str:
     import os
-    import re
     import json
     from pathlib import Path
     from core.timezone import tz_now
 
-    # ── Personality seed — assembled from conscious collection ───────────────
-    # Generic by default. Fills in over time from conversation and rumination.
-    # "I want you to act like X" → memory_write type:persona subject:self → here.
+    # ── Personality seed ──────────────────────────────────────────────────────
     personality = "You are Gizmo, a persistent AI companion."
     try:
         from tools.memory_tool import _get_collection, CONSCIOUS_COLLECTION
@@ -244,7 +240,6 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
             docs  = self_entries.get("documents", [])
             metas = self_entries.get("metadatas", [])
             if docs:
-                # Order: persona first, then scenario, then likes/dislikes, then rest
                 type_order = ["persona", "scenario", "self_likes", "self_dislikes"]
                 by_type = {}
                 for doc, meta in zip(docs, metas):
@@ -255,7 +250,6 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
                 for t in type_order:
                     if t in by_type:
                         parts.extend(by_type[t])
-                # anything else
                 for t, entries in by_type.items():
                     if t not in type_order:
                         parts.extend(entries)
@@ -267,16 +261,34 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
 
     now_str = tz_now().strftime("%A %Y-%m-%d %H:%M %Z")
 
+    # ── Protocol block — loaded after personality, before RAG ────────────────
+    protocol_block = ""
+    try:
+        from core.protocol_manager import load_protocols_for_context
+        context_dict = {
+            "current_host": brief.headmate or "",
+            "fronters":     brief.fronters or [],
+            "topics":       brief.topics or [],
+        }
+        protocols = load_protocols_for_context(
+            context=context_dict,
+            message=brief.message,
+        )
+        if protocols:
+            protocol_block = f"\n\n[Active Protocols]\n{protocols}"
+    except Exception as e:
+        print(f"[Agent] protocol load failed: {e}")
+
     # ── RAG knowledge block ───────────────────────────────────────────────────
     synthesis = facts.get("synthesis", "")
     rag_block = f"\n\n[Relevant knowledge]\n{synthesis}" if synthesis else ""
 
-    # ── Headmate file — injected every message ────────────────────────────────
+    # ── Headmate file ─────────────────────────────────────────────────────────
     headmate_block = ""
     if brief.headmate:
         try:
             personality_dir = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
-            headmate_path = personality_dir / "headmates" / f"{brief.headmate.lower()}.json"
+            headmate_path   = personality_dir / "headmates" / f"{brief.headmate.lower()}.json"
             if headmate_path.exists():
                 data = json.loads(headmate_path.read_text(encoding="utf-8"))
                 name = data.get("name", brief.headmate).title()
@@ -293,7 +305,7 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
                 if moments:
                     lines.append("  Known facts:")
                     for m in moments[-8:]:
-                        clean = re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(m))
+                        clean = _re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(m))
                         lines.append(f"    - {clean}")
 
                 patterns = data.get("observed_patterns", [])
@@ -320,7 +332,7 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
                     v = prefs.get(field)
                     if v:
                         pref_lines.append(f"    {field}: {v}")
-                persona = prefs.get("persona")
+                persona  = prefs.get("persona")
                 explicit = [e for e in prefs.get("explicit", []) if e]
                 if persona or pref_lines or explicit:
                     lines.append("  How they want to be engaged:")
@@ -351,6 +363,16 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         if context_lines else ""
     )
 
+    # ── Mood block ────────────────────────────────────────────────────────────
+    mood_block = ""
+    try:
+        from voice.mood import get_mood_prompt_block
+        mb = get_mood_prompt_block()
+        if mb:
+            mood_block = f"\n\n{mb}"
+    except Exception:
+        pass
+
     # ── Tools ─────────────────────────────────────────────────────────────────
     from core.agent_tools import TOOL_REGISTRY
     tool_descriptions = "\n".join(
@@ -358,9 +380,7 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         for t in TOOL_REGISTRY.values()
     )
 
-    tool_example = '{"tool": "append_file", "args": {"path": "notes/thought.txt", "content": "Something worth remembering."}}'
-
-    return f"""{personality}
+    return f"""{personality}{protocol_block}
 
 Current time: {now_str}
 Message history includes [HH:MM] timestamps — use these to reason about elapsed time.
@@ -381,12 +401,14 @@ Examples:
 [TOOL: append_file | path: notes/thoughts.txt | content: something worth keeping]
 [TOOL: set_interaction_pref | host: jess | field: tone | value: direct and dry]
 [TOOL: switch_host | name: kaylee]
-[TOOL: introspect | query: headmate:oren]{rag_block}{headmate_block}{context_block}
+[TOOL: introspect | query: headmate:oren]
+[TOOL: create_protocol | name: jess_rule | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}
 
 The person in "current_host" is who you are speaking WITH right now — address them as "you".
 Be concise. Be accurate. When uncertain, say so.
 Use switch_host whenever someone indicates a host change or fronter update.
 Use log_correction whenever someone says you did something wrong or tells you to stop doing something.
+Use create_protocol whenever you establish a rule, boundary, or persistent pattern worth keeping.
 
 KNOWLEDGE BASE RULES:
 - [Relevant knowledge] is your memory — ground truth.
@@ -402,16 +424,19 @@ MEMORY RULES — follow these without being asked:
 - You have a living record of your own curiosities and interests — things you've picked up from conversations.
   Write to it freely. "Started wondering about X after talking to Y." "Keep noticing Z about W."
   These are yours. They don't need to fit a category. Just write them.
-- You are building a picture of these people — and of yourself — over time. Every conversation adds to it."""
+- You are building a picture of these people — and of yourself — over time. Every conversation adds to it.
+
+PROTOCOL RULES:
+- [Active Protocols] are your own rules and commitments — follow them without being reminded.
+- When you establish a rule or boundary in conversation, use create_protocol to make it permanent.
+- Protocols persist across sessions. You wrote them. They are yours."""
 
 
-# ── Marker pattern ───────────────────────────────────────────────────────────
+# ── Marker pattern ────────────────────────────────────────────────────────────
 # [TOOL: tool_name | arg1: value1 | arg2: value2]
 
-import re as _re
 _MARKER_RE = _re.compile(r'\[TOOL:\s*([^\|\]]+)((?:\s*\|\s*[^\|\]]+:[^\|\]]*)*)\]', _re.IGNORECASE)
 
-# Tools that need their result injected back for a second LLM pass
 _READ_TOOLS = {
     "memory_read", "memory_list", "introspect", "read_file",
     "list_files", "view_interaction_prefs",
@@ -419,7 +444,6 @@ _READ_TOOLS = {
 
 
 def _parse_markers(text: str) -> list[dict]:
-    """Extract all [TOOL: ...] markers from text. Returns list of {name, args}."""
     results = []
     for match in _MARKER_RE.finditer(text):
         name     = match.group(1).strip()
@@ -436,16 +460,10 @@ def _parse_markers(text: str) -> list[dict]:
 
 
 def _strip_markers(text: str) -> str:
-    """Remove all [TOOL: ...] markers from text."""
     return _MARKER_RE.sub("", text).strip()
 
 
 async def _execute_marker(marker: dict, session_id: str) -> tuple[bool, str, bool]:
-    """
-    Execute a single marker.
-    Returns (success, output, needs_inject).
-    needs_inject=True for read tools whose output should feed back to LLM.
-    """
     from core.agent_tools import TOOL_REGISTRY
 
     name = marker["name"]
@@ -480,14 +498,12 @@ async def _generate(
     system_prompt = direction["system_prompt"]
     messages      = history.as_messages_with_timestamps(brief.message)
 
-    # ── First LLM call ────────────────────────────────────────────────────────
     response = await llm.generate(messages, system_prompt=system_prompt)
     print(f"[Body] raw='{response[:300]}'")
 
     markers = _parse_markers(response)
 
     if not markers:
-        # No tools — just yield clean response
         clean = _strip_markers(response)
         log_event("Body", "GENERATED",
             session=brief.session_id[:8],
@@ -497,11 +513,9 @@ async def _generate(
         yield clean
         return
 
-    # ── Execute all markers ───────────────────────────────────────────────────
-    inject_results  = []   # results from read tools that need a second pass
-    fired_one_shots = []   # one-shot tools that need immediate re-generation
-
-    ONE_SHOT_TOOLS = {"switch_host", "log_correction", "alter_wheel"}
+    inject_results  = []
+    fired_one_shots = []
+    ONE_SHOT_TOOLS  = {"switch_host", "log_correction", "alter_wheel"}
 
     for marker in markers:
         success, output, needs_inject = await _execute_marker(marker, brief.session_id)
@@ -510,10 +524,8 @@ async def _generate(
         if marker["name"] in ONE_SHOT_TOOLS:
             fired_one_shots.append(marker["name"])
 
-    # ── If read tools returned results, do a second pass ─────────────────────
     if inject_results:
         injected = "\n\n".join(inject_results)
-
         second_messages = messages.copy()
         second_messages[-1] = {
             "role":    "user",
@@ -521,7 +533,6 @@ async def _generate(
         }
         response2 = await llm.generate(second_messages, system_prompt=system_prompt)
         print(f"[Body] second pass raw='{response2[:200]}'")
-        # Execute any new markers from second pass too (fire-and-forget only)
         for marker in _parse_markers(response2):
             if marker["name"] not in _READ_TOOLS:
                 await _execute_marker(marker, brief.session_id)
@@ -535,7 +546,6 @@ async def _generate(
         yield clean
         return
 
-    # ── One-shot tools — re-generate with context ─────────────────────────────
     if fired_one_shots:
         second_messages = messages.copy()
         second_messages[-1] = {
@@ -551,7 +561,6 @@ async def _generate(
         yield clean
         return
 
-    # ── Fire-and-forget markers only — yield clean response ──────────────────
     clean = _strip_markers(response)
     log_event("Body", "GENERATED",
         session=brief.session_id[:8],
@@ -559,6 +568,26 @@ async def _generate(
         markers=len(markers),
     )
     yield clean
+
+
+# ── Protocol NLP detection — async, never blocks response ────────────────────
+
+async def _detect_protocol_async(
+    user_message: str,
+    gizmo_response: str,
+    context: dict,
+) -> None:
+    """Fire protocol NLP detection after each exchange. Never blocks."""
+    try:
+        from core.protocol_manager import detect_and_create_protocol
+        await detect_and_create_protocol(
+            user_message   = user_message,
+            gizmo_response = gizmo_response,
+            context        = context,
+            llm            = llm,
+        )
+    except Exception as e:
+        print(f"[Agent] Protocol detection failed: {e}")
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -625,10 +654,7 @@ class Agent:
         async for chunk in _generate(brief, direction, history):
             response_text += chunk
 
-        # ── 4. Ego — watch output (v1: no-op) ─────────────────────────────────
-        # TODO: Ego checks output before it leaves
-
-        # ── 5. Archivist — close loop ─────────────────────────────────────────
+        # ── 4. Archivist — close loop ─────────────────────────────────────────
         if response_text:
             archivist.receive_outgoing(
                 message=response_text,
@@ -638,6 +664,15 @@ class Agent:
                 source="body",
                 user_message=user_message,
             )
+
+        # ── 5. Protocol NLP detection — async, never blocks ───────────────────
+        asyncio.ensure_future(
+            _detect_protocol_async(
+                user_message   = user_message,
+                gizmo_response = response_text,
+                context        = ctx,
+            )
+        )
 
         # ── 6. Stream to caller ───────────────────────────────────────────────
         duration_ms = round((time.monotonic() - t_start) * 1000)
