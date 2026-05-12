@@ -32,6 +32,7 @@ from core.llm import llm
 from memory.history import get_session
 from core.personality_growth import retrieve_personality
 from memory.overview import get_overview
+from core.message_parser import ParsedMessage as _PM
 
 # ── Quiet mode ────────────────────────────────────────────────────────────────
 
@@ -509,6 +510,22 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         context_lines.append(f"  fronters: {', '.join(brief.fronters)}")
     if brief.emotional_register != "neutral":
         context_lines.append(f"  emotional_register: {brief.emotional_register}")
+    # ── Stage directions block ────────────────────────────────────────────────
+    stage_block = ""
+    if getattr(brief, "stage_directions", None):
+        # Reuse the formatter from ParsedMessage
+        lines = ["[Stage]"]
+        for s in brief.stage_directions:
+            lines.append(f"  - {s}")
+        stage_block = "\n\n" + "\n".join(lines)
+ 
+    # ── Lore block ────────────────────────────────────────────────────────────
+    lore_block = ""
+    if getattr(brief, "lore", None):
+        lines = ["[Context]"]
+        for l in brief.lore:
+            lines.append(f"  - {l}")
+        lore_block = "\n\n" + "\n".join(lines)
     if brief.field_snapshot.get("hot"):
         context_lines.append(f"  active_topics: {', '.join(brief.field_snapshot['hot'])}")
     context_block = (
@@ -599,7 +616,7 @@ Examples:
 [TOOL: set_interaction_pref | host: jess | field: tone | value: direct and dry]
 [TOOL: switch_host | name: kaylee]
 [TOOL: introspect | query: headmate:oren]
-[TOOL: create_protocol | name: jess_rules | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}{overview_block}
+[TOOL: create_protocol | name: jess_rules | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}{stage_block}{lore_block}
 
 The person in "current_host" is who you are speaking WITH right now — address them as "you".
 Be concise. Be accurate. When uncertain, say so.
