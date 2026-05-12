@@ -13,11 +13,11 @@ from tools.base_tool import BaseTool, ToolResult
 class CreateProtocolTool(BaseTool):
     name        = "create_protocol"
     description = (
-        "Create a persistent protocol — a rule, boundary, or piece of information "
-        "I want to remember and apply in future conversations. "
-        "Returns immediately and confirms when done. "
-        "Use this when I've established something that should persist beyond this session."
-    )
+    "Create a persistent behavioral protocol — a rule, boundary, or standing instruction "
+    "that should change how I behave in future conversations. "
+    "Use this for rules, limits, and patterns worth keeping permanently. "
+    "NOT for drafts, notes, working documents, or things we're building together."
+)
     args_schema = {
         "name":        {"type": "string", "description": "Short unique name for this protocol"},
         "content":     {"type": "string", "description": "The full protocol text"},

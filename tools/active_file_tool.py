@@ -13,12 +13,13 @@ from tools.base_tool import BaseTool, ToolResult
 class SetActiveFileTool(BaseTool):
     name        = "set_active_file"
     description = (
-        "Open a file as an active working document for this session. "
-        "Mode 'write': I'll automatically append my responses to it each turn. "
-        "Mode 'read': its contents will be injected into my context each turn so I always have it. "
-        "Mode 'both': do both — useful when we're building something together and want to track it live. "
-        "Read and write can be different files."
-    )
+    "Open a working document for this session — use this when someone wants to "
+    "draft, build, brainstorm, or review something together in real time. "
+    "NOT for behavioral rules or persistent instructions (use create_protocol for those). "
+    "Mode 'write': auto-append my responses each turn. "
+    "Mode 'read': inject file contents into my context each turn. "
+    "Mode 'both': do both — default for collaborative work."
+)
     args_schema = {
         "path":  {"type": "string", "description": "File path (e.g. notes/session.md)"},
         "label": {"type": "string", "description": "Human-readable name (e.g. 'our brainstorm')", "default": ""},
