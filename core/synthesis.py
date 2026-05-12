@@ -12,6 +12,9 @@ Changes from original:
   - DISTANCE_THRESHOLD reduced from 2.0 → 1.3 (2.0 was effectively no filter)
   - Extracted facts from memory_writer pulled in as a priority lane —
     speaker-filtered, so each headmate only sees their own facts
+  - persona_prefix() used as system prompt so synthesis is always written
+    through the correct relational lens
+  - time_context_block() injected into user prompt for temporal grounding
 """
 
 import re
@@ -20,10 +23,9 @@ from typing import Optional
 from core.rag import RAGStore, CHROMA_PERSIST_DIR
 import chromadb
 
-DISTANCE_THRESHOLD = 1.3          # was 2.0 — that's essentially no filter
+DISTANCE_THRESHOLD = 1.3
 AMBIENT_COLLECTION = "ambient_log"
 
-# Temporal signal patterns — trigger time-filtered ambient retrieval
 _TEMPORAL_PATTERNS = re.compile(
     r"\b(earlier today|this morning|this afternoon|this evening|"
     r"a (little |while )?(ago|earlier)|just now|recently|"
@@ -32,7 +34,6 @@ _TEMPORAL_PATTERNS = re.compile(
     r"i mentioned|you heard|did (i|you) (say|mention|talk))\b",
     re.IGNORECASE,
 )
-
 
 _PERSONAL_QUERY_PATTERN = re.compile(
     r"\b(what (do i|does .* )(like|hate|enjoy|prefer|think|believe|care)|"
@@ -45,7 +46,6 @@ _PERSONAL_QUERY_PATTERN = re.compile(
 
 
 def _is_personal_query(query: str) -> bool:
-    """Is this query explicitly asking about someone's personality/preferences?"""
     return bool(_PERSONAL_QUERY_PATTERN.search(query))
 
 
@@ -74,10 +74,6 @@ def _get_all_collections() -> list[str]:
 
 
 def _extract_topics_from_chunks(chunks: list[dict]) -> list[str]:
-    """
-    Pull all unique topic tags from retrieved chunks' metadata.
-    Used to surface related topics in the synthesis output.
-    """
     all_topics = set()
     for chunk in chunks:
         meta = chunk.get("metadata", {})
@@ -91,11 +87,6 @@ def _extract_topics_from_chunks(chunks: list[dict]) -> list[str]:
 
 
 def _get_personality_block(current_host: Optional[str]) -> str:
-    """
-    Pull stored personality signals for the current host and format
-    as a context block for the synthesis prompt.
-    Returns empty string if no signals or personality module unavailable.
-    """
     if not current_host:
         return ""
     try:
@@ -106,13 +97,6 @@ def _get_personality_block(current_host: Optional[str]) -> str:
 
 
 def _get_facts_block(query: str, current_host: Optional[str]) -> str:
-    """
-    Pull extracted facts for the current speaker from memory_writer.
-    Returns a labelled block ready to prepend to the synthesis chunks,
-    or empty string if nothing found.
-
-    Facts are speaker-filtered so each headmate only sees their own.
-    """
     if not current_host:
         return ""
     try:
@@ -138,22 +122,13 @@ async def retrieve_and_synthesize(
     current_host: Optional[str] = None,
     fronters: Optional[list] = None,
     history_summary: Optional[str] = None,
-    n_per_collection: int = 8,          # raised from 5 — more signal per collection
+    n_per_collection: int = 8,
     llm=None,
 ) -> str:
-    """
-    Query all collections including ambient_log, synthesize into one context block.
+    from core.persona import persona_prefix_multi
+    from core.temporal import time_context_block
 
-    Temporal queries ("earlier today", "what were we talking about") get
-    additional time-filtered retrieval from ambient_log.
-
-    Personality signals for current_host are injected into the prompt
-    so responses naturally reflect what's known about the person.
-
-    Extracted facts (from memory_writer) are retrieved first as a
-    priority lane, speaker-filtered to the current headmate.
-    """
-    all_known = _get_all_collections()
+    all_known  = _get_all_collections()
     is_temporal = _is_temporal_query(query)
 
     if is_temporal:
@@ -171,18 +146,15 @@ async def retrieve_and_synthesize(
             if name and name not in priority:
                 priority.append(name)
 
-    # Everything else except ambient (ambient added explicitly at end)
     non_ambient = [c for c in all_known if c not in priority and c != AMBIENT_COLLECTION]
     collections_to_search = priority + non_ambient
     if "main" not in collections_to_search:
         collections_to_search.append("main")
 
     # ── Priority lane: extracted facts for current speaker ────────────────────
-    # These are retrieved before general chunks and prepended at the top
-    # of the synthesis context so they're always visible to the LLM.
     facts_block = _get_facts_block(query, current_host)
 
-    # ── Standard semantic retrieval across all non-ambient collections ────────
+    # ── Standard semantic retrieval ───────────────────────────────────────────
     all_chunks = []
     for collection_name in collections_to_search:
         store = _get_collection_store(collection_name)
@@ -191,20 +163,16 @@ async def retrieve_and_synthesize(
         try:
             results = store.retrieve(query, n_results=n_per_collection)
             for r in results:
-                # Skip personality signals from general retrieval —
-                # they're handled separately via _get_personality_block
                 if r.get("metadata", {}).get("type") == "personality_signal":
                     continue
-                # Skip extracted facts from general retrieval —
-                # they come in via the priority lane above
                 if r.get("metadata", {}).get("type") == "extracted_fact":
                     continue
                 all_chunks.append({
                     "collection": collection_name,
-                    "text": r["text"],
-                    "distance": r["distance"],
-                    "metadata": r.get("metadata", {}),
-                    "source": "memory",
+                    "text":       r["text"],
+                    "distance":   r["distance"],
+                    "metadata":   r.get("metadata", {}),
+                    "source":     "memory",
                 })
         except Exception as e:
             print(f"[Synthesis] Error querying '{collection_name}': {e}")
@@ -214,34 +182,29 @@ async def retrieve_and_synthesize(
     if ambient_store is not None:
         try:
             if is_temporal:
-                # Time-filtered retrieval: past 8 hours
                 ambient_results = ambient_store.retrieve_recent(
-                    query=query,
-                    hours_back=8,
-                    n_results=6,
+                    query=query, hours_back=8, n_results=6,
                 )
                 print(f"[Synthesis] Temporal ambient results: {len(ambient_results)}")
             else:
-                # Standard semantic retrieval from ambient
                 ambient_results = ambient_store.retrieve(query, n_results=4)
 
             for r in ambient_results:
-                meta = r.get("metadata", {})
+                meta       = r.get("metadata", {})
                 time_label = meta.get("time", "")
-                # Include speaker attribution in label if available
-                speaker = meta.get("speaker", "")
-                if speaker and time_label:
-                    label = f"ambient @ {time_label}, {speaker}"
+                spkr       = meta.get("speaker", "")
+                if spkr and time_label:
+                    label = f"ambient @ {time_label}, {spkr}"
                 elif time_label:
                     label = f"ambient @ {time_label}"
                 else:
                     label = AMBIENT_COLLECTION
                 all_chunks.append({
                     "collection": label,
-                    "text": r["text"],
-                    "distance": r["distance"],
-                    "metadata": meta,
-                    "source": "ambient",
+                    "text":       r["text"],
+                    "distance":   r["distance"],
+                    "metadata":   meta,
+                    "source":     "ambient",
                 })
         except Exception as e:
             print(f"[Synthesis] Error querying ambient_log: {e}")
@@ -259,17 +222,19 @@ async def retrieve_and_synthesize(
 
     relevant = relevant[:12]
 
-    print(f"[Synthesis] Found {len(relevant)} relevant chunks across "
-          f"{len({c['collection'] for c in relevant})} collections "
-          f"({'temporal' if is_temporal else 'semantic'})")
+    print(
+        f"[Synthesis] Found {len(relevant)} relevant chunks across "
+        f"{len({c['collection'] for c in relevant})} collections "
+        f"({'temporal' if is_temporal else 'semantic'})"
+    )
 
-    # ── Extract related topics for synthesis context ───────────────────────────
+    # ── Related topics ────────────────────────────────────────────────────────
     related_topics = _extract_topics_from_chunks(relevant)
     topics_hint = ""
     if related_topics:
         topics_hint = f"\nRelated topics found: {', '.join(related_topics[:8])}"
 
-    # ── Personality context — only for direct personal queries ───────────────
+    # ── Personality context — only for direct personal queries ────────────────
     personality_block = ""
     if current_host and _is_personal_query(query):
         personality_context = _get_personality_block(current_host)
@@ -290,8 +255,12 @@ async def retrieve_and_synthesize(
     if history_summary:
         history_block = f"\n\nRecent conversation summary:\n{history_summary}"
 
-    # ── Single LLM call ───────────────────────────────────────────────────────
-    chunk_count = len(relevant) + (1 if facts_block else 0)
+    # ── Persona + time ────────────────────────────────────────────────────────
+    all_present = list({s for s in ([current_host] + (fronters or [])) if s})
+    persona     = persona_prefix_multi(all_present, include_gizmo_seed=True)
+    time_ctx    = time_context_block()
+
+    chunk_count     = len(relevant) + (1 if facts_block else 0)
     collection_list = ", ".join(sorted({c["collection"] for c in relevant}))
     if facts_block:
         collection_list = f"facts:{current_host}, " + collection_list
@@ -301,42 +270,42 @@ async def retrieve_and_synthesize(
         if is_temporal else ""
     )
 
-    prompt = [
-        {
-            "role": "user",
-            "content": (
-                f"You have {chunk_count} knowledge chunks from these sources: {collection_list}."
-                f"{history_block}{personality_block}{topics_hint}{temporal_note}\n\n"
-                f"READ ALL OF THESE CHUNKS carefully before writing anything:\n\n"
-                f"{chunk_text}\n\n"
-                f"Current query: {query}\n\n"
-                f"Now write a single cohesive paragraph that combines information from "
-                f"ALL the chunks above that are relevant to the query. "
-                f"Facts tagged with 'facts:{current_host or 'speaker'}' are the highest priority — "
-                f"use them first. "
-                f"Do not just summarize the first chunk — weave together everything relevant. "
-                f"Attribute naturally where perspectives differ (e.g. 'Jonah mentioned...', 'Oren noted...'). "
-                f"For ambient chunks, include speaker and time naturally if relevant "
-                f"(e.g. 'Earlier this morning Alice mentioned...'). "
-                f"If personality/interest context is present, use it to colour your response "
-                f"naturally — don't list traits, just let them inform the answer. "
-                f"If multiple chunks say similar things, merge them into one clear statement. "
-                f"If chunks contradict, note both perspectives. "
-                f"No bullet points. No headers. Flowing prose only. "
-                f"3-6 sentences maximum."
-            )
-        }
-    ]
+    prompt = [{
+        "role": "user",
+        "content": (
+            f"{time_ctx}\n\n"
+            f"You have {chunk_count} knowledge chunks from these sources: {collection_list}."
+            f"{history_block}{personality_block}{topics_hint}{temporal_note}\n\n"
+            f"READ ALL OF THESE CHUNKS carefully before writing anything:\n\n"
+            f"{chunk_text}\n\n"
+            f"Current query: {query}\n\n"
+            f"Now write a single cohesive paragraph that combines information from "
+            f"ALL the chunks above that are relevant to the query. "
+            f"Facts tagged with 'facts:{current_host or 'speaker'}' are the highest priority — "
+            f"use them first. "
+            f"Do not just summarize the first chunk — weave together everything relevant. "
+            f"Attribute naturally where perspectives differ (e.g. 'Jonah mentioned...', 'Oren noted...'). "
+            f"For ambient chunks, include speaker and time naturally if relevant "
+            f"(e.g. 'Earlier this morning Alice mentioned...'). "
+            f"If personality/interest context is present, use it to colour your response "
+            f"naturally — don't list traits, just let them inform the answer. "
+            f"If multiple chunks say similar things, merge them into one clear statement. "
+            f"If chunks contradict, note both perspectives. "
+            f"No bullet points. No headers. Flowing prose only. "
+            f"3-6 sentences maximum."
+        )
+    }]
 
     try:
         result = await llm.generate(
             prompt,
             system_prompt=(
-                "You produce concise, attributed context summaries in flowing prose. "
-                "Never use bullet points or headers. Never invent information not present in the chunks. "
-                "For ambient memory chunks, preserve time and speaker references naturally. "
-                "Use personality context to inform tone and relevance, not to list facts. "
-                "Facts labelled with the speaker's name are ground truth — always include them."
+                f"{persona}\n\n"
+                f"You produce concise, attributed context summaries in flowing prose. "
+                f"Never use bullet points or headers. Never invent information not present in the chunks. "
+                f"For ambient memory chunks, preserve time and speaker references naturally. "
+                f"Use personality context to inform tone and relevance, not to list facts. "
+                f"Facts labelled with the speaker's name are ground truth — always include them."
             ),
             max_new_tokens=300,
             temperature=0.3,

@@ -17,7 +17,8 @@ Flow:
   5. Body → generate
   6. Archivist ← outgoing (close loop)
   7. Protocol NLP detection (async, never blocks)
-  8. Stream to caller
+  8. Fact extraction (async, never blocks) ← NEW
+  9. Stream to caller
 """
 
 import asyncio
@@ -525,6 +526,50 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
     except Exception:
         pass
 
+    # ── Overview block ────────────────────────────────────────────────────────
+    # Written through Gizmo's persona + per-fronter context so it stays
+    # in-character and avoids content-filter trips on the summary call.
+    overview_block = ""
+    try:
+        # Build persona: Gizmo's own voice + what he knows about each fronter
+        persona_parts = []
+        try:
+            gizmo_persona = retrieve_personality(
+                query=brief.message,
+                current_host=brief.headmate,
+            )
+            if gizmo_persona:
+                persona_parts.append(gizmo_persona)
+        except Exception:
+            pass
+
+        try:
+            from tools.personality_tool import get_personality_context
+            all_present = list({f for f in ([brief.headmate] + (brief.fronters or [])) if f})
+            for name in all_present:
+                ctx = get_personality_context(name)
+                if ctx:
+                    persona_parts.append(ctx)
+        except Exception:
+            pass
+
+        persona = "\n\n".join(persona_parts) or None
+
+        overview = asyncio.get_event_loop().run_until_complete(
+            get_overview(
+                session_id=brief.session_id,
+                history=brief.history if hasattr(brief, "history") else None,
+                llm=llm,
+                speaker=brief.headmate,
+                fronters=brief.fronters or [],
+            )
+        ) if hasattr(brief, "history") else ""
+
+        if overview:
+            overview_block = f"\n\n[Conversation so far]\n{overview}"
+    except Exception as e:
+        print(f"[Agent] overview build failed: {e}")
+
     # ── Tools ─────────────────────────────────────────────────────────────────
     from core.agent_tools import TOOL_REGISTRY
     tool_descriptions = "\n".join(
@@ -554,7 +599,7 @@ Examples:
 [TOOL: set_interaction_pref | host: jess | field: tone | value: direct and dry]
 [TOOL: switch_host | name: kaylee]
 [TOOL: introspect | query: headmate:oren]
-[TOOL: create_protocol | name: jess_rules | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}
+[TOOL: create_protocol | name: jess_rules | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}{overview_block}
 
 The person in "current_host" is who you are speaking WITH right now — address them as "you".
 Be concise. Be accurate. When uncertain, say so.
@@ -762,6 +807,32 @@ async def _generate(
     yield clean
 
 
+# ── Fact extraction — async, never blocks ─────────────────────────────────────
+
+async def _extract_facts_async(
+    user_message: str,
+    speaker: str,
+    session_id: str,
+    persona: Optional[str],
+) -> None:
+    """
+    Extract all subjects and facts from the user message and write
+    immediately to ChromaDB under the speaker's collection.
+    Runs fire-and-forget — never touches the response path.
+    """
+    try:
+        from memory.memory_writer import extract_and_store
+        await extract_and_store(
+            message=user_message,
+            speaker=speaker,
+            session_id=session_id,
+            llm=llm,
+            persona=persona,
+        )
+    except Exception as e:
+        log_error("Agent", "fact extraction failed", exc=e)
+
+
 # ── Protocol NLP detection — async, never blocks ──────────────────────────────
 
 async def _detect_protocol_async(
@@ -873,7 +944,40 @@ class Agent:
             )
         )
 
-        # ── 7. Stream to caller ───────────────────────────────────────────────
+        # ── 7. Fact extraction — async, never blocks ──────────────────────────
+        # Extracts every subject + fact from the user message immediately,
+        # tagged with the speaker so reads are always speaker-filtered.
+        speaker = ctx.get("current_host", "")
+        if speaker and response_text:
+            # Build persona for extraction context — same assembly as overview
+            persona_parts = []
+            try:
+                gizmo_persona = retrieve_personality(
+                    query=user_message,
+                    current_host=speaker,
+                )
+                if gizmo_persona:
+                    persona_parts.append(gizmo_persona)
+            except Exception:
+                pass
+            try:
+                from tools.personality_tool import get_personality_context
+                fronters = list(ctx.get("fronters") or [])
+                all_present = list({f for f in ([speaker] + fronters) if f})
+                for name in all_present:
+                    pctx = get_personality_context(name)
+                    if pctx:
+                        persona_parts.append(pctx)
+            except Exception:
+                pass
+
+            persona = "\n\n".join(persona_parts) or None
+
+            asyncio.ensure_future(
+                _extract_facts_async(user_message, speaker, session_id, persona)
+            )
+
+        # ── 8. Stream to caller ───────────────────────────────────────────────
         duration_ms = round((time.monotonic() - t_start) * 1000)
         log_event("Agent", "COMPLETE",
             session=session_id[:8],
@@ -885,7 +989,7 @@ class Agent:
         for i in range(0, len(response_text), chunk_size):
             yield response_text[i:i + chunk_size]
 
-        # ── 8. Drain pending insights ─────────────────────────────────────────
+        # ── 9. Drain pending insights ─────────────────────────────────────────
         await self._drain_pending(session_id)
 
     async def _drain_pending(self, session_id: str) -> None:

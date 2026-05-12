@@ -10,6 +10,12 @@ Flow:
   - For each window: identifies who was present, summarizes, ingests
   - Archives go into each fronter's collection + main
   - Session marked as archived to avoid re-processing
+
+CHANGES vs original:
+  - _summarize_window now uses persona_prefix_multi(fronters) as system prompt
+    so summaries are written through the correct relational lens
+  - time_context_block() injected into user prompt so the LLM knows when
+    the conversation happened
 """
 
 import asyncio
@@ -20,8 +26,8 @@ from typing import Optional
 from core.curiosity import decay_all as curiosity_decay
 
 INACTIVITY_THRESHOLD = 20   # archive after 20 seconds of inactivity
-WINDOW_SIZE = 4                   # messages per chunk
-CHECK_INTERVAL = 15               # check every 15 seconds
+WINDOW_SIZE          = 4    # messages per chunk
+CHECK_INTERVAL       = 15   # check every 15 seconds
 
 
 async def _summarize_window(
@@ -32,8 +38,12 @@ async def _summarize_window(
     llm,
 ) -> Optional[str]:
     """
-    Ask the LLM to distill a 4-message window into a tight memory chunk.
+    Distill a 4-message window into a tight memory chunk.
+    Written through the persona of whoever was present.
     """
+    from core.persona import persona_prefix_multi
+    from core.temporal import time_context_block
+
     transcript = "\n".join(
         f"{'User' if m['role'] == 'user' else 'Gizmo'}: {m['content']}"
         for m in messages
@@ -44,28 +54,31 @@ async def _summarize_window(
         return None
 
     fronter_list = ", ".join(sorted(fronters)) if fronters else "unknown"
+    persona      = persona_prefix_multi(list(fronters), include_gizmo_seed=True)
+    time_ctx     = time_context_block()
 
-    prompt = [
-        {
-            "role": "user",
-            "content": (
-                f"Summarize this conversation excerpt into a concise memory. "
-                f"Write it as a factual paragraph, past tense, as if recording what was discussed. "
-                f"Include who said what where perspectives differ. "
-                f"Participants: {fronter_list}.\n\n"
-                f"{transcript}\n\n"
-                f"Be specific about any facts, ideas, or conclusions reached. "
-                f"2-4 sentences maximum. No bullet points."
-            )
-        }
-    ]
+    prompt = [{
+        "role": "user",
+        "content": (
+            f"{time_ctx}\n\n"
+            f"Summarize this conversation excerpt into a concise memory. "
+            f"Write it as a factual paragraph, past tense, in your own voice. "
+            f"Include who said what where perspectives differ. "
+            f"Participants: {fronter_list}.\n\n"
+            f"{transcript}\n\n"
+            f"Be specific about any facts, ideas, or conclusions reached. "
+            f"2-4 sentences maximum. No bullet points."
+        )
+    }]
 
     try:
         summary = await llm.generate(
             prompt,
             system_prompt=(
-                "You distill conversations into precise, factual memory entries. "
-                "Past tense. Specific. Attributed where relevant. Never vague."
+                f"{persona}\n\n"
+                f"You distill conversations into precise, factual memory entries "
+                f"written in your own voice. "
+                f"Past tense. Specific. Attributed where relevant. Never vague."
             ),
             max_new_tokens=200,
             temperature=0.3,
@@ -88,7 +101,6 @@ async def _archive_session(session_id: str, history, llm) -> None:
 
     print(f"[Archiver] Archiving session {session_id[:8]}... ({len(messages)} messages)")
 
-    # Slice into windows of WINDOW_SIZE
     windows = [
         messages[i:i + WINDOW_SIZE]
         for i in range(0, len(messages), WINDOW_SIZE)
@@ -100,12 +112,10 @@ async def _archive_session(session_id: str, history, llm) -> None:
     ).strftime("%Y-%m-%d")
 
     for i, window in enumerate(windows):
-        # Who was present during this window?
-        presence = history.get_fronters_for_window(window)
-        fronters = presence["fronters"]
+        presence    = history.get_fronters_for_window(window)
+        fronters    = presence["fronters"]
         collections = presence["collections"]  # always includes "main"
 
-        # Summarize this window
         summary = await _summarize_window(
             window,
             fronters=fronters,
@@ -117,50 +127,27 @@ async def _archive_session(session_id: str, history, llm) -> None:
         if not summary:
             continue
 
-        # Extract entities from this window and write to entity store
-        try:
-            from core.entity_extract import extract_from_window, write_extraction
-            extracted = await extract_from_window(
-                messages=window,
-                fronters=fronters,
-                session_id=session_id,
-                llm=llm,
-            )
-            if extracted:
-                write_extraction(
-                    extracted=extracted,
-                    current_host=next(iter(fronters), None) if fronters else None,
-                    session_id=session_id,
-                )
-        except Exception as e:
-            print(f"[Archiver] Entity extraction failed for window {i} (non-fatal): {e}")
-
-        # Build metadata
         metadata = {
-            "source": f"conversation:{session_id[:8]}",
-            "type": "archived_conversation",
-            "date": session_date,
-            "session_id": session_id,
-            "window": i,
+            "source":           f"conversation:{session_id[:8]}",
+            "type":             "archived_conversation",
+            "date":             session_date,
+            "session_id":       session_id,
+            "window":           i,
             "fronters_present": ", ".join(sorted(fronters)) if fronters else "unknown",
         }
 
-        # Raw window text — embedded separately so specific details are searchable
         raw_window = "\n".join(
             f"{'User' if m['role'] == 'user' else 'Gizmo'}: {m['content']}"
             for m in window
             if m["role"] in ("user", "assistant")
         ).strip()
 
-        # Ingest into every relevant collection
         for collection_name in collections:
             try:
                 store = RAGStore(collection_name=collection_name)
-                docs = [summary]
+                docs  = [summary]
                 metas = [{**metadata, "collection": collection_name}]
 
-                # Ingest raw window alongside summary so retrieval isn't
-                # limited to what survived summarization
                 if raw_window:
                     docs.append(raw_window)
                     metas.append({**metadata, "collection": collection_name, "type": "archived_raw"})
@@ -171,18 +158,21 @@ async def _archive_session(session_id: str, history, llm) -> None:
                 print(f"[Archiver] Failed to ingest into '{collection_name}': {e}")
 
         archived_count += 1
-        # Small pause between windows to avoid hammering the LLM
         await asyncio.sleep(1)
 
-    print(f"[Archiver] Session {session_id[:8]} archived — {archived_count} chunks across {len(collections)} collections")
+    print(
+        f"[Archiver] Session {session_id[:8]} archived — "
+        f"{archived_count} chunks across {len(collections)} collections"
+    )
     history.archived = True
+
+    try:
+        curiosity_decay()
+    except Exception:
+        pass
 
 
 async def archiver_loop(llm) -> None:
-    """
-    Background loop. Runs every CHECK_INTERVAL seconds.
-    Finds inactive unarchived sessions and archives them.
-    """
     from memory.history import get_all_sessions
 
     print("[Archiver] Background archiver started")
@@ -202,13 +192,6 @@ async def archiver_loop(llm) -> None:
                 except Exception as e:
                     print(f"[Archiver] Error archiving {session_id[:8]}: {e}")
 
-        # Decay interest graph once per archiver cycle
-        try:
-            await curiosity_decay()
-        except Exception as e:
-            print(f"[Archiver] Curiosity decay failed: {e}")
-
 
 def start_archiver(llm, loop: asyncio.AbstractEventLoop) -> None:
-    """Schedule the archiver loop on the running event loop."""
     asyncio.ensure_future(archiver_loop(llm), loop=loop)

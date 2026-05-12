@@ -205,13 +205,17 @@ async def _generate_summary(
     """
     Run a summary pass on the transcript.
     Returns dict with summary, mood, notable, changes, unresolved.
-    Written in first person from Gizmo's perspective.
+    Written in first person from Gizmo's perspective, through the lens
+    of the primary headmate's persona.
 
     CRITICAL: The LLM is instructed to paraphrase everything in its own
     voice at the emotional register of the conversation — never quote
     verbatim, never embed raw user text. This prevents unescaped quotes
     and special characters from breaking JSON serialization.
     """
+    from core.persona import persona_prefix_multi
+    from core.temporal import time_context_block
+
     _FAILED = {
         "summary":    "Summary generation failed.",
         "mood":       "unknown",
@@ -233,20 +237,26 @@ async def _generate_summary(
 
     host_str = ", ".join(h.title() for h in hosts) if hosts else "unknown"
 
+    # Build persona prefix — Gizmo's seed + each host's relational context
+    persona = persona_prefix_multi(hosts, include_gizmo_seed=True)
+    time_ctx = time_context_block()
+
     prompt = [{
         "role": "user",
         "content": (
+            f"{time_ctx}\n\n"
             f"This is a conversation transcript involving {host_str}.\n\n"
             f"{excerpt}\n\n"
-            f"Summarize this conversation from Gizmo's perspective, in first person past tense.\n\n"
+            f"Summarize this conversation from your perspective, in first person past tense.\n\n"
             f"CRITICAL RULES — read before writing:\n"
             f"- NEVER quote anything verbatim from the transcript. Paraphrase everything.\n"
             f"- Write entirely in your own words, at the emotional register of the conversation.\n"
             f"  If it was playful, sound playful. If it was heavy, sound grounded. Match the mood.\n"
+            f"- Let your knowledge of who these people are color what felt significant to you.\n"
             f"- Do NOT copy any names, technical terms, or unusual words directly —\n"
             f"  describe them in plain language instead.\n"
             f"- All string values must be plain prose — no special characters, no quotes within quotes.\n\n"
-            f"What happened? What did I notice, feel, or decide? What mattered to me?\n\n"
+            f"What happened? What did you notice, feel, or decide? What mattered to you?\n\n"
             f"Respond with ONLY valid JSON, no markdown:\n"
             f'{{\n'
             f'  "summary": "first person past tense — what happened and what mattered, fully paraphrased",\n'
@@ -263,11 +273,13 @@ async def _generate_summary(
         raw = await llm.generate(
             prompt,
             system_prompt=(
-                "You are Gizmo summarizing your own conversations in first person past tense. "
-                "NEVER quote verbatim from the transcript. "
-                "Paraphrase everything in your own voice at the emotional register of the conversation. "
-                "All string values must be clean prose — no special characters, no embedded quotes. "
-                "JSON only. No markdown. No preamble."
+                f"{persona}\n\n"
+                f"You are writing a first person past tense summary of your own conversation. "
+                f"NEVER quote verbatim from the transcript. "
+                f"Paraphrase everything in your own voice at the emotional register of the conversation. "
+                f"Let your knowledge of who these people are inform what felt significant. "
+                f"All string values must be clean prose — no special characters, no embedded quotes. "
+                f"JSON only. No markdown. No preamble."
             ),
             max_new_tokens=600,
             temperature=0.2,
