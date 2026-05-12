@@ -272,9 +272,17 @@ async def _tool_precheck(
             return None
 
         raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-            raw = raw.rsplit("```", 1)[0].strip()
+        # Strip markdown fences and any preamble before the JSON object
+        if "```" in raw:
+            raw = raw.split("```")[1]  # take content after first fence
+            if raw.startswith("json"):
+                raw = raw[4:]          # strip language tag
+            raw = raw.split("```")[0].strip()  # strip closing fence
+
+        # Find the actual JSON object — skip any preamble text
+        brace = raw.find("{")
+        if brace > 0:
+            raw = raw[brace:]
 
         data = __import__("json").loads(raw)
 
