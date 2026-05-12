@@ -526,28 +526,11 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
     # ── Overview block ────────────────────────────────────────────────────────
     overview_block = ""
     try:
-        persona_parts = []
-        try:
-            gizmo_persona = await retrieve_personality(
-                query=brief.message,
-                current_host=brief.headmate,
-            )
-            if gizmo_persona:
-                persona_parts.append(gizmo_persona)
-        except Exception:
-            pass
-
-        try:
-            from tools.personality_tool import get_personality_context
-            all_present = list({f for f in ([brief.headmate] + (brief.fronters or [])) if f})
-            for name in all_present:
-                ctx = get_personality_context(name)
-                if ctx:
-                    persona_parts.append(ctx)
-        except Exception:
-            pass
-
-        persona = "\n\n".join(persona_parts) or None
+        # persona_prefix is sync (reads headmate JSON on disk, no LLM/ChromaDB)
+        # — safe to call from this sync function.
+        from core.persona import persona_prefix_multi
+        all_present = list({f for f in ([brief.headmate] + (brief.fronters or [])) if f})
+        persona = persona_prefix_multi(all_present, include_gizmo_seed=True) or None
 
         overview = asyncio.get_event_loop().run_until_complete(
             get_overview(
