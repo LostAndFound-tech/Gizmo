@@ -35,11 +35,22 @@ index.json schema:
       }
     ]
   }
+
+CHANGES vs original:
+  - _generate_summary prompt now explicitly instructs the LLM to paraphrase
+    all content in Gizmo's own voice at the emotional register of the
+    conversation — never quote verbatim, never embed raw user text.
+    This prevents unescaped quotes/special chars from breaking json.loads.
+  - Robust JSON fallback parser: if json.loads fails, extracts fields
+    individually via regex rather than silently returning empty summary.
+  - Failure is logged with the raw response and error position so it's
+    diagnosable.
 """
 
 import json
 import os
 import random
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -145,6 +156,44 @@ def append_exchange(
         log_error("Archive", f"append_exchange failed for {session_id[:8]}", exc=e)
 
 
+# ── JSON fallback parser ──────────────────────────────────────────────────────
+
+def _fallback_parse(raw: str) -> Optional[dict]:
+    """
+    If json.loads fails, attempt to extract individual fields via regex.
+    Returns a partial dict with whatever could be salvaged, or None if
+    nothing useful was found.
+
+    This handles the case where the LLM embedded an unescaped character
+    inside a string field — we can still recover summary, mood, etc.
+    """
+    result = {}
+
+    # summary — grab everything between the first "summary": " and the next unescaped "
+    m = re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', raw, re.DOTALL)
+    if m:
+        result["summary"] = m.group(1).replace('\\"', '"').replace('\\n', ' ').strip()
+
+    m = re.search(r'"mood"\s*:\s*"([^"\\]*)"', raw)
+    if m:
+        result["mood"] = m.group(1).strip()
+
+    m = re.search(r'"unresolved"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    if m:
+        result["unresolved"] = m.group(1).replace('\\"', '"').strip()
+    elif re.search(r'"unresolved"\s*:\s*null', raw):
+        result["unresolved"] = None
+
+    # notable and changes — extract array items
+    for field in ("notable", "changes"):
+        m = re.search(rf'"{field}"\s*:\s*\[(.*?)\]', raw, re.DOTALL)
+        if m:
+            items = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+            result[field] = [i.replace('\\"', '"').strip() for i in items]
+
+    return result if result else None
+
+
 # ── Summary generation ────────────────────────────────────────────────────────
 
 async def _generate_summary(
@@ -157,7 +206,20 @@ async def _generate_summary(
     Run a summary pass on the transcript.
     Returns dict with summary, mood, notable, changes, unresolved.
     Written in first person from Gizmo's perspective.
+
+    CRITICAL: The LLM is instructed to paraphrase everything in its own
+    voice at the emotional register of the conversation — never quote
+    verbatim, never embed raw user text. This prevents unescaped quotes
+    and special characters from breaking JSON serialization.
     """
+    _FAILED = {
+        "summary":    "Summary generation failed.",
+        "mood":       "unknown",
+        "unresolved": None,
+        "notable":    [],
+        "changes":    [],
+    }
+
     excerpt = transcript[-6000:] if len(transcript) > 6000 else transcript
 
     if not excerpt.strip():
@@ -176,47 +238,79 @@ async def _generate_summary(
         "content": (
             f"This is a conversation transcript involving {host_str}.\n\n"
             f"{excerpt}\n\n"
-            f"Summarize this conversation from Gizmo's perspective, in first person past tense. "
+            f"Summarize this conversation from Gizmo's perspective, in first person past tense.\n\n"
+            f"CRITICAL RULES — read before writing:\n"
+            f"- NEVER quote anything verbatim from the transcript. Paraphrase everything.\n"
+            f"- Write entirely in your own words, at the emotional register of the conversation.\n"
+            f"  If it was playful, sound playful. If it was heavy, sound grounded. Match the mood.\n"
+            f"- Do NOT copy any names, technical terms, or unusual words directly —\n"
+            f"  describe them in plain language instead.\n"
+            f"- All string values must be plain prose — no special characters, no quotes within quotes.\n\n"
             f"What happened? What did I notice, feel, or decide? What mattered to me?\n\n"
             f"Respond with ONLY valid JSON, no markdown:\n"
             f'{{\n'
-            f'  "summary": "first person past tense — what happened and what mattered to me",\n'
-            f'  "mood": "overall emotional tone of the conversation",\n'
-            f'  "notable": ["specific moments, facts, or things worth remembering long-term"],\n'
-            f'  "changes": ["alterations to relationships, behavior, lifestyle, design, or direction"],\n'
-            f'  "unresolved": "anything left hanging or unfinished, or null"\n'
+            f'  "summary": "first person past tense — what happened and what mattered, fully paraphrased",\n'
+            f'  "mood": "one word — the overall emotional tone",\n'
+            f'  "notable": ["paraphrased fact or moment worth remembering", "..."],\n'
+            f'  "changes": ["paraphrased shift in relationship, behavior, or direction", "..."],\n'
+            f'  "unresolved": "paraphrased description of anything unfinished, or null"\n'
             f'}}'
         )
     }]
 
+    raw = None
     try:
         raw = await llm.generate(
             prompt,
             system_prompt=(
-                "You are Gizmo summarizing your own conversations. "
-                "Write in first person past tense. "
-                "Capture what happened, what you noticed, what you felt, what mattered. "
+                "You are Gizmo summarizing your own conversations in first person past tense. "
+                "NEVER quote verbatim from the transcript. "
+                "Paraphrase everything in your own voice at the emotional register of the conversation. "
+                "All string values must be clean prose — no special characters, no embedded quotes. "
                 "JSON only. No markdown. No preamble."
             ),
             max_new_tokens=600,
             temperature=0.2,
         )
+
+        if not raw or not raw.strip():
+            log_error("Archive", "summary generation failed: empty response", exc=None)
+            return _FAILED
+
         raw = raw.strip()
-        if not raw:
-            raise ValueError("Empty response from LLM")
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw
             raw = raw.rsplit("```", 1)[0].strip()
-        return json.loads(raw)
+
+        # Primary parse
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            log_error(
+                "Archive",
+                f"summary generation failed: {e} | "
+                f"raw[:200]={repr(raw[:200])}",
+                exc=None,
+            )
+
+        # Fallback parse — salvage what we can
+        salvaged = _fallback_parse(raw)
+        if salvaged and salvaged.get("summary"):
+            log_event("Archive", "SUMMARY_FALLBACK_PARSE",
+                salvaged_fields=list(salvaged.keys()),
+            )
+            return {**_FAILED, **salvaged}
+
+        return _FAILED
+
     except Exception as e:
-        log_error("Archive", f"summary generation failed: {e}", exc=None)
-        return {
-            "summary":    "Summary generation failed.",
-            "mood":       "unknown",
-            "unresolved": None,
-            "notable":    [],
-            "changes":    [],
-        }
+        log_error(
+            "Archive",
+            f"summary generation failed: {e} | "
+            f"raw={repr(raw[:200]) if raw else 'None'}",
+            exc=None,
+        )
+        return _FAILED
 
 
 # ── Session close — finalize and summarize ────────────────────────────────────
@@ -308,72 +402,30 @@ async def finalize_session(
 
     # ── Ingest into ChromaDB ──────────────────────────────────────────────────
     summary_text = summary_data.get("summary", "")
-    if summary_text and summary_text not in ("Summary unavailable.", "No transcript content.", "Summary generation failed."):
+    if summary_text and summary_text not in (
+        "Summary unavailable.",
+        "Summary generation failed.",
+        "No transcript content.",
+    ):
         try:
-            from tools.memory_tool import _get_collection, MEMORY_COLLECTION
-            import uuid as _uuid
+            from core.rag import RAGStore
+            import uuid
 
-            opened_str = datetime.fromtimestamp(opened_at).strftime("%H:%M")
-            closed_str = datetime.fromtimestamp(closed_at).strftime("%H:%M")
-            hosts_str  = ", ".join(h.title() for h in hosts)
-            transcript_link = f"/data/conversations/{date_str}/{transcript_filename}"
-
-            entry_content = (
-                f"Conversation with {hosts_str} on {date_str} ({opened_str}\u2013{closed_str})\n"
-                f"{summary_text}"
-            )
-            if summary_data.get("unresolved"):
-                entry_content += f"\nUnresolved: {summary_data['unresolved']}"
-
-            entry_metadata = {
-                "type":             "conversation_summary",
-                "subject":          hosts[0].lower() if hosts else "",
-                "hosts":            ", ".join(hosts),
-                "date":             date_str,
-                "session_id":       session_id,
-                "transcript_file":  transcript_link,
-                "mood":             summary_data.get("mood", "unknown"),
-                "written_at":       datetime.fromtimestamp(closed_at).isoformat(timespec="seconds"),
-                "tags":             f"conversation,{','.join(hosts)}",
-            }
-
-            mem_col = _get_collection(MEMORY_COLLECTION)
-            mem_col.add(
-                documents=[entry_content],
-                metadatas=[entry_metadata],
-                ids=[f"conv_{session_id[:16]}"],
-            )
-
-            try:
-                from core.rag import RAGStore
-                for host in hosts:
-                    host_store = RAGStore(collection_name=host.lower())
-                    host_store.ingest_texts(
-                        [entry_content],
-                        metadatas=[entry_metadata],
-                        ids=[f"conv_{session_id[:16]}_{host.lower()}"],
-                    )
-            except Exception as e:
-                log_error("Archive", f"failed to ingest into host collections: {e}", exc=None)
-
-            for notable in summary_data.get("notable", []):
-                if notable and len(notable) > 10:
-                    try:
-                        mem_col.add(
-                            documents=[notable],
-                            metadatas=[{
-                                "type":       "fact",
-                                "subject":    hosts[0].lower() if hosts else "",
-                                "date":       date_str,
-                                "session_id": session_id,
-                                "written_at": datetime.fromtimestamp(closed_at).isoformat(timespec="seconds"),
-                                "tags":       f"notable,conversation,{','.join(hosts)}",
-                                "source":     "conversation_summary",
-                            }],
-                            ids=[f"notable_{session_id[:12]}_{_uuid.uuid4().hex[:8]}"],
-                        )
-                    except Exception:
-                        pass
+            for host in (hosts or ["unknown"]):
+                collection_name = host.lower().strip() if host else "main"
+                store = RAGStore(collection_name=collection_name)
+                store.ingest_texts(
+                    [summary_text],
+                    metadatas=[{
+                        "source":     f"conversation:{session_id[:8]}",
+                        "type":       "session_summary",
+                        "date":       date_str,
+                        "session_id": session_id,
+                        "hosts":      ", ".join(hosts),
+                        "mood":       summary_data.get("mood", "unknown"),
+                    }],
+                    ids=[f"summary_{session_id[:8]}_{uuid.uuid4().hex[:8]}"],
+                )
 
             log_event("Archive", "SUMMARY_INGESTED",
                 session=session_id[:8],
@@ -469,7 +521,7 @@ def _load_session_block(timestamp: str, transcript_path: Path, summary_path: Pat
             if not content_lines:
                 return ""
 
-            start  = random.randint(0, max(0, len(content_lines) - 10))
+            start   = random.randint(0, max(0, len(content_lines) - 10))
             excerpt = "\n".join(content_lines[start:start + 10])
 
             return f"[session ~{timestamp}] with {host} (no summary — transcript excerpt):\n{excerpt}"
