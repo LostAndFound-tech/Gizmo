@@ -319,7 +319,7 @@ async def detect_and_create_protocol(
         "content": (
             f"Review this exchange between Gizmo and {current_host.title()}.\n\n"
             f"Gizmo said: {gizmo_response[:800]}\n"
-            f"{current_host.title()} said: {user_message[:400]}\n\n"
+            f"{current_host.title()} said: {user_message}\n\n"
             f"Did Gizmo establish a rule, boundary, protocol, or persistent behavioral pattern "
             f"that should be remembered and applied in future conversations?\n\n"
             f"If YES, respond with ONLY valid JSON:\n"
@@ -341,8 +341,7 @@ async def detect_and_create_protocol(
             prompt,
             system_prompt=(
                 "You detect when a rule, boundary, or persistent behavioral pattern has been "
-                "established in a conversation. Be conservative — only flag clear, intentional "
-                "commitments, not passing remarks. JSON only. No preamble."
+                "established in a conversation. JSON only. No preamble."
             ),
             max_new_tokens=300,
             temperature=0.1,

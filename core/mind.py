@@ -17,6 +17,17 @@ Query priority (always in this order):
 
 The confidence score returned tells the Ego how much to trust the facts block.
 Low confidence = Ego should caveat. High confidence = use it directly.
+
+READ SIDE FIXES (vs original):
+  - _query_rag now queries headmate collection first with higher n_results,
+    then main — headmate facts always surface before generic noise
+  - Speaker filter applied to extracted_fact type entries so memory_writer
+    facts are retrieved with precision
+  - Tier 1.5 memory query uses scored fallback instead of silent unfiltered
+    retry — unfiltered hits get a distance penalty so they don't crowd out
+    speaker-specific results
+  - RAG_DISTANCE_THRESHOLD kept at 1.2 (correct) — synthesis.py's 2.0 was
+    the broken one (fixed separately)
 """
 
 import time
@@ -29,10 +40,15 @@ if TYPE_CHECKING:
 
 # ── Confidence thresholds ─────────────────────────────────────────────────────
 
-LIBRARIAN_SUFFICIENT  = 0.75
-RAG_SUFFICIENT        = 0.45
-WEB_SEARCH_THRESHOLD  = 0.20
+LIBRARIAN_SUFFICIENT   = 0.75
+RAG_SUFFICIENT         = 0.45
+WEB_SEARCH_THRESHOLD   = 0.20
 RAG_DISTANCE_THRESHOLD = 1.2
+
+# How many results to pull per collection in _query_rag.
+# Headmate collection gets more because it's more signal-dense.
+RAG_N_HEADMATE = 8
+RAG_N_MAIN     = 5
 
 
 # ── Empty facts ───────────────────────────────────────────────────────────────
@@ -65,53 +81,137 @@ async def _query_rag(
     query: str,
     fronters: list,
     session_id: str,
+    headmate: Optional[str] = None,
 ) -> dict:
     """
-    Query ChromaDB across relevant collections.
-    Collections queried: each fronter's personal collection + main.
+    Query ChromaDB with speaker-prioritized retrieval.
+
+    Order:
+      1. Headmate's named collection (speaker-filtered extracted_facts first,
+         then all other entries) — RAG_N_HEADMATE results
+      2. Each additional fronter's collection — RAG_N_HEADMATE results each
+      3. main — RAG_N_MAIN results, deduplicated against above
+
+    Chunks from the headmate collection are always ranked above main chunks
+    at equal distance, so specific facts about the current speaker surface
+    before generic noise.
     """
     try:
         from core.rag import RAGStore, CHROMA_PERSIST_DIR
         import chromadb
 
-        collections_to_query = set(["main"])
-        for f in fronters:
-            if f:
-                collections_to_query.add(f.lower().strip())
+        client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+        existing = {c.name for c in client.list_collections()}
 
-        try:
-            client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
-            existing = {c.name for c in client.list_collections()}
-            collections_to_query &= existing
-        except Exception:
-            collections_to_query = {"main"}
+        # Build ordered collection list: headmate first, then other fronters, then main
+        ordered = []
+        if headmate:
+            h = headmate.lower().strip()
+            if h and h in existing:
+                ordered.append((h, RAG_N_HEADMATE, True))   # (name, n, is_primary_speaker)
+        for f in (fronters or []):
+            name = f.lower().strip() if isinstance(f, str) else str(f).lower().strip()
+            if name and name != (headmate or "").lower() and name in existing:
+                ordered.append((name, RAG_N_HEADMATE, False))
+        if "main" in existing:
+            ordered.append(("main", RAG_N_MAIN, False))
 
-        if not collections_to_query:
+        if not ordered:
             return {"text": "", "confidence": 0.0, "chunks": []}
 
         all_chunks = []
+        seen_texts = set()
 
-        for collection_name in collections_to_query:
+        for collection_name, n_results, is_primary in ordered:
             try:
                 store = RAGStore(collection_name=collection_name)
                 if store.count == 0:
                     continue
-                chunks = store.retrieve(query=query, n_results=4)
-                for chunk in chunks:
-                    chunk["collection"] = collection_name
-                all_chunks.extend(chunks)
+
+                # For the primary speaker's collection: pull extracted_facts
+                # first (speaker-filtered), then general entries.
+                # For everything else: standard retrieve.
+                if is_primary and headmate:
+                    # Pass 1 — extracted facts for this speaker specifically
+                    try:
+                        fact_chunks = store.retrieve(
+                            query=query,
+                            n_results=min(n_results, store.count),
+                            where={
+                                "$and": [
+                                    {"type":    {"$eq": "extracted_fact"}},
+                                    {"speaker": {"$eq": headmate.lower()}},
+                                ]
+                            },
+                        )
+                        for chunk in fact_chunks:
+                            text = chunk.get("text", "").strip()
+                            if text and text not in seen_texts:
+                                seen_texts.add(text)
+                                all_chunks.append({
+                                    **chunk,
+                                    "collection": collection_name,
+                                    "priority":   "extracted_fact",
+                                })
+                    except Exception:
+                        pass  # where clause may fail if collection has no extracted_facts yet
+
+                    # Pass 2 — everything else in the headmate collection
+                    try:
+                        general_chunks = store.retrieve(
+                            query=query,
+                            n_results=min(n_results, store.count),
+                        )
+                        for chunk in general_chunks:
+                            text = chunk.get("text", "").strip()
+                            if text and text not in seen_texts:
+                                seen_texts.add(text)
+                                all_chunks.append({
+                                    **chunk,
+                                    "collection": collection_name,
+                                    "priority":   "headmate",
+                                })
+                    except Exception as e:
+                        log_error("Mind", f"RAG general query failed for {collection_name}", exc=e)
+
+                else:
+                    chunks = store.retrieve(query=query, n_results=n_results)
+                    for chunk in chunks:
+                        text = chunk.get("text", "").strip()
+                        if text and text not in seen_texts:
+                            seen_texts.add(text)
+                            all_chunks.append({
+                                **chunk,
+                                "collection": collection_name,
+                                "priority":   "general",
+                            })
+
             except Exception as e:
                 log_error("Mind", f"RAG query failed for collection {collection_name}", exc=e)
 
         if not all_chunks:
             return {"text": "", "confidence": 0.0, "chunks": []}
 
-        all_chunks.sort(key=lambda c: c.get("distance", 999))
+        # Sort: extracted_facts first, then headmate, then general — within
+        # each priority bucket, sort by distance ascending.
+        priority_order = {"extracted_fact": 0, "headmate": 1, "general": 2}
+        all_chunks.sort(key=lambda c: (
+            priority_order.get(c.get("priority", "general"), 2),
+            c.get("distance", 999),
+        ))
 
         good_chunks = [
             c for c in all_chunks
             if c.get("distance", 999) < RAG_DISTANCE_THRESHOLD
         ]
+
+        log_event("Mind", "RAG_RETRIEVED",
+            session=session_id[:8],
+            total=len(all_chunks),
+            good=len(good_chunks),
+            collections=[c["collection"] for c in all_chunks[:6]],
+            priorities=[c.get("priority") for c in all_chunks[:6]],
+        )
 
         if not good_chunks:
             return {"text": "", "confidence": 0.0, "chunks": all_chunks}
@@ -119,12 +219,12 @@ async def _query_rag(
         best_distance = good_chunks[0].get("distance", 1.0)
         confidence = max(0.0, min(1.0, 1.0 - (best_distance / RAG_DISTANCE_THRESHOLD)))
 
-        seen = set()
+        seen_text = set()
         text_parts = []
-        for chunk in good_chunks[:5]:
+        for chunk in good_chunks[:6]:   # raised from 5 → 6
             text = chunk.get("text", "").strip()
-            if text and text not in seen:
-                seen.add(text)
+            if text and text not in seen_text:
+                seen_text.add(text)
                 text_parts.append(text)
 
         assembled = "\n\n".join(text_parts)
@@ -236,15 +336,15 @@ class Mind:
         Main entry point. Takes an Archivist brief, returns a facts dict.
 
         Tiered retrieval:
-          Librarian → RAG → Web search (stub)
+          Librarian → Memory/Conscious → RAG → Web search (stub)
         Each tier only fires if the previous tier's confidence is insufficient.
         """
         t_start = time.monotonic()
 
-        topics   = brief.topics
-        query    = brief.message
-        fronters = brief.fronters
-        headmate = brief.headmate
+        topics     = brief.topics
+        query      = brief.message
+        fronters   = brief.fronters
+        headmate   = brief.headmate
         session_id = brief.session_id
 
         # Augment query with hot topic context
@@ -261,7 +361,7 @@ class Mind:
         )
 
         # ── Tier 1: Librarian ─────────────────────────────────────────────────
-        librarian_result = await _query_librarian(topics, query, headmate)
+        librarian_result     = await _query_librarian(topics, query, headmate)
         librarian_confidence = librarian_result.get("confidence", 0.0)
 
         if librarian_confidence >= LIBRARIAN_SUFFICIENT:
@@ -279,81 +379,87 @@ class Mind:
                 "topics_queried": topics,
                 "chunks":         [],
             }
-        
-        # ── Tier 1.5: Memory collections ─────────────────────────────────────
-        # Query conscious (Gizmo's thoughts) and memory (datapoints) first.
-        # These are more personal and relevant than general RAG chunks.
+
+        # ── Tier 1.5: Memory/Conscious collections ────────────────────────────
+        # Query Gizmo's own memory and conscious collections first.
+        # Speaker-filtered where possible; unfiltered hits get a distance
+        # penalty so they don't crowd out speaker-specific results.
         memory_text = ""
         try:
             from tools.memory_tool import _get_collection, CONSCIOUS_COLLECTION, MEMORY_COLLECTION
-            from core.rag import _EMBED_FN
- 
+
             all_hits = []
- 
+
             for col_name in [CONSCIOUS_COLLECTION, MEMORY_COLLECTION]:
                 try:
                     col   = _get_collection(col_name)
                     count = col.count()
                     if count == 0:
                         continue
- 
-                    k = min(4, count)
-                    kwargs_q = {"query_texts": [query], "n_results": k}
+
+                    # Filtered pass — entries about this headmate specifically
                     if headmate:
-                        kwargs_q["where"] = {"subject": {"$eq": headmate.lower()}}
- 
-                    results = col.query(**kwargs_q)
-                    docs  = results.get("documents", [[]])[0]
-                    metas = results.get("metadatas", [[]])[0]
-                    dists = results.get("distances", [[]])[0]
- 
-                    for doc, meta, dist in zip(docs, metas, dists):
-                        if dist < 1.1:
-                            all_hits.append({
-                                "text":       doc,
-                                "collection": col_name,
-                                "subject":    meta.get("subject", ""),
-                                "distance":   dist,
-                            })
-                except Exception:
-                    pass
- 
-            if not all_hits and headmate:
-                # Retry without subject filter
-                for col_name in [CONSCIOUS_COLLECTION, MEMORY_COLLECTION]:
-                    try:
-                        col   = _get_collection(col_name)
-                        count = col.count()
-                        if count == 0:
-                            continue
-                        k = min(3, count)
-                        results = col.query(query_texts=[query], n_results=k)
+                        k = min(4, count)
+                        results = col.query(
+                            query_texts=[query],
+                            n_results=k,
+                            where={"subject": {"$eq": headmate.lower()}},
+                        )
                         docs  = results.get("documents", [[]])[0]
                         metas = results.get("metadatas", [[]])[0]
                         dists = results.get("distances", [[]])[0]
                         for doc, meta, dist in zip(docs, metas, dists):
-                            if dist < 1.0:
+                            if dist < 1.1:
                                 all_hits.append({
                                     "text":       doc,
                                     "collection": col_name,
                                     "subject":    meta.get("subject", ""),
                                     "distance":   dist,
+                                    "filtered":   True,
                                 })
-                    except Exception:
-                        pass
- 
+
+                    # Unfiltered pass — general entries, penalised distance
+                    k = min(3, count)
+                    results = col.query(query_texts=[query], n_results=k)
+                    docs  = results.get("documents", [[]])[0]
+                    metas = results.get("metadatas", [[]])[0]
+                    dists = results.get("distances", [[]])[0]
+                    for doc, meta, dist in zip(docs, metas, dists):
+                        # Apply distance penalty so unfiltered hits rank below
+                        # speaker-specific ones unless they're meaningfully closer
+                        penalised = dist + 0.3
+                        if penalised < 1.1:
+                            all_hits.append({
+                                "text":       doc,
+                                "collection": col_name,
+                                "subject":    meta.get("subject", ""),
+                                "distance":   penalised,
+                                "filtered":   False,
+                            })
+
+                except Exception as e:
+                    log_error("Mind", f"memory collection query failed for {col_name}", exc=e)
+
             if all_hits:
-                all_hits.sort(key=lambda h: h["distance"])
-                memory_text = "\n\n".join(h["text"] for h in all_hits[:6])
+                # Deduplicate and rank
+                seen = set()
+                unique_hits = []
+                for h in sorted(all_hits, key=lambda x: x["distance"]):
+                    if h["text"] not in seen:
+                        seen.add(h["text"])
+                        unique_hits.append(h)
+
+                memory_text = "\n\n".join(h["text"] for h in unique_hits[:6])
                 log_event("Mind", "MEMORY_HIT",
                     session=session_id[:8],
-                    hits=len(all_hits),
+                    hits=len(unique_hits),
+                    filtered=[h["filtered"] for h in unique_hits[:6]],
                     query=query[:60],
                 )
- 
+
         except Exception as e:
             log_error("Mind", "memory collection query failed", exc=e)
- 
+
         if memory_text:
             return {
                 "synthesis":      memory_text,
@@ -364,7 +470,7 @@ class Mind:
             }
 
         # ── Tier 2: RAG ───────────────────────────────────────────────────────
-        rag_result     = await _query_rag(topics, query, fronters, session_id)
+        rag_result     = await _query_rag(topics, query, fronters, session_id, headmate=headmate)
         rag_confidence = rag_result.get("confidence", 0.0)
         rag_chunks     = rag_result.get("chunks", [])
         rag_text       = rag_result.get("text", "")
@@ -391,7 +497,7 @@ class Mind:
             synthesized = await _synthesize(query, rag_chunks, topics, headmate)
             if synthesized:
                 synthesized = _apply_correction_veto(synthesized, topics)
-                confidence = min(0.7, rag_confidence + 0.15)
+                confidence  = min(0.7, rag_confidence + 0.15)
                 log_event("Mind", "QUERY_COMPLETE",
                     session=session_id[:8],
                     source="rag+synthesis",
@@ -415,7 +521,6 @@ class Mind:
         skip_web = bool(set(topics) & personal_topics)
 
         if not skip_web:
-            # Stub — synchronous, zero latency, returns immediately
             web_result = _query_web_stub(query, topics)
             web_text   = web_result.get("text", "")
 

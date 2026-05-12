@@ -9,6 +9,9 @@ Changes from original:
   - Topic cluster surfacing: synthesis includes related topics when available
   - Personality context: known traits/interests for current_host injected
     into synthesis prompt when available
+  - DISTANCE_THRESHOLD reduced from 2.0 → 1.3 (2.0 was effectively no filter)
+  - Extracted facts from memory_writer pulled in as a priority lane —
+    speaker-filtered, so each headmate only sees their own facts
 """
 
 import re
@@ -17,7 +20,7 @@ from typing import Optional
 from core.rag import RAGStore, CHROMA_PERSIST_DIR
 import chromadb
 
-DISTANCE_THRESHOLD = 2.0
+DISTANCE_THRESHOLD = 1.3          # was 2.0 — that's essentially no filter
 AMBIENT_COLLECTION = "ambient_log"
 
 # Temporal signal patterns — trigger time-filtered ambient retrieval
@@ -102,12 +105,40 @@ def _get_personality_block(current_host: Optional[str]) -> str:
         return ""
 
 
+def _get_facts_block(query: str, current_host: Optional[str]) -> str:
+    """
+    Pull extracted facts for the current speaker from memory_writer.
+    Returns a labelled block ready to prepend to the synthesis chunks,
+    or empty string if nothing found.
+
+    Facts are speaker-filtered so each headmate only sees their own.
+    """
+    if not current_host:
+        return ""
+    try:
+        from memory.memory_writer import retrieve_facts
+        facts = retrieve_facts(
+            query=query,
+            speaker=current_host,
+            n_results=8,
+            distance_threshold=DISTANCE_THRESHOLD,
+        )
+        if not facts:
+            return ""
+        lines = [f"[facts:{current_host}] {f['text']}" for f in facts]
+        print(f"[Synthesis] {len(facts)} extracted fact(s) retrieved for '{current_host}'")
+        return "\n\n".join(lines)
+    except Exception as e:
+        print(f"[Synthesis] Facts retrieval failed: {e}")
+        return ""
+
+
 async def retrieve_and_synthesize(
     query: str,
     current_host: Optional[str] = None,
     fronters: Optional[list] = None,
     history_summary: Optional[str] = None,
-    n_per_collection: int = 5,
+    n_per_collection: int = 8,          # raised from 5 — more signal per collection
     llm=None,
 ) -> str:
     """
@@ -118,6 +149,9 @@ async def retrieve_and_synthesize(
 
     Personality signals for current_host are injected into the prompt
     so responses naturally reflect what's known about the person.
+
+    Extracted facts (from memory_writer) are retrieved first as a
+    priority lane, speaker-filtered to the current headmate.
     """
     all_known = _get_all_collections()
     is_temporal = _is_temporal_query(query)
@@ -143,6 +177,11 @@ async def retrieve_and_synthesize(
     if "main" not in collections_to_search:
         collections_to_search.append("main")
 
+    # ── Priority lane: extracted facts for current speaker ────────────────────
+    # These are retrieved before general chunks and prepended at the top
+    # of the synthesis context so they're always visible to the LLM.
+    facts_block = _get_facts_block(query, current_host)
+
     # ── Standard semantic retrieval across all non-ambient collections ────────
     all_chunks = []
     for collection_name in collections_to_search:
@@ -155,6 +194,10 @@ async def retrieve_and_synthesize(
                 # Skip personality signals from general retrieval —
                 # they're handled separately via _get_personality_block
                 if r.get("metadata", {}).get("type") == "personality_signal":
+                    continue
+                # Skip extracted facts from general retrieval —
+                # they come in via the priority lane above
+                if r.get("metadata", {}).get("type") == "extracted_fact":
                     continue
                 all_chunks.append({
                     "collection": collection_name,
@@ -203,14 +246,14 @@ async def retrieve_and_synthesize(
         except Exception as e:
             print(f"[Synthesis] Error querying ambient_log: {e}")
 
-    if not all_chunks:
+    if not all_chunks and not facts_block:
         return ""
 
     # ── Filter and rank ───────────────────────────────────────────────────────
     all_chunks.sort(key=lambda x: x["distance"])
     relevant = [c for c in all_chunks if c["distance"] < DISTANCE_THRESHOLD]
 
-    if not relevant:
+    if not relevant and not facts_block:
         print(f"[Synthesis] Nothing relevant found for: {query[:60]}")
         return ""
 
@@ -227,9 +270,6 @@ async def retrieve_and_synthesize(
         topics_hint = f"\nRelated topics found: {', '.join(related_topics[:8])}"
 
     # ── Personality context — only for direct personal queries ───────────────
-    # Personality signals are NOT injected on every synthesis call.
-    # They surface actively via conflict_detector when situationally relevant.
-    # The only exception: queries explicitly about a person's preferences/traits.
     personality_block = ""
     if current_host and _is_personal_query(query):
         personality_context = _get_personality_block(current_host)
@@ -237,12 +277,12 @@ async def retrieve_and_synthesize(
             personality_block = f"\n\n[Personality & interests]\n{personality_context}"
             print(f"[Synthesis] Personality context injected for '{current_host}' (personal query)")
 
-    # ── Build chunk text with attribution and time info ───────────────────────
+    # ── Build chunk text — facts first, then general memory ───────────────────
     chunk_lines = []
+    if facts_block:
+        chunk_lines.append(facts_block)
     for c in relevant:
-        meta = c.get("metadata", {})
-        collection_label = c["collection"]
-        chunk_lines.append(f"[{collection_label}] {c['text']}")
+        chunk_lines.append(f"[{c['collection']}] {c['text']}")
     chunk_text = "\n\n".join(chunk_lines)
 
     # ── History block ─────────────────────────────────────────────────────────
@@ -251,8 +291,10 @@ async def retrieve_and_synthesize(
         history_block = f"\n\nRecent conversation summary:\n{history_summary}"
 
     # ── Single LLM call ───────────────────────────────────────────────────────
-    chunk_count = len(relevant)
+    chunk_count = len(relevant) + (1 if facts_block else 0)
     collection_list = ", ".join(sorted({c["collection"] for c in relevant}))
+    if facts_block:
+        collection_list = f"facts:{current_host}, " + collection_list
     temporal_note = (
         "\nNote: This is a temporal query — prioritize time-stamped ambient chunks "
         "and include specific times if available."
@@ -270,6 +312,8 @@ async def retrieve_and_synthesize(
                 f"Current query: {query}\n\n"
                 f"Now write a single cohesive paragraph that combines information from "
                 f"ALL the chunks above that are relevant to the query. "
+                f"Facts tagged with 'facts:{current_host or 'speaker'}' are the highest priority — "
+                f"use them first. "
                 f"Do not just summarize the first chunk — weave together everything relevant. "
                 f"Attribute naturally where perspectives differ (e.g. 'Jonah mentioned...', 'Oren noted...'). "
                 f"For ambient chunks, include speaker and time naturally if relevant "
@@ -291,7 +335,8 @@ async def retrieve_and_synthesize(
                 "You produce concise, attributed context summaries in flowing prose. "
                 "Never use bullet points or headers. Never invent information not present in the chunks. "
                 "For ambient memory chunks, preserve time and speaker references naturally. "
-                "Use personality context to inform tone and relevance, not to list facts."
+                "Use personality context to inform tone and relevance, not to list facts. "
+                "Facts labelled with the speaker's name are ground truth — always include them."
             ),
             max_new_tokens=300,
             temperature=0.3,

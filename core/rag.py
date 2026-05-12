@@ -7,9 +7,8 @@ Added:
   - retrieve_by_timerange(): filter by date/hour for temporal queries
   - retrieve_recent(): convenience for "earlier today" type queries
 
-Fix: embedding function is now a module-level singleton — loaded once,
-reused for every RAGStore instance. Previously it was re-initialized
-per RAGStore construction, causing the model to reload on every request.
+IMPORTANT: CHROMA_PERSIST_DIR defaults to /data/chroma (absolute) so
+it always lands on Render's persistent disk. Override via env var if needed.
 """
 
 import os
@@ -21,18 +20,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
+# Default to /data/chroma (Render persistent disk).
+# ./data/chroma is a relative path that resolves to the ephemeral
+# app directory on Render and will be wiped on every redeploy.
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "/data/chroma")
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-
-# ── Embedding function singleton ──────────────────────────────────────────────
-# Loaded once at module import time. Every RAGStore shares this instance.
-# This prevents the model from being reloaded on every request.
-
-print(f"[RAG] Loading embedding model: {EMBED_MODEL}")
-_EMBED_FN = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name=EMBED_MODEL
-)
-print(f"[RAG] Embedding model loaded.")
 
 
 class RAGStore:
@@ -40,11 +32,15 @@ class RAGStore:
         self,
         collection_name: str = "main",
         persist_dir: str = CHROMA_PERSIST_DIR,
+        embed_model: str = EMBED_MODEL,
     ):
         os.makedirs(persist_dir, exist_ok=True)
 
         self.client = chromadb.PersistentClient(path=persist_dir)
-        self.embed_fn = _EMBED_FN  # shared singleton — never reloaded
+        self.embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=embed_model
+        )
+        self._embed_model = embed_model
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
             embedding_function=self.embed_fn,
@@ -146,6 +142,13 @@ class RAGStore:
         query: str = "",
         n_results: int = 8,
     ) -> list[dict]:
+        """
+        Retrieve chunks whose topic metadata contains the given topic string.
+        ChromaDB stores topics as comma-separated strings, so we use $contains.
+
+        If query is provided, also scores by semantic similarity.
+        Otherwise returns by insertion order (most recent first via ID).
+        """
         n_results = min(n_results, self.collection.count())
         if n_results == 0:
             return []
@@ -188,12 +191,18 @@ class RAGStore:
     def retrieve_by_timerange(
         self,
         query: str,
-        date: Optional[str] = None,
-        hour_start: Optional[str] = None,
-        hour_end: Optional[str] = None,
+        date: Optional[str] = None,       # "YYYY-MM-DD", defaults to today
+        hour_start: Optional[str] = None,  # "HH" 24h format
+        hour_end: Optional[str] = None,    # "HH" 24h format
         n_results: int = 8,
         collection_override: Optional[str] = None,
     ) -> list[dict]:
+        """
+        Retrieve chunks filtered by date and optionally hour range.
+        Useful for "what were we talking about this morning" type queries.
+
+        Uses ChromaDB's $and/$gte/$lte operators on metadata fields.
+        """
         if collection_override:
             self.use_collection(collection_override)
 
@@ -242,6 +251,10 @@ class RAGStore:
         n_results: int = 8,
         collection_override: Optional[str] = None,
     ) -> list[dict]:
+        """
+        Convenience: retrieve from the past N hours.
+        Covers the "earlier today" / "this morning" use case.
+        """
         now = datetime.now()
         current_hour = int(now.strftime("%H"))
         start_hour = max(0, current_hour - hours_back)
@@ -258,6 +271,7 @@ class RAGStore:
     # ── Formatting ────────────────────────────────────────────────────────────
 
     def format_context(self, docs: list[dict]) -> str:
+        """Format retrieved docs into a context block for the LLM prompt."""
         if not docs:
             return ""
         sections = []
@@ -274,18 +288,5 @@ class RAGStore:
         return self.collection.count()
 
 
-# ── Lazy singleton ────────────────────────────────────────────────────────────
-
-_rag_instance = None
-
-def get_rag() -> "RAGStore":
-    global _rag_instance
-    if _rag_instance is None:
-        _rag_instance = RAGStore()
-    return _rag_instance
-
-class _LazyRAG:
-    def __getattr__(self, name):
-        return getattr(get_rag(), name)
-
-rag = _LazyRAG()
+# Singleton
+rag = RAGStore()

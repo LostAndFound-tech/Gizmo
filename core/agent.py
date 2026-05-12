@@ -29,6 +29,8 @@ from core.log import log, log_event, log_error
 from core.archivist import archivist, Brief
 from core.llm import llm
 from memory.history import get_session
+from core.personality_growth import retrieve_personality
+from memory.overview import get_overview
 
 # ── Quiet mode ────────────────────────────────────────────────────────────────
 
