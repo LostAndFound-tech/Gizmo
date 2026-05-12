@@ -952,9 +952,9 @@ class Agent:
             # Build persona for extraction context — same assembly as overview
             persona_parts = []
             try:
-                gizmo_persona = retrieve_personality(
-                    query=user_message,
-                    current_host=speaker,
+                gizmo_persona = await retrieve_personality(
+                query=user_message,
+                current_host=speaker,
                 )
                 if gizmo_persona:
                     persona_parts.append(gizmo_persona)
