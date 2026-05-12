@@ -226,8 +226,16 @@ async def _tool_precheck(
         else:
             del _pending_confirmations[session_id]
 
-    tool_list = "\n".join(
+        tool_list = "\n".join(
         f"- {name}: {tool.description}"
+        + (
+            "\n  Required args: " + ", ".join(
+                f"{k} ({v['type']})"
+                for k, v in tool.args_schema.items()
+                if "default" not in v
+            )
+            if hasattr(tool, "args_schema") else ""
+        )
         for name, tool in TOOL_REGISTRY.items()
     )
 
@@ -421,6 +429,49 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
 
     # ── Protocol block — after personality, before RAG ────────────────────────
     protocol_block = ""
+    active_read_block = ""
+    try:
+        from core.active_file import get_active_read
+        af_read = get_active_read(brief.session_id)
+        if af_read:
+            from pathlib import Path
+            import os
+            base_dir  = os.getenv("DATA_DIR", "/data")
+            full_path = Path(base_dir) / af_read["path"]
+            if full_path.exists():
+                contents = full_path.read_text(encoding="utf-8").strip()
+                if contents:
+                    active_read_block = (
+                        f"\n\n[Working document — {af_read['label']}]\n"
+                        f"{contents}"
+                    )
+            else:
+                active_read_block = (
+                    f"\n\n[Working document — {af_read['label']}]\n"
+                    f"(file not yet created)"
+                )
+    except Exception as e:
+        print(f"[Agent] active read file inject failed: {e}")
+    active_write_block = ""
+    try:
+        from core.active_file import get_active_write, get_active_read
+        af_write = get_active_write(brief.session_id)
+        if af_write:
+            # Only add the write notice if it's not the same file already shown above
+            af_read_path = (get_active_read(brief.session_id) or {}).get("path")
+            if af_write["path"] != af_read_path:
+                active_write_block = (
+                    f"\n\n[Recording to: {af_write['label']}]\n"
+                    f"Path: {af_write['path']}\n"
+                    f"Your responses this turn will be appended to this file automatically."
+                )
+            else:
+                # Same file — append a note to the existing read block
+                active_write_block = (
+                    f"\n(Your responses are being appended to this document as we go.)"
+                )
+    except Exception as e:
+        print(f"[Agent] active write file block failed: {e}")
     try:
         from core.protocol_manager import load_protocols_for_context
         context_dict = {
@@ -587,7 +638,7 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         for t in TOOL_REGISTRY.values()
     )
 
-    return f"""{personality}{protocol_block}
+    return f"""{personality}{protocol_block}{active_read_block}{active_write_block}
 
 Current time: {now_str}
 Message history includes [HH:MM] timestamps — use these to reason about elapsed time.
@@ -970,6 +1021,21 @@ class Agent:
                 source="body",
                 user_message=user_message,
             )
+        
+        try:
+            from core.active_file import get_active_write
+            af_write = get_active_write(session_id)
+            if af_write and response_text:
+                from tools.file_tool import AppendFileTool
+                asyncio.ensure_future(
+                    AppendFileTool().run(
+                        session_id=session_id,
+                        path=af_write["path"],
+                        content=f"\n\n{response_text}",
+                    )
+                )
+        except Exception as e:
+            log_error("Agent", "active file append failed", exc=e)
 
         # ── 6. Protocol NLP detection — async, never blocks ───────────────────
         asyncio.ensure_future(
