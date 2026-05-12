@@ -680,7 +680,10 @@ def _parse_markers(text: str) -> list[dict]:
 
 
 def _strip_markers(text: str) -> str:
-    return _MARKER_RE.sub("", text).strip()
+    # Use a simpler pattern here rather than _MARKER_RE — the main regex
+    # stops early if a content arg contains ] characters, which causes
+    # the full marker to leak into the response as plain text.
+    return _re.sub(r'\[TOOL:[^\[]*?\]', '', text, flags=_re.DOTALL).strip()
 
 
 async def _execute_marker(marker: dict, session_id: str) -> tuple[bool, str, bool]:
