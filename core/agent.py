@@ -17,7 +17,7 @@ Flow:
   5. Body → generate
   6. Archivist ← outgoing (close loop)
   7. Protocol NLP detection (async, never blocks)
-  8. Fact extraction (async, never blocks) ← NEW
+  8. Fact extraction (async, never blocks)
   9. Stream to caller
 """
 
@@ -32,7 +32,6 @@ from core.llm import llm
 from memory.history import get_session
 from core.personality_growth import retrieve_personality
 from memory.overview import get_overview
-from core.message_parser import ParsedMessage as _PM
 
 # ── Quiet mode ────────────────────────────────────────────────────────────────
 
@@ -208,7 +207,6 @@ async def _tool_precheck(
     """
     from core.agent_tools import TOOL_REGISTRY
 
-    # Check if we're waiting on a confirmation from a previous turn
     pending = _pending_confirmations.get(session_id)
     if pending:
         if _CONFIRM_RE.search(message):
@@ -233,7 +231,6 @@ async def _tool_precheck(
         for name, tool in TOOL_REGISTRY.items()
     )
 
-    # Explicit write intent — lower the confidence threshold
     explicit_write = bool(_re.search(
         r"\b(write|create|save|make|add|put|store)\b.{0,30}\b(file|rule|protocol|note|list)\b",
         message,
@@ -289,7 +286,6 @@ async def _tool_precheck(
         tool_args   = data.get("args", {})
         confirm_msg = data.get("confirm_prompt")
 
-        # Explicit write requests: treat 50+ as fire
         threshold = 50 if explicit_write else 70
 
         log_event("Agent", "PRECHECK_RESULT",
@@ -510,22 +506,6 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         context_lines.append(f"  fronters: {', '.join(brief.fronters)}")
     if brief.emotional_register != "neutral":
         context_lines.append(f"  emotional_register: {brief.emotional_register}")
-    # ── Stage directions block ────────────────────────────────────────────────
-    stage_block = ""
-    if getattr(brief, "stage_directions", None):
-        # Reuse the formatter from ParsedMessage
-        lines = ["[Stage]"]
-        for s in brief.stage_directions:
-            lines.append(f"  - {s}")
-        stage_block = "\n\n" + "\n".join(lines)
- 
-    # ── Lore block ────────────────────────────────────────────────────────────
-    lore_block = ""
-    if getattr(brief, "lore", None):
-        lines = ["[Context]"]
-        for l in brief.lore:
-            lines.append(f"  - {l}")
-        lore_block = "\n\n" + "\n".join(lines)
     if brief.field_snapshot.get("hot"):
         context_lines.append(f"  active_topics: {', '.join(brief.field_snapshot['hot'])}")
     context_block = (
@@ -544,14 +524,11 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         pass
 
     # ── Overview block ────────────────────────────────────────────────────────
-    # Written through Gizmo's persona + per-fronter context so it stays
-    # in-character and avoids content-filter trips on the summary call.
     overview_block = ""
     try:
-        # Build persona: Gizmo's own voice + what he knows about each fronter
         persona_parts = []
         try:
-            gizmo_persona = retrieve_personality(
+            gizmo_persona = await retrieve_personality(
                 query=brief.message,
                 current_host=brief.headmate,
             )
@@ -587,6 +564,31 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
     except Exception as e:
         print(f"[Agent] overview build failed: {e}")
 
+    # ── Stage directions block ────────────────────────────────────────────────
+    # *action* / **action** — extracted by message_parser in archivist.receive()
+    # Tells Gizmo what's happening in the room without it being speech.
+    # Never stored as a fact. Never treated as something said.
+    stage_block = ""
+    stage_directions = getattr(brief, "stage_directions", None)
+    if stage_directions:
+        lines = ["[Stage]"]
+        for s in stage_directions:
+            lines.append(f"  - {s}")
+        stage_block = "\n\n" + "\n".join(lines)
+
+    # ── Lore block ────────────────────────────────────────────────────────────
+    # (context) — extracted by message_parser in archivist.receive()
+    # Background knowledge the speaker wants Gizmo to treat as known truth.
+    # IS stored as fact (fired async in archivist). Injected here for
+    # immediate use in this turn before it lands in ChromaDB.
+    lore_block = ""
+    lore = getattr(brief, "lore", None)
+    if lore:
+        lines = ["[Context]"]
+        for l in lore:
+            lines.append(f"  - {l}")
+        lore_block = "\n\n" + "\n".join(lines)
+
     # ── Tools ─────────────────────────────────────────────────────────────────
     from core.agent_tools import TOOL_REGISTRY
     tool_descriptions = "\n".join(
@@ -616,7 +618,7 @@ Examples:
 [TOOL: set_interaction_pref | host: jess | field: tone | value: direct and dry]
 [TOOL: switch_host | name: kaylee]
 [TOOL: introspect | query: headmate:oren]
-[TOOL: create_protocol | name: jess_rules | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}{stage_block}{lore_block}
+[TOOL: create_protocol | name: jess_rules | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}{overview_block}{stage_block}{lore_block}
 
 The person in "current_host" is who you are speaking WITH right now — address them as "you".
 Be concise. Be accurate. When uncertain, say so.
@@ -654,7 +656,18 @@ PROTOCOL RULES:
 - When you establish a rule or boundary in conversation, use create_protocol to make it permanent.
 - Protocols always write to /data/personality/protocols/ — never anywhere else.
 - Never read before writing a protocol. Write first. append_file handles duplicates safely.
-- Protocols persist across sessions. You wrote them. They are yours."""
+- Protocols persist across sessions. You wrote them. They are yours.
+
+STAGE DIRECTION RULES:
+- [Stage] contains physical actions, emotional cues, and room context — not speech.
+- React to stage directions naturally. If someone is *nervous*, meet that energy.
+- Never quote or reference stage directions directly in your response.
+- Stage directions are not stored as memories.
+
+LORE RULES:
+- [Context] contains background knowledge the person wants you to treat as true.
+- Use it immediately. It has already been queued for long-term storage.
+- Treat it as established fact, not new information."""
 
 
 # ── Marker pattern ────────────────────────────────────────────────────────────
@@ -723,7 +736,6 @@ async def _generate(
     system_prompt = direction["system_prompt"]
     messages      = history.as_messages_with_timestamps(brief.message)
 
-    # If precheck fired a tool, inject the result before generating
     injected_precheck = ""
     if precheck_result and precheck_result.get("fire") and precheck_result.get("tool"):
         output = await _fire_precheck_tool(
@@ -763,7 +775,11 @@ async def _generate(
 
     inject_results  = []
     fired_one_shots = []
-    ONE_SHOT_TOOLS  = {"switch_host", "log_correction", "alter_wheel"}
+    # ONE_SHOT_TOOLS fire once and must never fire again in the same response
+    # cycle. create_protocol is included because the system prompt aggressively
+    # instructs Gizmo to write protocols — without tracking it here, the second
+    # pass sees the instruction again and emits another marker, looping forever.
+    ONE_SHOT_TOOLS  = {"switch_host", "log_correction", "alter_wheel", "create_protocol"}
 
     for marker in markers:
         success, output, needs_inject = await _execute_marker(marker, brief.session_id)
@@ -772,8 +788,15 @@ async def _generate(
         if marker["name"] in ONE_SHOT_TOOLS:
             fired_one_shots.append(marker["name"])
 
+    # Tools that must not fire again this cycle — read tools + anything already fired
+    _skip_in_second_pass = _READ_TOOLS | set(fired_one_shots)
+
     if inject_results:
         injected = "\n\n".join(inject_results)
+        no_repeat = (
+            f"\n\nDo NOT emit markers for: {', '.join(fired_one_shots)}. "
+            f"Those already ran."
+        ) if fired_one_shots else ""
         second_messages = messages.copy()
         second_messages[-1] = {
             "role":    "user",
@@ -783,12 +806,13 @@ async def _generate(
                 f"\n\nYou have read the above. Now complete the original request: "
                 f'"{brief.message}". If the request was to write or create something, '
                 f"do it now using the appropriate write tool. Do not stop at reading."
+                f"{no_repeat}"
             ),
         }
         response2 = await llm.generate(second_messages, system_prompt=system_prompt)
         print(f"[Body] second pass raw='{response2[:200]}'")
         for marker in _parse_markers(response2):
-            if marker["name"] not in _READ_TOOLS:
+            if marker["name"] not in _skip_in_second_pass:
                 await _execute_marker(marker, brief.session_id)
         clean = _strip_markers(response2)
         log_event("Body", "GENERATED",
@@ -801,10 +825,16 @@ async def _generate(
         return
 
     if fired_one_shots:
+        fired_list = ", ".join(fired_one_shots)
         second_messages = messages.copy()
         second_messages[-1] = {
             "role":    "user",
-            "content": brief.message + f"\n\n[{fired_one_shots[0]} executed successfully. Respond naturally.]",
+            "content": (
+                f"{brief.message}"
+                f"\n\n[Tools already executed this turn: {fired_list}]"
+                f"\n\nThose tools have already run and must NOT be called again. "
+                f"Respond naturally in plain text only — no tool markers of any kind."
+            ),
         }
         response2 = await llm.generate(second_messages, system_prompt=system_prompt)
         clean = _strip_markers(response2)
@@ -832,11 +862,6 @@ async def _extract_facts_async(
     session_id: str,
     persona: Optional[str],
 ) -> None:
-    """
-    Extract all subjects and facts from the user message and write
-    immediately to ChromaDB under the speaker's collection.
-    Runs fire-and-forget — never touches the response path.
-    """
     try:
         from memory.memory_writer import extract_and_store
         await extract_and_store(
@@ -917,8 +942,8 @@ class Agent:
         )
 
         # ── 2. Mind + tool precheck — parallel ────────────────────────────────
-        facts_task    = asyncio.create_task(_get_facts(brief))
-        precheck_task = asyncio.create_task(_tool_precheck(user_message, brief, session_id))
+        facts_task     = asyncio.create_task(_get_facts(brief))
+        precheck_task  = asyncio.create_task(_tool_precheck(user_message, brief, session_id))
         direction_task = asyncio.create_task(_get_direction_stub(brief))
 
         facts, precheck_result = await asyncio.gather(facts_task, precheck_task)
@@ -962,16 +987,13 @@ class Agent:
         )
 
         # ── 7. Fact extraction — async, never blocks ──────────────────────────
-        # Extracts every subject + fact from the user message immediately,
-        # tagged with the speaker so reads are always speaker-filtered.
         speaker = ctx.get("current_host", "")
         if speaker and response_text:
-            # Build persona for extraction context — same assembly as overview
             persona_parts = []
             try:
                 gizmo_persona = await retrieve_personality(
-                query=user_message,
-                current_host=speaker,
+                    query=user_message,
+                    current_host=speaker,
                 )
                 if gizmo_persona:
                     persona_parts.append(gizmo_persona)
