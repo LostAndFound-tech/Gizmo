@@ -226,7 +226,7 @@ async def _tool_precheck(
         else:
             del _pending_confirmations[session_id]
 
-        tool_list = "\n".join(
+    tool_list = "\n".join(
         f"- {name}: {tool.description}"
         + (
             "\n  Required args: " + ", ".join(
@@ -394,6 +394,14 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
 
     # ── Personality seed ──────────────────────────────────────────────────────
     personality = "You are Gizmo, a persistent AI companion."
+    try:
+        from tools.active_file_tool import SetActiveFileTool, CloseActiveFileTool
+        _set_active_file   = SetActiveFileTool()
+        _close_active_file = CloseActiveFileTool()
+    except Exception as e:
+        log("Agent", f"WARNING: active_file_tool failed to load: {e}")
+        _set_active_file   = None
+        _close_active_file = None
     try:
         from tools.memory_tool import _get_collection, CONSCIOUS_COLLECTION
         col   = _get_collection(CONSCIOUS_COLLECTION)
