@@ -375,6 +375,7 @@ async def detect_and_create_protocol(
                 host=current_host,
                 tags=data.get("tags", []),
             )
+        print(f"[ProtocolManager] write attempted: {path} | exists={path.exists()} | dir_writable={os.access(str(protocols_dir), os.W_OK)}")
 
         return result
 
