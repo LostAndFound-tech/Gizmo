@@ -239,6 +239,11 @@ async def _tool_precheck(
         for name, tool in TOOL_REGISTRY.items()
     )
 
+    _READ_TOOLS = {
+    "memory_read", "memory_list", "introspect", "read_file",
+    "list_files", "view_interaction_prefs", "recall_search", "recall_read",
+}
+
     explicit_write = bool(_re.search(
         r"\b(write|create|save|make|add|put|store)\b.{0,30}\b(file|rule|protocol|note|list)\b",
         message,
@@ -646,6 +651,11 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
         for t in TOOL_REGISTRY.values()
     )
 
+    _READ_TOOLS = {
+    "memory_read", "memory_list", "introspect", "read_file",
+    "list_files", "view_interaction_prefs", "recall_search", "recall_read",
+}
+
     return f"""{personality}{protocol_block}{active_read_block}{active_write_block}
 
 Current time: {now_str}
@@ -704,8 +714,10 @@ MEMORY RULES — follow these without being asked:
 PROTOCOL RULES:
 - [Active Protocols] are your own rules and commitments — follow them without being reminded.
 - When you establish a rule or boundary in conversation, use create_protocol to make it permanent.
+- To UPDATE an existing protocol: read it first with read_file, then replace it with rewrite_file.
+- To CREATE a new protocol: use create_protocol.
+- Never stack a new version below an old one in the same file. Rewrite cleanly.
 - Protocols always write to /data/personality/protocols/ — never anywhere else.
-- Never read before writing a protocol. Write first. append_file handles duplicates safely.
 - Protocols persist across sessions. You wrote them. They are yours.
 
 STAGE DIRECTION RULES:
@@ -717,7 +729,18 @@ STAGE DIRECTION RULES:
 LORE RULES:
 - [Context] contains background knowledge the person wants you to treat as true.
 - Use it immediately. It has already been queued for long-term storage.
-- Treat it as established fact, not new information."""
+- Treat it as established fact, not new information.
+
+RECALL RULES:
+- Use recall_search when someone references something from earlier — 'earlier today',
+  'last time', 'what did you say about X', 'do you remember when'.
+- recall_search returns stubs — short previews. Read them, decide if any are relevant.
+- Use recall_read with a specific id only when a stub looks like it contains the answer.
+- Search by topics first: extract keywords from the question, pass as topics array.
+- Combine filters: host + topics + since for precise results.
+- recall_search is cheap. recall_read costs more. Use search first, read sparingly.
+"""
+
 
 
 # ── Marker pattern ────────────────────────────────────────────────────────────

@@ -593,6 +593,26 @@ class Archivist:
                 )
             except Exception as e:
                 log_error("Archivist", "session_manager.touch failed", exc=e)
+            
+            try:
+                from core.message_store import insert_exchange
+                insert_exchange(
+                    session_id         = session_id,
+                    timestamp          = time.time(),
+                    host               = headmate,
+                    fronters           = fronters,
+                    user_message       = user_message,
+                    gizmo_response     = message,
+                    topics             = topics,
+                    emotional_register = register,
+                    mood               = "neutral",
+                    tags               = topics,
+                    notable            = False,
+                    stage_directions   = list(getattr(brief, "stage_directions", None) or []),
+                    lore               = list(getattr(brief, "lore", None) or []),
+                )
+            except Exception as e:
+                log_error("Archivist", "message_store insert failed", exc=e)
         except Exception as e:
             log_error("Archivist", "append_exchange failed", exc=e)
 

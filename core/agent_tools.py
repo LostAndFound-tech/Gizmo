@@ -12,6 +12,9 @@ from core.log import log
 from tools.introspect_tool import IntrospectTool
 from tools.protocol_tool import CreateProtocolTool
 from tools.active_file_tool import SetActiveFileTool, CloseActiveFileTool
+from tools.recall_search_tool import RecallSearchTool
+from tools.recall_read_tool import RecallReadTool
+from tools.rewrite_file_tool import RewriteFileTool
 
 try:
     from tools.switch_host import SwitchHostTool
@@ -63,6 +66,7 @@ try:
         DeleteFileTool,
         ConfirmWriteTool,
         CancelWriteTool,
+        
     )
     _read_file     = ReadFileTool()
     _write_file    = WriteFileTool()
@@ -81,14 +85,33 @@ except Exception as e:
     _confirm_write = None
     _cancel_write  = None
 
+try:
+    from tools.recall_search_tool import RecallSearchTool
+    from tools.recall_read_tool   import RecallReadTool
+    _recall_search = RecallSearchTool()
+    _recall_read   = RecallReadTool()
+except Exception as e:
+    log("Agent", f"WARNING: recall tools failed to load: {e}")
+    _recall_search = None
+    _recall_read   = None
+ 
+try:
+    from tools.rewrite_file_tool import RewriteFileTool
+    _rewrite_file = RewriteFileTool()
+except Exception as e:
+    log("Agent", f"WARNING: rewrite_file_tool failed to load: {e}")
+    _rewrite_file = None
+
 # Build registry — skip any tools that failed to load
 TOOL_REGISTRY = {
     tool.name: tool for tool in [
         IntrospectTool(),
         CreateProtocolTool(),
         SetActiveFileTool(),
-        CloseActiveFileTool()
-
+        CloseActiveFileTool(),
+        RecallSearchTool(),
+        RecallReadTool(),
+        RewriteFileTool()
     ]
 }
 
