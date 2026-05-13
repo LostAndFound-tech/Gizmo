@@ -70,8 +70,53 @@ async def _query_librarian(
     query: str,
     headmate: Optional[str],
 ) -> dict:
-    """Stub — always returns empty. Grows into real component later."""
-    return {"text": "", "confidence": 0.0, "domain": ""}
+    """
+    Query the knowledge graph for structured relationship edges.
+    Returns formatted knowledge block if strong edges exist.
+    This is Tier 1 — fires before RAG, returns high-confidence structured facts.
+    """
+    if not headmate:
+        return {"text": "", "confidence": 0.0, "domain": ""}
+ 
+    try:
+        from core.knowledge_graph import query_context, format_for_prompt
+ 
+        edges = query_context(
+            subject     = headmate,
+            topics      = topics,
+            min_strength= 0.25,
+            limit       = 15,
+        )
+ 
+        if not edges:
+            return {"text": "", "confidence": 0.0, "domain": ""}
+ 
+        # Score confidence based on average edge strength and count
+        avg_strength = sum(e["strength"] for e in edges) / len(edges)
+        count_bonus  = min(0.2, len(edges) * 0.02)
+        confidence   = min(0.85, avg_strength + count_bonus)
+ 
+        text = format_for_prompt(edges, subject=headmate)
+ 
+        if not text:
+            return {"text": "", "confidence": 0.0, "domain": ""}
+ 
+        log_event("Mind", "LIBRARIAN_HIT",
+            headmate = headmate,
+            edges    = len(edges),
+            confidence = round(confidence, 2),
+            topics   = topics,
+        )
+ 
+        return {
+            "text":       text,
+            "confidence": confidence,
+            "domain":     "knowledge_graph",
+        }
+ 
+    except Exception as e:
+        log_error("Mind", "librarian query failed", exc=e)
+        return {"text": "", "confidence": 0.0, "domain": ""}
 
 
 # ── RAG retrieval ─────────────────────────────────────────────────────────────

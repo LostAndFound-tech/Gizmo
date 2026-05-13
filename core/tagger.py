@@ -282,6 +282,26 @@ async def tag_exchange(
                 effect     = effect,
                 summary    = summary,
             )
+                    # ── Graph extractor — extract typed relationship edges ────────────────
+        try:
+            from core.graph_extractor import extract_edges
+            asyncio.ensure_future(
+                extract_edges(
+                    session_id     = session_id,
+                    user_message   = user_message,
+                    gizmo_response = gizmo_response,
+                    host           = host,
+                    fronters       = fronters,
+                    topics         = topics,
+                    mood           = mood,
+                    cause          = cause,
+                    effect         = effect,
+                    llm            = llm,
+                )
+            )
+        except Exception as e:
+            log_error("Tagger", "graph extractor failed to schedule", exc=e)
+
             # Update notable flag separately if true
             if notable:
                 try:
