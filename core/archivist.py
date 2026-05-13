@@ -596,7 +596,7 @@ class Archivist:
             
             try:
                 from core.message_store import insert_exchange
-                insert_exchange(
+                msg_id = insert_exchange(
                     session_id         = session_id,
                     timestamp          = time.time(),
                     host               = headmate,
@@ -605,14 +605,15 @@ class Archivist:
                     gizmo_response     = message,
                     topics             = topics,
                     emotional_register = register,
-                    mood               = "neutral",
+                    mood               = "neutral",       # tagger.py will update this
                     tags               = topics,
                     notable            = False,
-                    stage_directions   = list(getattr(brief, "stage_directions", None) or []),
-                    lore               = list(getattr(brief, "lore", None) or []),
+                    stage_directions   = list(getattr(brief, "stage_directions", None) or []) if brief else [],
+                    lore               = list(getattr(brief, "lore", None) or []) if brief else [],
                 )
             except Exception as e:
                 log_error("Archivist", "message_store insert failed", exc=e)
+                msg_id = None
         except Exception as e:
             log_error("Archivist", "append_exchange failed", exc=e)
 

@@ -594,6 +594,39 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
             mood_block = f"\n\n{mb}"
     except Exception:
         pass
+ 
+    # ── Last exchange context — from message store (LLM-tagged, accurate) ─────
+    last_exchange_block = ""
+    try:
+        from core.message_store import get_recent
+        # Get the most recent tagged exchange for this host
+        recent = get_recent(
+            host  = brief.headmate or None,
+            limit = 1,
+        )
+        # Fall back to any recent exchange if no host-specific one found
+        if not recent:
+            recent = get_recent(limit=1)
+ 
+        if recent:
+            last = recent[0]
+            # Only inject if it was tagged by the LLM (has real mood/cause/effect)
+            if last.get("tagged"):
+                lines = ["[Last exchange]"]
+                if last.get("mood"):
+                    lines.append(f"  mood: {last['mood']}")
+                if last.get("gizmo_tone"):
+                    lines.append(f"  your tone: {last['gizmo_tone']}")
+                if last.get("cause"):
+                    lines.append(f"  cause: {last['cause']}")
+                if last.get("effect"):
+                    lines.append(f"  effect: {last['effect']}")
+                if last.get("summary"):
+                    lines.append(f"  summary: {last['summary']}")
+                if len(lines) > 1:
+                    last_exchange_block = "\n\n" + "\n".join(lines)
+    except Exception as e:
+        print(f"[Agent] last exchange inject failed: {e}")
 
     # ── Overview block ────────────────────────────────────────────────────────
     overview_block = ""
@@ -656,7 +689,7 @@ def _build_system_prompt(brief: Brief, facts: dict) -> str:
     "list_files", "view_interaction_prefs", "recall_search", "recall_read",
 }
 
-    return f"""{personality}{protocol_block}{active_read_block}{active_write_block}
+    return f"""{personality}{protocol_block}{active_read_block}{active_write_block}{mood_block}{last_exchange_block}{overview_block}{stage_block}{lore_block}
 
 Current time: {now_str}
 Message history includes [HH:MM] timestamps — use these to reason about elapsed time.
