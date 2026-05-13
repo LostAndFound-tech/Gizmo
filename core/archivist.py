@@ -594,29 +594,53 @@ class Archivist:
             except Exception as e:
                 log_error("Archivist", "session_manager.touch failed", exc=e)
             
-            try:
-                from core.message_store import insert_exchange
-                msg_id = insert_exchange(
-                    session_id         = session_id,
-                    timestamp          = time.time(),
-                    host               = headmate,
-                    fronters           = fronters,
-                    user_message       = user_message,
-                    gizmo_response     = message,
-                    topics             = topics,
-                    emotional_register = register,
-                    mood               = "neutral",       # tagger.py will update this
-                    tags               = topics,
-                    notable            = False,
-                    stage_directions   = list(getattr(brief, "stage_directions", None) or []) if brief else [],
-                    lore               = list(getattr(brief, "lore", None) or []) if brief else [],
-                )
-            except Exception as e:
-                log_error("Archivist", "message_store insert failed", exc=e)
-                msg_id = None
+        try:
+            from core.message_store import insert_exchange
+            msg_id = insert_exchange(
+                session_id         = session_id,
+                timestamp          = time.time(),
+                host               = host,
+                fronters           = fronters,
+                user_message       = user_message,
+                gizmo_response     = message,
+                topics             = topics,
+                emotional_register = "neutral",
+                mood               = "neutral",       # tagger.py will update this
+                tags               = topics,
+                notable            = False,
+                stage_directions   = list(getattr(brief, "stage_directions", None) or []) if brief else [],
+                lore               = list(getattr(brief, "lore", None) or []) if brief else [],
+            )
+        except Exception as e:
+            log_error("Archivist", "message_store insert failed", exc=e)
+            msg_id = None
         except Exception as e:
             log_error("Archivist", "append_exchange failed", exc=e)
 
+            if msg_id:
+                try:
+                    from core.tagger import tag_exchange
+                    from core.llm import llm as _llm
+    
+                    # Get prior context for cause/effect reasoning
+                    prior_topics = list(conv_field.last_topics) if hasattr(conv_field, "last_topics") else []
+                    prior_mood   = ""  # tagger builds this from arc over time
+    
+                    asyncio.ensure_future(
+                        tag_exchange(
+                            msg_id        = msg_id,
+                            session_id    = session_id,
+                            user_message  = user_message,
+                            gizmo_response= message,
+                            host          = headmate,
+                            fronters      = fronters,
+                            prior_topics  = prior_topics,
+                            prior_mood    = prior_mood,
+                            llm           = _llm,
+                        )
+                    )
+                except Exception as e:
+                    log_error("Archivist", "tagger failed to schedule", exc=e)
         log_event(
             "Archivist", "OUTGOING",
             source=source,
