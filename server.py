@@ -710,52 +710,63 @@ class GizmoServer:
         log("GizmoServer", "initialised")
 
     async def start(self, host: str = "0.0.0.0", port: int = 10000) -> None:
-        import websockets
-        from websockets.server import serve
+        from aiohttp import web
+        from pathlib import Path
         from core.llm import llm
         from core.session_manager import session_manager
-        from pathlib import Path
 
         await session_manager.start(llm=llm)
 
-        async def handler(websocket):
-            # Handle HTTP requests (Render health checks, serve frontend)
-            if websocket.request.method != "GET" or \
-               websocket.request.headers.get("upgrade", "").lower() != "websocket":
-                # Not a WebSocket upgrade — serve HTTP
-                path = websocket.request.path
-                if path in ("/health", "/healthz"):
-                    await websocket.respond(200, {"Content-Type": "application/json"}, b'{"status":"ok"}')
-                else:
-                    # Serve index.html
-                    html_path = Path(__file__).parent / "index.html"
-                    body = html_path.read_bytes() if html_path.exists() else b"<h1>Gizmo</h1>"
-                    await websocket.respond(200, {"Content-Type": "text/html"}, body)
-                return
+        app = web.Application()
 
-            # WebSocket connection
-            session_id = f"sess_{id(websocket):016x}"
-            self._connections[session_id] = websocket
+        # ── HTTP routes ───────────────────────────────────────────────────────
+        async def handle_index(request):
+            html_path = Path(__file__).parent / "index.html"
+            if html_path.exists():
+                return web.Response(
+                    text=html_path.read_text(encoding="utf-8"),
+                    content_type="text/html",
+                )
+            return web.Response(text="<h1>Gizmo</h1>", content_type="text/html")
+
+        async def handle_health(request):
+            return web.Response(text='{"status":"ok"}', content_type="application/json")
+
+        # ── WebSocket route ───────────────────────────────────────────────────
+        async def handle_ws(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+
+            session_id = f"sess_{id(ws):016x}"
+            self._connections[session_id] = ws
             log_event("GizmoServer", "CONNECTION_OPENED", session=session_id[:8])
 
             try:
-                async for raw_msg in websocket:
-                    await self._handle_message(websocket, session_id, raw_msg)
-            except Exception as e:
-                if "ConnectionClosed" not in type(e).__name__:
-                    log_error("GizmoServer", f"connection error: {e}", exc=e)
+                async for msg in ws:
+                    from aiohttp import WSMsgType
+                    if msg.type == WSMsgType.TEXT:
+                        await self._handle_message(ws, session_id, msg.data)
+                    elif msg.type == WSMsgType.ERROR:
+                        log_error("GizmoServer", f"ws error: {ws.exception()}", exc=None)
             finally:
                 self._connections.pop(session_id, None)
                 log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
 
+            return ws
+
+        app.router.add_get("/",       handle_index)
+        app.router.add_get("/health", handle_health)
+        app.router.add_get("/ws",     handle_ws)
+
         log_event("GizmoServer", "STARTING", host=host, port=port)
 
-        async with serve(handler, host, port,
-                         max_size=1_000_000,
-                         ping_interval=30,
-                         ping_timeout=10):
-            log_event("GizmoServer", "LISTENING", host=host, port=port)
-            await asyncio.Future()  # run forever
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host, port)
+        await site.start()
+
+        log_event("GizmoServer", "LISTENING", host=host, port=port)
+        await asyncio.Future()  # run forever
 
     async def _handle_connection(self, websocket, path: str = "/") -> None:
         """Handle a single WebSocket connection."""
@@ -1040,7 +1051,7 @@ class GizmoServer:
 
     async def _send(self, websocket, data: dict) -> None:
         try:
-            await websocket.send(json.dumps(data))
+            await websocket.send_str(json.dumps(data))
         except Exception:
             pass
 
