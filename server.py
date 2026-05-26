@@ -710,74 +710,52 @@ class GizmoServer:
         log("GizmoServer", "initialised")
 
     async def start(self, host: str = "0.0.0.0", port: int = 10000) -> None:
-        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-        from fastapi.responses import HTMLResponse
-        from fastapi.middleware.cors import CORSMiddleware
-        import uvicorn
-        from pathlib import Path
+        import websockets
+        from websockets.server import serve
         from core.llm import llm
         from core.session_manager import session_manager
+        from pathlib import Path
 
-        app = FastAPI()
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+        await session_manager.start(llm=llm)
 
-        @app.on_event("startup")
-        async def startup():
-            await session_manager.start(llm=llm)
-            log_event("GizmoServer", "READY", host=host, port=port)
+        async def handler(websocket):
+            # Handle HTTP requests (Render health checks, serve frontend)
+            if websocket.request.method != "GET" or \
+               websocket.request.headers.get("upgrade", "").lower() != "websocket":
+                # Not a WebSocket upgrade — serve HTTP
+                path = websocket.request.path
+                if path in ("/health", "/healthz"):
+                    await websocket.respond(200, {"Content-Type": "application/json"}, b'{"status":"ok"}')
+                else:
+                    # Serve index.html
+                    html_path = Path(__file__).parent / "index.html"
+                    body = html_path.read_bytes() if html_path.exists() else b"<h1>Gizmo</h1>"
+                    await websocket.respond(200, {"Content-Type": "text/html"}, body)
+                return
 
-        # Serve the frontend
-        @app.get("/")
-        async def index():
-            html_path = Path(__file__).parent / "index.html"
-            if html_path.exists():
-                return HTMLResponse(html_path.read_text(encoding="utf-8"))
-            return HTMLResponse("<h1>Gizmo</h1>")
-
-        # Health check for Render
-        @app.get("/health")
-        async def health():
-            return {"status": "ok"}
-
-        # WebSocket endpoint
-        @app.websocket("/ws")
-        async def ws_endpoint(websocket: WebSocket):
-            await websocket.accept()
+            # WebSocket connection
             session_id = f"sess_{id(websocket):016x}"
             self._connections[session_id] = websocket
-
-            log_event("GizmoServer", "CONNECTION_OPENED",
-                session=session_id[:8])
+            log_event("GizmoServer", "CONNECTION_OPENED", session=session_id[:8])
 
             try:
-                while True:
-                    raw_msg = await websocket.receive_text()
+                async for raw_msg in websocket:
                     await self._handle_message(websocket, session_id, raw_msg)
-            except WebSocketDisconnect:
-                pass
             except Exception as e:
-                if "disconnect" not in str(e).lower():
+                if "ConnectionClosed" not in type(e).__name__:
                     log_error("GizmoServer", f"connection error: {e}", exc=e)
             finally:
                 self._connections.pop(session_id, None)
-                log_event("GizmoServer", "CONNECTION_CLOSED",
-                    session=session_id[:8])
+                log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
 
         log_event("GizmoServer", "STARTING", host=host, port=port)
 
-        config = uvicorn.Config(
-            app,
-            host=host,
-            port=port,
-            log_level="warning",
-        )
-        server = uvicorn.Server(config)
-        await server.serve()
+        async with serve(handler, host, port,
+                         max_size=1_000_000,
+                         ping_interval=30,
+                         ping_timeout=10):
+            log_event("GizmoServer", "LISTENING", host=host, port=port)
+            await asyncio.Future()  # run forever
 
     async def _handle_connection(self, websocket, path: str = "/") -> None:
         """Handle a single WebSocket connection."""
@@ -1062,7 +1040,7 @@ class GizmoServer:
 
     async def _send(self, websocket, data: dict) -> None:
         try:
-            await websocket.send_text(json.dumps(data))
+            await websocket.send(json.dumps(data))
         except Exception:
             pass
 

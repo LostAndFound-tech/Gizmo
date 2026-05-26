@@ -523,8 +523,8 @@
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
 const WS_URL = location.protocol === 'https:'
-  ? `wss://${location.hostname}/ws`
-  : `ws://${location.hostname}:8765/ws`;
+  ? `wss://${location.hostname}`
+  : `ws://${location.hostname}:10000`;
 const SESSION_ID  = 'sess_' + Math.random().toString(36).slice(2, 10);
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -540,10 +540,13 @@ let pendingHostIdentification = false;
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
+  if (ws && ws.readyState === WebSocket.CONNECTING) return;
   setStatus('');
+  console.log('[ws] connecting to', WS_URL);
   try {
     ws = new WebSocket(WS_URL);
   } catch (e) {
+    console.error('[ws] failed to create WebSocket:', e);
     setTimeout(connect, 3000);
     return;
   }
@@ -551,6 +554,7 @@ function connect() {
   ws.onopen = () => {
     connected = true;
     setStatus('connected');
+    console.log('[ws] connected');
     ws.send(JSON.stringify({ type: 'ping' }));
   };
 
@@ -559,13 +563,15 @@ function connect() {
     handleIncoming(msg);
   };
 
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     connected = false;
     setStatus('');
+    console.log('[ws] closed, code:', e.code);
     setTimeout(connect, 2000);
   };
 
-  ws.onerror = () => {
+  ws.onerror = (e) => {
+    console.error('[ws] error:', e);
     setStatus('error');
   };
 }
@@ -749,7 +755,14 @@ function cycleType(box, btn, textarea) {
 
 // ── Send ──────────────────────────────────────────────────────────────────────
 function send() {
-  if (!connected || thinking) return;
+  console.log('[send] connected:', connected, 'thinking:', thinking, 'ws state:', ws?.readyState);
+  if (thinking) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.warn('[send] WebSocket not open, readyState:', ws?.readyState);
+    setStatus('error');
+    connect();
+    return;
+  }
 
   const boxes     = document.querySelectorAll('.voice-box');
   const parts     = [];
