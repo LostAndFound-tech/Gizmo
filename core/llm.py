@@ -19,9 +19,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY    = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENROUTER_API_KEY") or os.getenv("HF_TOKEN")
-MODEL_ID   = os.getenv("HF_MODEL_ID", "deepseek-chat")
-ROUTER_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
+API_KEY    = os.getenv("OPENROUTER_API_KEY") or os.getenv("HF_TOKEN")
+MODEL_ID   = os.getenv("HF_MODEL_ID", "deepseek/deepseek-v4-pro")
+ROUTER_URL = "https://openrouter.ai/api/v1"
 
 MAX_RETRIES     = 3
 RETRY_DELAY     = 1.5
