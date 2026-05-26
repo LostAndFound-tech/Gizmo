@@ -1099,7 +1099,7 @@ server = GizmoServer()
 async def main():
     import os
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8765"))
+    port = int(os.getenv("PORT", "10000"))
     await server.start(host=host, port=port)
 
 
