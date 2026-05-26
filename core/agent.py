@@ -1257,18 +1257,26 @@ async def generate_response(
         system_prompt = system_prompt[:6000] + "\n[...truncated]"
 
     print(f"[generate_response] system_prompt length: {len(system_prompt)} chars", flush=True)
+    print(f"[generate_response] system_prompt FULL: {repr(system_prompt)}", flush=True)
 
-    messages = []
+    # Use simple messages format — strip timestamps that may confuse model
+    messages = [{"role": "user", "content": brief.message}]
     try:
-        messages = history.as_messages_with_timestamps(brief.message)
-    except Exception:
-        try:
-            messages = history.as_list()
-            messages.append({"role": "user", "content": brief.message})
-        except Exception:
-            messages = [{"role": "user", "content": brief.message}]
+        history_msgs = history.as_list()
+        if history_msgs:
+            # Only include clean role/content pairs
+            clean = [
+                {"role": m["role"], "content": m["content"]}
+                for m in history_msgs[-6:]
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ]
+            if clean:
+                messages = clean + [{"role": "user", "content": brief.message}]
+    except Exception as e:
+        print(f"[generate_response] history error: {e}", flush=True)
 
     print(f"[generate_response] messages count: {len(messages)}", flush=True)
+    print(f"[generate_response] messages FULL: {repr(messages)}", flush=True)
 
     response = await llm.generate(
         messages,
