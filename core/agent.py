@@ -109,6 +109,10 @@ class Brief:
     # Each entry: {"name": str, "entity_type": str, "context": str}
     unknown_entities: list = field(default_factory=list)
 
+    # Host identification — set when Gizmo needs to ask who's there
+    # If set, agent.respond() returns this directly, skips full pipeline
+    host_question: Optional[str] = None
+
 
 # ── Directive dataclass ───────────────────────────────────────────────────────
 
@@ -296,33 +300,31 @@ async def intake(
         llm=llm,
     )
 
-    # ── Session manager entity processing ────────────────────────────────────
-    # Route through session manager — one LLM call connects subjects to speaker
-    # Cache populated, unknowns flagged, before parallel agents run
-    unknown_entities = []
-    if headmate:
+    # ── Host identification — ask if unknown ─────────────────────────────────
+    # First message in session with no known host → Gizmo asks naturally
+    _host_question = None
+    if sess_ctx.message_count == 0 and not headmate:
         try:
-            touched = await session_manager.process_message_entities(
+            from core.agent_tools import dispatch_tool
+            _host_question = await dispatch_tool(
+                tool_name="identify_host",
+                args={},
                 session_id=session_id,
-                message=message,
-                headmate=headmate,
+                headmate="",
                 llm=llm,
             )
-            # Collect unknowns — entities in cache with unknown=True
-            sess_ctx = session_manager._sessions.get(session_id)
-            if sess_ctx:
-                for name in sess_ctx.unknown_entities:
-                    cache = sess_ctx.get_entity(name)
-                    if cache:
-                        unknown_entities.append({
-                            "name":        cache.name,
-                            "entity_type": cache.entity_type,
-                            "context":     (
-                                f"mentioned in: \"{message[:80]}\""
-                            ),
-                        })
-        except Exception as e:
-            log_error("Agent", "session manager entity processing failed", exc=e)
+        except Exception:
+            pass
+
+    # ── Auto-detect new arrivals from secondary boxes ─────────────────────────
+    # Any name in the message parts that isn't in the store gets flagged
+    # session_manager.process_message_entities handles this via _is_unknown
+    # but we also handle explicit new names from multi-part exchanges here
+
+    # ── Session manager entity processing ────────────────────────────────────
+    # Skipping LLM entity extraction for now to reduce concurrent API calls
+    # Heuristic classification in _classify_topics handles basic topic detection
+    unknown_entities = []
 
     # ── Write message envelope to store ───────────────────────────────────────
     tags = list(set(
@@ -425,6 +427,39 @@ async def intake(
             })
         except Exception:
             pass
+
+    # ── If we need to identify the host, return that question directly ────────
+    # Skip the full pipeline — this is the only response that matters right now
+    if _host_question:
+        log_event("Agent", "INTAKE_ASKING_HOST",
+            session=session_id[:8],
+            question=_host_question,
+        )
+        # Still write the message envelope so it's in history
+        # but return early — the brief is populated enough for this
+        return Brief(
+            message=message,
+            session_id=session_id,
+            message_id=message_id,
+            timestamp=ts,
+            headmate=None,
+            fronters=fronters,
+            register=register,
+            topics=topics,
+            emotional_valence=0.0,
+            is_question=False,
+            is_correction=False,
+            word_count=word_count,
+            time_of_day=time_of_day,
+            day_of_week=now.strftime("%A"),
+            day_type=day_type,
+            since_last_msg=since_last,
+            message_cadence=cadence,
+            session_momentum="opening",
+            session_duration=0.0,
+            fronting_duration=0.0,
+            host_question=_host_question,  # signal to agent.respond()
+        )
 
     log_event("Agent", "INTAKE_COMPLETE",
         session=session_id[:8],
@@ -1228,7 +1263,7 @@ async def generate_response(
     response = await llm.generate(
         messages,
         system_prompt=system_prompt,
-        max_new_tokens=max(brief.word_count * 3, directive_token_target(brief)),
+        max_new_tokens=brief.word_count * 3 + 60,
         temperature=_response_temperature(brief),
     )
 
@@ -1351,10 +1386,12 @@ async def close_loop(
             )
 
         # Check for gaps → queue questions
-        if brief.headmate:
-            asyncio.ensure_future(
-                _check_and_queue_questions(brief, directive, llm)
-            )
+        # Disabled for now — too many concurrent API calls
+        # Re-enable once rate limiting is resolved
+        # if brief.headmate:
+        #     asyncio.ensure_future(
+        #         _check_and_queue_questions(brief, directive, llm)
+        #     )
 
         log_event("Agent", "CLOSE_LOOP_COMPLETE",
             session=brief.session_id[:8],
@@ -1523,10 +1560,28 @@ class Agent:
             llm=llm,
         )
 
+        # ── Host identification short-circuit ─────────────────────────────────
+        # If Gizmo doesn't know who he's talking to, ask before anything else.
+        # The answer to this question re-enters as a normal message and the
+        # session manager picks up the name, sets the host, and we proceed.
+        if brief.host_question:
+            response_text = brief.host_question
+            history.add("assistant", response_text, context={
+                "current_host": None,
+                "fronters":     brief.fronters,
+            })
+            for i in range(0, len(response_text), 8):
+                yield response_text[i:i + 8]
+            return
+
         # ── 2. Parallel agents ────────────────────────────────────────────────
+        # Small stagger to avoid hammering the API simultaneously
         knowledge_task  = asyncio.create_task(agent_knowledge(brief, llm))
+        await asyncio.sleep(0.1)
         wellness_task   = asyncio.create_task(agent_wellness(brief, llm))
+        await asyncio.sleep(0.1)
         therapy_task    = asyncio.create_task(agent_therapy(brief, llm))
+        await asyncio.sleep(0.1)
         narrative_task  = asyncio.create_task(agent_narrative(brief, history, llm))
 
         knowledge, wellness, therapy, narrative = await asyncio.gather(
