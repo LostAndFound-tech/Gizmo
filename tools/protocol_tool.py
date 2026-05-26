@@ -1,105 +1,48 @@
-"""
-tools/protocol_tool.py
-
-Gives Gizmo the ability to explicitly create a protocol during conversation.
-Returns immediately with a holding response, does the work async,
-then pushes the result back to the client when done.
-"""
-
-import asyncio
-from tools.base_tool import BaseTool, ToolResult
+"""tools/protocol_tool.py — Create behavioral protocols."""
+import os
+from pathlib import Path
+from core.store import store
+from core.log import log_event
 
 
-class CreateProtocolTool(BaseTool):
+class CreateProtocolTool:
     name        = "create_protocol"
-    description = (
-    "Create a persistent behavioral protocol — a rule, boundary, or standing instruction "
-    "that should change how I behave in future conversations. "
-    "Use this for rules, limits, and patterns worth keeping permanently. "
-    "NOT for drafts, notes, working documents, or things we're building together."
-)
-    args_schema = {
-        "name":        {"type": "string", "description": "Short unique name for this protocol"},
-        "content":     {"type": "string", "description": "The full protocol text"},
-        "description": {"type": "string", "description": "One sentence describing what this covers"},
-        "tags":        {"type": "array",  "description": "Relevant tags for context matching", "items": {"type": "string"}},
-        "type":        {"type": "string", "description": "instruction, information, or both", "default": "both"},
-        "headmates":   {"type": "array",  "description": "Headmates this always applies to (empty = global)", "items": {"type": "string"}, "default": []},
-    }
+    description = "Create or update a behavioral protocol — a rule or commitment from conversation."
 
-    async def run(
-        self,
-        session_id: str,
-        name: str,
-        content: str,
-        description: str,
-        tags: list = None,
-        type: str = "both",
-        headmates: list = None,
-        **kwargs,
-    ) -> ToolResult:
-        # Fire the actual work async — never blocks the response
-        asyncio.ensure_future(
-            _write_protocol_and_push(
-                session_id    = session_id,
-                name          = name,
-                content       = content,
-                description   = description,
-                tags          = tags or [],
-                protocol_type = type,
-                headmates     = headmates or [],
-            )
-        )
+    async def execute(self, args, session_id, headmate, llm) -> str:
+        name    = args.get("name") or args.get("title", "")
+        content = args.get("content") or args.get("text", "")
+        scope   = args.get("scope", "global")
 
-        # Return immediately so response isn't held
-        return ToolResult(
-            success = True,
-            output  = f"On it — writing '{name}' now.",
-        )
+        if not content:
+            return "no protocol content provided"
 
+        proto_id = store.write("protocols", {
+            "name":       name,
+            "content":    content,
+            "scope":      scope,
+            "headmate":   headmate.lower() if headmate and scope != "global" else None,
+            "session_id": session_id,
+            "source":     "gizmo",
+            "tags":       f"protocol,{scope},{headmate.lower() if headmate else 'global'}",
+        })
 
-async def _write_protocol_and_push(
-    session_id: str,
-    name: str,
-    content: str,
-    description: str,
-    tags: list,
-    protocol_type: str,
-    headmates: list,
-) -> None:
-    """
-    Does the actual file write async, then pushes confirmation back to the client.
-    """
-    try:
-        from core.protocol_manager import create_protocol
-        result = create_protocol(
-            name          = name,
-            content       = content,
-            description   = description,
-            tags          = tags,
-            protocol_type = protocol_type,
-            headmates     = headmates,
-        )
+        # Also write to disk for human readability
+        protocols_dir = Path(os.getenv("PERSONALITY_DIR", "/data/personality")) / "protocols"
+        protocols_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = (name or proto_id).lower().replace(" ", "_")[:40]
+        file_path = protocols_dir / f"{safe_name}.txt"
+        file_path.write_text(content, encoding="utf-8")
 
-        if result["success"]:
-            headmate_note = ""
-            if headmates:
-                names = " or ".join(h.title() for h in headmates)
-                headmate_note = f" I'll load it automatically whenever {names} is here."
+        store.write("files", {
+            "path":        str(file_path),
+            "description": name or content[:60],
+            "file_type":   "protocol",
+            "content_ref": f"protocols:{proto_id}",
+            "headmate":    headmate.lower() if headmate else None,
+            "source":      "gizmo",
+            "tags":        "file,protocol",
+        })
 
-            push_message = (
-                f"Done — wrote '{name}'.{headmate_note}\n\n"
-                f"Here's what I saved:\n\n{content}"
-            )
-        else:
-            push_message = f"Couldn't write '{name}' — {result['message']}"
-
-        from core.agent import push
-        await push(push_message)
-
-    except Exception as e:
-        try:
-            from core.agent import push
-            await push(f"Something went wrong writing '{name}' — {e}")
-        except Exception:
-            print(f"[ProtocolTool] push failed after write error: {e}")
+        log_event("CreateProtocolTool", "PROTOCOL_CREATED", name=name, scope=scope)
+        return f"protocol saved: {name or 'unnamed'}"

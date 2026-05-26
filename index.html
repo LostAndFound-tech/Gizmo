@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gizmo</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Instrument+Serif:ital@0;1&display=swap');
+
+  :root {
+    --bg:        #0e0e0f;
+    --surface:   #161618;
+    --border:    #2a2a2e;
+    --border-hi: #3d3d44;
+    --text:      #e8e6e1;
+    --text-dim:  #6b6870;
+    --text-mid:  #a09da8;
+    --accent:    #c9a96e;
+    --accent-lo: #c9a96e22;
+    --gizmo:     #7c9e8f;
+    --gizmo-lo:  #7c9e8f18;
+    --error:     #c97a6e;
+    --thinking:  #8a7fc9;
+    --radius:    10px;
+    --mono:      'DM Mono', monospace;
+    --serif:     'Instrument Serif', serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.6;
+    overflow: hidden;
+  }
+
+  /* ── Layout ── */
+  #app {
+    display: grid;
+    grid-template-rows: 48px 1fr auto;
+    height: 100vh;
+    max-width: 860px;
+    margin: 0 auto;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    gap: 12px;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .logo {
+    font-family: var(--serif);
+    font-size: 20px;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--border-hi);
+    transition: background 0.3s;
+  }
+  .status-dot.connected   { background: var(--gizmo); box-shadow: 0 0 6px var(--gizmo); }
+  .status-dot.thinking    { background: var(--thinking); animation: pulse 1s infinite; }
+  .status-dot.error       { background: var(--error); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+
+  .fronters-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+  }
+
+  .fronter-chip {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--text-mid);
+    background: var(--surface);
+    cursor: pointer;
+    transition: all 0.15s;
+    user-select: none;
+  }
+  .fronter-chip.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-lo);
+  }
+  .fronter-chip:hover { border-color: var(--border-hi); }
+
+  /* ── Messages ── */
+  #messages {
+    overflow-y: auto;
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    scroll-behavior: smooth;
+  }
+
+  #messages::-webkit-scrollbar { width: 4px; }
+  #messages::-webkit-scrollbar-track { background: transparent; }
+  #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .message {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    animation: fadeIn 0.2s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .message-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .message-speaker {
+    color: var(--text-mid);
+    font-weight: 500;
+  }
+  .message-speaker.gizmo  { color: var(--gizmo); }
+  .message-speaker.action { color: var(--text-dim); font-style: italic; }
+
+  .message-time { font-size: 10px; }
+
+  .message-body {
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .message.user .message-body {
+    background: var(--surface);
+    border-color: var(--border);
+  }
+
+  .message.gizmo .message-body {
+    background: var(--gizmo-lo);
+    border-color: var(--gizmo)44;
+    color: var(--text);
+  }
+
+  .message.action .message-body {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 13px;
+    padding: 4px 14px;
+  }
+
+  /* Multi-part exchange grouping */
+  .exchange-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    animation: fadeIn 0.2s ease;
+  }
+
+  .exchange-group-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  .exchange-part {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .exchange-part-speaker {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-mid);
+  }
+
+  .exchange-part-content {
+    color: var(--text);
+    line-height: 1.6;
+  }
+
+  .exchange-part-content.action {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  /* Thinking indicator */
+  .thinking-indicator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 8px 14px;
+    animation: fadeIn 0.2s ease;
+  }
+
+  .thinking-dots {
+    display: flex;
+    gap: 4px;
+  }
+  .thinking-dots span {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--thinking);
+    animation: bounce 1.2s infinite;
+  }
+  .thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .thinking-dots span:nth-child(3) { animation-delay: 0.30s; }
+
+  @keyframes bounce {
+    0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
+    40%            { transform: translateY(-4px); opacity: 1; }
+  }
+
+  /* ── Input area ── */
+  #input-area {
+    border-top: 1px solid var(--border);
+    padding: 12px 20px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* Voice boxes container */
+  #voice-boxes {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* Single voice box */
+  .voice-box {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: flex-start;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    transition: border-color 0.15s;
+  }
+
+  .voice-box:focus-within {
+    border-color: var(--border-hi);
+  }
+
+  .voice-box.primary:focus-within {
+    border-color: var(--accent)66;
+  }
+
+  .voice-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    padding-top: 3px;
+    min-width: 60px;
+    cursor: text;
+  }
+
+  .voice-label.editable {
+    color: var(--accent);
+    cursor: pointer;
+    border-bottom: 1px dashed var(--accent)44;
+  }
+
+  .voice-label input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    width: 70px;
+  }
+
+  .voice-textarea {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    resize: none;
+    line-height: 1.6;
+    min-height: 22px;
+    max-height: 200px;
+    overflow-y: auto;
+    width: 100%;
+  }
+
+  .voice-textarea::placeholder { color: var(--text-dim); }
+
+  .voice-type-toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: all 0.15s;
+    align-self: flex-start;
+    margin-top: 2px;
+    font-family: var(--mono);
+  }
+
+  .voice-type-toggle:hover {
+    color: var(--text-mid);
+    background: var(--border);
+  }
+
+  .voice-type-toggle.action { color: var(--text-dim); font-style: italic; }
+
+  /* Remove box button */
+  .remove-voice {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--border-hi);
+    font-size: 14px;
+    padding: 2px;
+    transition: color 0.15s;
+    align-self: flex-start;
+    margin-top: 1px;
+  }
+  .remove-voice:hover { color: var(--error); }
+
+  /* Silent presence indicator */
+  .voice-box.silent {
+    opacity: 0.6;
+    border-style: dashed;
+  }
+
+  .voice-box.silent .voice-textarea {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  /* ── Input controls row ── */
+  #input-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  #add-voice-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: none;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 5px 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  #add-voice-btn:hover {
+    border-color: var(--border-hi);
+    color: var(--text-mid);
+  }
+
+  .controls-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  #char-count {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  #send-btn {
+    background: var(--accent-lo);
+    border: 1px solid var(--accent)66;
+    border-radius: var(--radius);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.03em;
+  }
+
+  #send-btn:hover {
+    background: var(--accent)22;
+    border-color: var(--accent);
+  }
+
+  #send-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  /* ── Hint bar ── */
+  #hint {
+    font-size: 10px;
+    color: var(--text-dim);
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .hint-item kbd {
+    background: var(--border);
+    border-radius: 3px;
+    padding: 0 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+
+  /* ── Scrollbar ── */
+  .voice-textarea::-webkit-scrollbar { width: 3px; }
+  .voice-textarea::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 2px;
+  }
+
+  /* ── Empty state ── */
+  #empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-dim);
+  }
+
+  #empty-state .big { font-family: var(--serif); font-size: 32px; color: var(--border-hi); }
+  #empty-state .small { font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Header -->
+  <header>
+    <div class="header-left">
+      <div class="status-dot" id="status-dot"></div>
+      <span class="logo">Gizmo</span>
+    </div>
+    <div class="fronters-bar" id="fronters-bar"></div>
+  </header>
+
+  <!-- Messages -->
+  <div id="messages">
+    <div id="empty-state">
+      <div class="big">~</div>
+      <div class="small">no messages yet</div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div id="input-area">
+    <div id="voice-boxes"></div>
+    <div id="input-controls">
+      <button id="add-voice-btn" onclick="addVoiceBox()">+ add voice</button>
+      <div class="controls-right">
+        <span id="char-count"></span>
+        <button id="send-btn" onclick="send()">send ↵</button>
+      </div>
+    </div>
+    <div id="hint">
+      <span class="hint-item"><kbd>↵</kbd> send &nbsp; <kbd>shift+↵</kbd> newline</span>
+      <span class="hint-item"><kbd>[Name]:</kbd> set speaker &nbsp; <kbd>*action*</kbd> stage direction</span>
+      <span class="hint-item">silent voice = present, no message</span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────────────
+const WS_URL      = `ws://${location.hostname}:8765`;
+const SESSION_ID  = 'sess_' + Math.random().toString(36).slice(2, 10);
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let ws            = null;
+let connected     = false;
+let thinking      = false;
+let currentChunks = [];
+let currentMsgEl  = null;
+let fronters      = [];
+let primaryHost   = '';
+let voiceBoxCount = 0;
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connect() {
+  setStatus('');
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch (e) {
+    setTimeout(connect, 3000);
+    return;
+  }
+
+  ws.onopen = () => {
+    connected = true;
+    setStatus('connected');
+    ws.send(JSON.stringify({ type: 'ping' }));
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    handleIncoming(msg);
+  };
+
+  ws.onclose = () => {
+    connected = false;
+    setStatus('');
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => {
+    setStatus('error');
+  };
+}
+
+function handleIncoming(msg) {
+  if (msg.type === 'pong') return;
+
+  if (msg.type === 'thinking') {
+    setStatus('thinking');
+    showThinking();
+    return;
+  }
+
+  if (msg.type === 'chunk') {
+    hideThinking();
+    setStatus('connected');
+    if (!currentMsgEl) {
+      currentMsgEl = appendMessage('gizmo', 'Gizmo', '', 'gizmo');
+    }
+    currentChunks.push(msg.content);
+    currentMsgEl.querySelector('.message-body').textContent = currentChunks.join('');
+    scrollBottom();
+    return;
+  }
+
+  if (msg.type === 'done') {
+    currentMsgEl  = null;
+    currentChunks = [];
+    thinking      = false;
+    setSendEnabled(true);
+    scrollBottom();
+    return;
+  }
+
+  if (msg.type === 'error') {
+    hideThinking();
+    setStatus('error');
+    appendMessage('gizmo', 'Gizmo', `[error: ${msg.message}]`, 'gizmo');
+    setSendEnabled(true);
+    return;
+  }
+}
+
+// ── Voice boxes ───────────────────────────────────────────────────────────────
+function initPrimaryBox() {
+  const box = createVoiceBox(true);
+  document.getElementById('voice-boxes').appendChild(box);
+  box.querySelector('.voice-textarea').focus();
+}
+
+function createVoiceBox(isPrimary = false) {
+  voiceBoxCount++;
+  const id = `vbox-${voiceBoxCount}`;
+
+  const box = document.createElement('div');
+  box.className = `voice-box${isPrimary ? ' primary' : ''}`;
+  box.dataset.id = id;
+  box.dataset.type = 'speech'; // speech | action | silent
+
+  const label = document.createElement('div');
+  label.className = `voice-label${isPrimary ? '' : ' editable'}`;
+
+  if (isPrimary) {
+    label.textContent = primaryHost || 'you';
+    label.title = 'primary speaker (set with [Name]: prefix)';
+  } else {
+    // Editable name for secondary voices
+    const nameInput = document.createElement('input');
+    nameInput.type        = 'text';
+    nameInput.placeholder = 'name';
+    nameInput.value       = '';
+    nameInput.maxLength   = 30;
+    nameInput.addEventListener('input', updateCharCount);
+    label.appendChild(nameInput);
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.className   = 'voice-textarea';
+  textarea.rows        = 1;
+  textarea.placeholder = isPrimary ? 'say something...' : 'what did they say?';
+
+  // Auto-resize
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+    updateCharCount();
+
+    // Detect [Name]: prefix on primary box
+    if (isPrimary) {
+      const match = textarea.value.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:/);
+      if (match) {
+        const detectedName = match[1].trim();
+        label.textContent = detectedName;
+        primaryHost = detectedName.toLowerCase();
+        updateFronterChips();
+      }
+    }
+  });
+
+  // Keyboard handling
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+
+  // Type toggle (speech / action / silent)
+  const typeBtn = document.createElement('button');
+  typeBtn.className = 'voice-type-toggle';
+  typeBtn.textContent = '~';
+  typeBtn.title = 'toggle: speech / action / silent';
+  typeBtn.onclick = () => cycleType(box, typeBtn, textarea);
+
+  const right = document.createElement('div');
+  right.style.cssText = 'display:flex;flex-direction:column;gap:4px;align-items:flex-end;';
+  right.appendChild(typeBtn);
+
+  if (!isPrimary) {
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-voice';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'remove this voice';
+    removeBtn.onclick = () => {
+      box.remove();
+      updateCharCount();
+    };
+    right.appendChild(removeBtn);
+  }
+
+  box.appendChild(label);
+  box.appendChild(textarea);
+  box.appendChild(right);
+
+  return box;
+}
+
+function addVoiceBox() {
+  const container = document.getElementById('voice-boxes');
+  const box = createVoiceBox(false);
+  container.appendChild(box);
+  box.querySelector('.voice-textarea').focus();
+}
+
+function cycleType(box, btn, textarea) {
+  const types = ['speech', 'action', 'silent'];
+  const icons  = ['~', '*', '○'];
+  const hints  = ['say something...', '*does something*', '(present, silent)'];
+
+  let idx = types.indexOf(box.dataset.type);
+  idx = (idx + 1) % types.length;
+
+  box.dataset.type    = types[idx];
+  btn.textContent     = icons[idx];
+  btn.className       = `voice-type-toggle${idx === 1 ? ' action' : ''}`;
+  textarea.placeholder = hints[idx];
+
+  if (types[idx] === 'silent') {
+    box.classList.add('silent');
+    textarea.disabled = true;
+  } else {
+    box.classList.remove('silent');
+    textarea.disabled = false;
+    textarea.focus();
+  }
+}
+
+// ── Send ──────────────────────────────────────────────────────────────────────
+function send() {
+  if (!connected || thinking) return;
+
+  const boxes     = document.querySelectorAll('.voice-box');
+  const parts     = [];
+  let   hasContent = false;
+
+  boxes.forEach((box, idx) => {
+    const isPrimary  = box.classList.contains('primary');
+    const type       = box.dataset.type || 'speech';
+    const textarea   = box.querySelector('.voice-textarea');
+    const content    = textarea ? textarea.value.trim() : '';
+
+    // Get name
+    let name = '';
+    if (isPrimary) {
+      name = primaryHost || '';
+      // Check for [Name]: prefix
+      const match = content.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:\s*(.*)/s);
+      if (match) {
+        name = match[1].trim().toLowerCase();
+        // Don't strip the prefix — server handles it
+      }
+    } else {
+      const nameInput = box.querySelector('input');
+      name = nameInput ? nameInput.value.trim().toLowerCase() : '';
+    }
+
+    if (type === 'silent') {
+      if (name) {
+        parts.push({ headmate: name, content: null, content_type: 'presence' });
+      }
+      return;
+    }
+
+    if (content) {
+      hasContent = true;
+      parts.push({
+        headmate:     name || null,
+        content:      content,
+        content_type: type,
+        directed_at:  null,
+      });
+    }
+  });
+
+  if (!hasContent) return;
+
+  // Render outbound exchange
+  renderOutboundExchange(parts);
+
+  // Build payload
+  const isMulti = parts.filter(p => p.content_type !== 'presence').length > 1;
+  const payload = {
+    type:       'message',
+    session_id: SESSION_ID,
+    content:    isMulti ? parts : (parts[0]?.content || ''),
+    context: {
+      current_host: primaryHost || (parts[0]?.headmate) || '',
+      fronters:     fronters,
+    },
+  };
+
+  ws.send(JSON.stringify(payload));
+
+  // Clear inputs
+  boxes.forEach(box => {
+    if (!box.classList.contains('silent')) {
+      const ta = box.querySelector('.voice-textarea');
+      if (ta) {
+        ta.value = '';
+        ta.style.height = 'auto';
+      }
+    }
+  });
+
+  // Remove secondary boxes
+  document.querySelectorAll('.voice-box:not(.primary)').forEach(b => b.remove());
+
+  thinking = true;
+  setSendEnabled(false);
+  updateCharCount();
+  hideEmpty();
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function renderOutboundExchange(parts) {
+  const speechParts = parts.filter(p => p.content_type !== 'presence');
+
+  if (speechParts.length === 1) {
+    const p    = speechParts[0];
+    const name = (p.headmate || primaryHost || 'you').replace(/^\w/, c => c.toUpperCase());
+    const type = p.content_type === 'action' ? 'action' : 'user';
+    appendMessage(type, name, p.content, type);
+    return;
+  }
+
+  // Multi-part — render as exchange group
+  const group = document.createElement('div');
+  group.className = 'exchange-group';
+
+  const label = document.createElement('div');
+  label.className   = 'exchange-group-label';
+  label.textContent = `exchange · ${speechParts.length} voices`;
+  group.appendChild(label);
+
+  speechParts.forEach(p => {
+    const part = document.createElement('div');
+    part.className = 'exchange-part';
+
+    const name = (p.headmate || 'unknown').replace(/^\w/, c => c.toUpperCase());
+
+    const speaker = document.createElement('div');
+    speaker.className   = 'exchange-part-speaker';
+    speaker.textContent = name;
+    part.appendChild(speaker);
+
+    const content = document.createElement('div');
+    content.className   = `exchange-part-content${p.content_type === 'action' ? ' action' : ''}`;
+    content.textContent = p.content_type === 'action' ? `*${p.content}*` : p.content;
+    part.appendChild(content);
+
+    group.appendChild(part);
+  });
+
+  document.getElementById('messages').appendChild(group);
+  scrollBottom();
+}
+
+function appendMessage(role, speaker, text, type) {
+  hideEmpty();
+
+  const msg = document.createElement('div');
+  msg.className = `message ${type}`;
+
+  const meta = document.createElement('div');
+  meta.className = 'message-meta';
+
+  const speakerEl = document.createElement('span');
+  speakerEl.className   = `message-speaker ${type}`;
+  speakerEl.textContent = speaker;
+
+  const timeEl = document.createElement('span');
+  timeEl.className   = 'message-time';
+  timeEl.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  meta.appendChild(speakerEl);
+  meta.appendChild(timeEl);
+
+  const body = document.createElement('div');
+  body.className   = 'message-body';
+  body.textContent = text;
+
+  msg.appendChild(meta);
+  msg.appendChild(body);
+
+  document.getElementById('messages').appendChild(msg);
+  scrollBottom();
+  return msg;
+}
+
+function showThinking() {
+  hideThinking();
+  const el = document.createElement('div');
+  el.className = 'thinking-indicator';
+  el.id = 'thinking-el';
+  el.innerHTML = `
+    <span class="message-speaker gizmo">Gizmo</span>
+    <div class="thinking-dots">
+      <span></span><span></span><span></span>
+    </div>`;
+  document.getElementById('messages').appendChild(el);
+  scrollBottom();
+}
+
+function hideThinking() {
+  const el = document.getElementById('thinking-el');
+  if (el) el.remove();
+}
+
+// ── Fronter chips ─────────────────────────────────────────────────────────────
+function updateFronterChips() {
+  const bar = document.getElementById('fronters-bar');
+  bar.innerHTML = '';
+
+  const all = Array.from(new Set([
+    ...(primaryHost ? [primaryHost] : []),
+    ...fronters,
+  ]));
+
+  all.forEach(name => {
+    const chip = document.createElement('div');
+    chip.className   = `fronter-chip${name === primaryHost ? ' active' : ''}`;
+    chip.textContent = name;
+    chip.onclick     = () => {
+      primaryHost = name;
+      // Update primary label
+      const label = document.querySelector('.voice-box.primary .voice-label');
+      if (label && !label.querySelector('input')) {
+        label.textContent = name;
+      }
+      updateFronterChips();
+      // Tell server
+      if (ws && connected) {
+        ws.send(JSON.stringify({
+          type:       'switch_host',
+          session_id: SESSION_ID,
+          headmate:   name,
+        }));
+      }
+    };
+    bar.appendChild(chip);
+  });
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+function setStatus(s) {
+  const dot = document.getElementById('status-dot');
+  dot.className = `status-dot${s ? ' ' + s : ''}`;
+}
+
+function setSendEnabled(v) {
+  document.getElementById('send-btn').disabled = !v;
+}
+
+function hideEmpty() {
+  const el = document.getElementById('empty-state');
+  if (el) el.remove();
+}
+
+function scrollBottom() {
+  const msgs = document.getElementById('messages');
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function updateCharCount() {
+  let total = 0;
+  document.querySelectorAll('.voice-textarea').forEach(ta => {
+    total += ta.value.length;
+  });
+  const el = document.getElementById('char-count');
+  el.textContent = total > 0 ? `${total}` : '';
+  el.style.color = total > 2000 ? 'var(--error)' : 'var(--text-dim)';
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+initPrimaryBox();
+connect();
+setSendEnabled(true);
+</script>
+</body>
+</html>

@@ -1,503 +1,142 @@
-"""
-tools/file_tool.py
-Direct file access for Gizmo — read, write, append, and list
-within his data directory (/data/).
-
-No confirm gate on writes. Instead, write_file uses a smart subject-match:
-  - New file            → write immediately
-  - Existing file       → LLM checks if incoming content is same subject
-      Same subject      → overwrite silently
-      Different subject → hold the write, return a confirmation request
-                          so Gizmo can ask the user before proceeding
-
-Append never needs a check — it never destroys existing content.
-Delete still requires confirm=True — it's genuinely irreversible.
-
-Path resolution:
-  Relative → resolved under /data/  ('notes/x.txt' → /data/notes/x.txt)
-  Absolute → must be within /data/
-"""
-
-import json
+"""tools/file_tool.py — File read/write tools."""
 import os
 from pathlib import Path
-from typing import Optional
+from core.store import store
+from core.log import log_event
 
-from tools.base_tool import BaseTool, ToolResult
+_BASE = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
+_ALLOWED_ROOTS = [_BASE, Path("/data/reports")]
 
-_DATA_ROOT       = Path(os.getenv("DATA_ROOT", "/data"))
-_PERSONALITY_DIR = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
 
-# Notes live under personality — not a separate root
-_NOTES_DIR = _PERSONALITY_DIR / "notes"
-
-_MAX_READ_BYTES  = 32_000
-_MAX_WRITE_BYTES = 64_000
-_SUBJECT_SAMPLE  = 300   # chars sent to subject-match LLM call
-
-
-# ── Path validation ───────────────────────────────────────────────────────────
-
-def _resolve(path_str: str) -> tuple[Optional[Path], str]:
-    """
-    Resolve path to absolute within /data/personality/.
-    Returns (resolved, error). On success error is "".
-    """
-    if not path_str or not path_str.strip():
-        return None, "Empty path."
-
-    path_str = path_str.strip()
-
-    candidate = (
-        Path(path_str).resolve()
-        if path_str.startswith("/")
-        else (_PERSONALITY_DIR / path_str).resolve()
-    )
-
-    try:
-        candidate.relative_to(_PERSONALITY_DIR.resolve())
-        return candidate, ""
-    except ValueError:
-        return None, (
-            f"'{path_str}' is outside /data/personality/. "
-            f"Use relative paths like 'notes/x.txt', "
-            f"'headmates/oren.json', 'personality.txt'."
-        )
-
-
-# ── Read helpers ──────────────────────────────────────────────────────────────
-
-def _read_raw(path: Path) -> tuple[str, str]:
-    """Returns (content, error)."""
-    try:
-        raw = path.read_bytes()
-        if len(raw) > _MAX_READ_BYTES:
-            raw = raw[:_MAX_READ_BYTES]
-            return raw.decode("utf-8", errors="replace") + "\n[truncated]", ""
-        return raw.decode("utf-8", errors="replace"), ""
-    except FileNotFoundError:
-        return "", f"File not found: {path}"
-    except Exception as e:
-        return "", f"Read failed: {e}"
-
-
-# ── Write helpers ─────────────────────────────────────────────────────────────
-
-def _write_raw(path: Path, content: str) -> tuple[bool, str]:
-    """Actually write. Returns (success, message)."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return True, f"Written: {path} ({len(content)} chars)"
-    except Exception as e:
-        return False, f"Write failed: {e}"
-
-
-async def _register_conscious(path: Path, content: str) -> None:
-    """
-    Register a written file in the conscious layer.
-    Fire-and-forget — never blocks, never raises.
-    """
-    try:
-        import asyncio
-        from core.conscious import conscious
-        asyncio.ensure_future(conscious.register(
-            path=str(path),
-            content=content,
-            subject=path.stem.lower().replace("-", " ").replace("_", " "),
-        ))
-    except Exception:
-        pass
-
-
-# ── Subject match ─────────────────────────────────────────────────────────────
-
-async def _same_subject(existing: str, incoming: str) -> bool:
-    """
-    Cheap LLM call — are these two content blocks about the same subject?
-    Returns True (safe to overwrite) or False (different subject, hold write).
-    Defaults to True on any failure so we never silently block a write.
-    """
-    existing_sample = existing[:_SUBJECT_SAMPLE].strip()
-    if not existing_sample:
-        return True  # empty file — always safe
-
-    incoming_sample = incoming[:_SUBJECT_SAMPLE].strip()
-
-    try:
-        from core.llm import llm
-        result = await llm.generate(
-            [{
-                "role": "user",
-                "content": (
-                    f"File A (existing):\n\"\"\"\n{existing_sample}\n\"\"\"\n\n"
-                    f"File B (incoming):\n\"\"\"\n{incoming_sample}\n\"\"\"\n\n"
-                    f"Are these about the same subject? One word: YES or NO."
-                )
-            }],
-            system_prompt=(
-                "Compare two content blocks. "
-                "Reply with exactly one word: YES or NO."
-            ),
-            max_new_tokens=5,
-            temperature=0.0,
-        )
-        return result.strip().upper().startswith("Y")
-    except Exception:
-        return True  # on error, don't block
-
-
-# ── Pending write store ───────────────────────────────────────────────────────
-# Holds writes that need user confirmation (subject mismatch detected).
-# Keyed by session_id.
-
-_pending: dict[str, dict] = {}
-
-
-def release_pending(session_id: str) -> tuple[bool, str]:
-    """User confirmed — execute the held write."""
-    if session_id not in _pending:
-        return False, "No pending write to confirm."
-    p = _pending.pop(session_id)
-    return _write_raw(p["path"], p["content"])
-
-
-def discard_pending(session_id: str) -> bool:
-    """User declined — drop the held write."""
-    return bool(_pending.pop(session_id, None))
-
-
-# ── Read tool ─────────────────────────────────────────────────────────────────
-
-class ReadFileTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "read_file"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Read a file from your personality directory (/data/personality/). "
-            "ALWAYS use this before writing to check what's already there. "
-            "Paths are relative to /data/personality/ — e.g. 'notes/thoughts.txt', "
-            "'headmates/oren.json', 'personality.txt'. "
-            "Args: path (str) — file path to read."
-        )
-
-    async def run(self, path: str = "", session_id: str = "", **kwargs) -> ToolResult:
-        if not path:
-            return ToolResult(success=False, output="Need a file path.")
-
-        resolved, error = _resolve(path)
-        if error:
-            return ToolResult(success=False, output=error)
-
-        content, read_error = _read_raw(resolved)
-        if read_error:
-            return ToolResult(success=False, output=read_error)
-
-        # Pretty-print JSON
-        if resolved.suffix == ".json":
-            try:
-                parsed = json.loads(content.replace("\n[truncated]", ""))
-                content = json.dumps(parsed, indent=2)
-            except Exception:
-                pass
-
-        return ToolResult(
-            success=True,
-            output=content,
-            data={"path": str(resolved), "size": len(content)},
-        )
-
-
-# ── Write tool ────────────────────────────────────────────────────────────────
-
-class WriteFileTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "write_file"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Write content to a file under /data/personality/. "
-            "New files are written immediately. "
-            "Existing files: content is checked against what's already there — "
-            "if same subject, overwrites silently. "
-            "If different subject, write is held and you must ask the user to confirm. "
-            "For JSON files, content must be valid JSON. "
-            "ALWAYS read the file first if you think it might already exist. "
-            "Paths relative to /data/personality/ — e.g. 'notes/x.txt', "
-            "'headmates/oren.json'. "
-            "Args: "
-            "path (str) — file path. "
-            "content (str) — full content to write."
-        )
-
-    async def run(
-        self,
-        path: str = "",
-        content: str = "",
-        session_id: str = "",
-        **kwargs,
-    ) -> ToolResult:
-        if not path:
-            return ToolResult(success=False, output="Need a file path.")
-        if not content:
-            return ToolResult(success=False, output="Need content to write.")
-
-        resolved, error = _resolve(path)
-        if error:
-            return ToolResult(success=False, output=error)
-
-        if len(content.encode("utf-8")) > _MAX_WRITE_BYTES:
-            return ToolResult(
-                success=False,
-                output=f"Content too large. Max {_MAX_WRITE_BYTES} bytes."
-            )
-
-        # JSON validation
-        if resolved.suffix == ".json":
-            try:
-                json.loads(content)
-            except json.JSONDecodeError as e:
-                return ToolResult(
-                    success=False,
-                    output=f"Invalid JSON: {e}. Not written."
-                )
-
-        # New file — write immediately
-        if not resolved.exists():
-            ok, msg = _write_raw(resolved, content)
-            if ok:
-                await _register_conscious(resolved, content)
-            return ToolResult(success=ok, output=msg, data={"path": str(resolved)})
-
-        # Existing file — subject check
-        existing, read_err = _read_raw(resolved)
-        if read_err:
-            # Can't read existing — write anyway, something's wrong with the file
-            ok, msg = _write_raw(resolved, content)
-            return ToolResult(success=ok, output=msg, data={"path": str(resolved)})
-
-        same = await _same_subject(existing, content)
-
-        if same:
-            ok, msg = _write_raw(resolved, content)
-            if ok:
-                await _register_conscious(resolved, content)
-            return ToolResult(success=ok, output=msg, data={"path": str(resolved)})
-        else:
-            # Hold the write — different subject detected
-            _pending[session_id] = {"path": resolved, "content": content}
-            return ToolResult(
-                success=False,
-                output=(
-                    f"The file at '{path}' already exists and appears to contain "
-                    f"different content. I've held the write. "
-                    f"Tell the user what you wanted to write and ask if they want to overwrite it. "
-                    f"If yes, call confirm_write. If no, call cancel_write."
-                ),
-                data={"path": str(resolved), "pending": True},
-            )
-
-
-# ── Confirm / cancel pending write tools ──────────────────────────────────────
-
-class ConfirmWriteTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "confirm_write"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Confirm a held file write after the user has approved overwriting. "
-            "Only call this after write_file returned a 'held' result AND "
-            "the user has explicitly said yes to overwriting. "
-            "Args: (none beyond session_id)"
-        )
-
-    async def run(self, session_id: str = "", **kwargs) -> ToolResult:
-        ok, msg = release_pending(session_id)
-        return ToolResult(success=ok, output=msg)
-
-
-class CancelWriteTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "cancel_write"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Cancel a held file write — user declined the overwrite. "
-            "Args: (none beyond session_id)"
-        )
-
-    async def run(self, session_id: str = "", **kwargs) -> ToolResult:
-        discarded = discard_pending(session_id)
-        return ToolResult(
-            success=True,
-            output="Write cancelled." if discarded else "No pending write to cancel.",
-        )
-
-
-# ── Append tool ───────────────────────────────────────────────────────────────
-
-class AppendFileTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "append_file"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Append text to a file without overwriting it. "
-            "Creates the file and any parent directories if missing. "
-            "Safe — never destroys existing content. "
-            "Prefer this over write_file when adding to an existing document. "
-            "For JSON files use write_file (read → modify → write is safer). "
-            "Paths relative to /data/personality/ — e.g. 'notes/thoughts.txt'. "
-            "Args: "
-            "path (str) — file path. "
-            "content (str) — text to append."
-        )
-
-    async def run(
-        self,
-        path: str = "",
-        content: str = "",
-        session_id: str = "",
-        **kwargs,
-    ) -> ToolResult:
-        if not path:
-            return ToolResult(success=False, output="Need a file path.")
-        if not content:
-            return ToolResult(success=False, output="Need content to append.")
-
-        resolved, error = _resolve(path)
-        if error:
-            return ToolResult(success=False, output=error)
-
+def _safe_path(path_str: str) -> Path:
+    """Resolve path and verify it's under an allowed root."""
+    p = Path(path_str).resolve()
+    for root in _ALLOWED_ROOTS:
         try:
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            existing = resolved.read_text(encoding="utf-8") if resolved.exists() else ""
-            separator = "\n" if existing and not existing.endswith("\n") else ""
-            full_content = existing + separator + content
-            resolved.write_text(full_content, encoding="utf-8")
-            await _register_conscious(resolved, full_content)
-            return ToolResult(
-                success=True,
-                output=f"Appended {len(content)} chars to {resolved}",
-                data={"path": str(resolved), "appended": len(content)},
-            )
-        except Exception as e:
-            return ToolResult(success=False, output=f"Append failed: {e}")
+            p.relative_to(root.resolve())
+            return p
+        except ValueError:
+            continue
+    raise PermissionError(f"path not allowed: {path_str}")
 
 
-# ── List tool ─────────────────────────────────────────────────────────────────
+class ReadFileTool:
+    name        = "read_file"
+    description = "Read a file from the personality or reports directory."
 
-class ListFilesTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "list_files"
-
-    @property
-    def description(self) -> str:
-        return (
-            "List files and directories under /data/personality/. "
-            "Pass empty path or '.' to list the personality root. "
-            "Args: path (str) — directory to list (relative to /data/personality/)."
-        )
-
-    async def run(self, path: str = "", session_id: str = "", **kwargs) -> ToolResult:
-        if not path or path.strip() in (".", ""):
-            target = _PERSONALITY_DIR
-            err = ""
-        else:
-            target, err = _resolve(path)
-            if err:
-                return ToolResult(success=False, output=err)
-
-        if not target.exists():
-            return ToolResult(
-                success=True,
-                output=f"{target}: (does not exist yet)",
-                data={"files": [], "dirs": []},
-            )
-        if not target.is_dir():
-            return ToolResult(
-                success=False,
-                output=f"'{path}' is a file — use read_file to read it.",
-            )
-
+    async def execute(self, args, session_id, headmate, llm) -> str:
+        path_str = args.get("path", "")
+        if not path_str:
+            return "no path provided"
         try:
-            entries  = sorted(target.iterdir())
-            dirs     = [e.name + "/" for e in entries if e.is_dir()]
-            files    = [e.name for e in entries if e.is_file()]
-            listing  = dirs + files
-            output   = f"{target}:\n" + "\n".join(f"  {e}" for e in listing) if listing else f"{target}: (empty)"
-            return ToolResult(
-                success=True,
-                output=output,
-                data={"dirs": dirs, "files": files, "path": str(target)},
-            )
+            p = _safe_path(path_str)
+            if not p.exists():
+                return f"file not found: {path_str}"
+            return p.read_text(encoding="utf-8")
+        except PermissionError as e:
+            return str(e)
         except Exception as e:
-            return ToolResult(success=False, output=f"List failed: {e}")
+            return f"error reading file: {e}"
 
 
-# ── Delete tool ───────────────────────────────────────────────────────────────
+class WriteFileTool:
+    name        = "write_file"
+    description = "Write content to a file. Creates directories if needed."
 
-class DeleteFileTool(BaseTool):
-    @property
-    def name(self) -> str:
-        return "delete_file"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Delete a file under /data/personality/. Permanent — cannot be undone. "
-            "Requires confirm=True. Cannot delete directories. "
-            "Args: "
-            "path (str) — file to delete (relative to /data/personality/). "
-            "confirm (bool) — must be true."
-        )
-
-    async def run(
-        self,
-        path: str = "",
-        confirm: bool = False,
-        session_id: str = "",
-        **kwargs,
-    ) -> ToolResult:
-        if not path:
-            return ToolResult(success=False, output="Need a file path.")
-        # Coerce string "true"/"false" from marker system
-        if isinstance(confirm, str):
-            confirm = confirm.lower() in ("true", "yes", "1")
-        if not confirm:
-            return ToolResult(
-                success=False,
-                output="Set confirm=true to delete. This cannot be undone.",
-            )
-
-        resolved, error = _resolve(path)
-        if error:
-            return ToolResult(success=False, output=error)
-
-        if not resolved.exists():
-            return ToolResult(success=False, output=f"File not found: {resolved}")
-        if resolved.is_dir():
-            return ToolResult(success=False, output="That's a directory — can only delete files.")
-
+    async def execute(self, args, session_id, headmate, llm) -> str:
+        path_str = args.get("path", "")
+        content  = args.get("content") or args.get("text", "")
+        if not path_str or not content:
+            return "need path and content"
         try:
-            resolved.unlink()
-            return ToolResult(
-                success=True,
-                output=f"Deleted: {resolved}",
-                data={"path": str(resolved)},
-            )
+            p = _safe_path(path_str)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            store.write("files", {
+                "path":        str(p),
+                "description": content[:80],
+                "file_type":   args.get("file_type", "note"),
+                "headmate":    headmate.lower() if headmate else None,
+                "source":      "gizmo",
+                "tags":        f"file,{args.get('file_type','note')}",
+            })
+            log_event("WriteFileTool", "FILE_WRITTEN", path=str(p))
+            return f"written: {p.name}"
+        except PermissionError as e:
+            return str(e)
         except Exception as e:
-            return ToolResult(success=False, output=f"Delete failed: {e}")
+            return f"error writing file: {e}"
+
+
+class AppendFileTool:
+    name        = "append_file"
+    description = "Append content to an existing file."
+
+    async def execute(self, args, session_id, headmate, llm) -> str:
+        path_str = args.get("path", "")
+        content  = args.get("content") or args.get("text", "")
+        if not path_str or not content:
+            return "need path and content"
+        try:
+            p = _safe_path(path_str)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(f"\n{content}")
+            return f"appended to: {p.name}"
+        except PermissionError as e:
+            return str(e)
+        except Exception as e:
+            return f"error appending: {e}"
+
+
+class ListFilesTool:
+    name        = "list_files"
+    description = "List files in a directory."
+
+    async def execute(self, args, session_id, headmate, llm) -> str:
+        path_str = args.get("path", str(_BASE))
+        try:
+            p = _safe_path(path_str)
+            if not p.exists():
+                return f"directory not found: {path_str}"
+            files = sorted(p.iterdir())
+            lines = [str(f.relative_to(_BASE.parent)) for f in files]
+            return "\n".join(lines) if lines else "(empty)"
+        except PermissionError as e:
+            return str(e)
+        except Exception as e:
+            return f"error listing: {e}"
+
+
+class DeleteFileTool:
+    name        = "delete_file"
+    description = "Delete a file."
+
+    async def execute(self, args, session_id, headmate, llm) -> str:
+        path_str = args.get("path", "")
+        if not path_str:
+            return "no path provided"
+        try:
+            p = _safe_path(path_str)
+            if not p.exists():
+                return f"file not found: {path_str}"
+            p.unlink()
+            return f"deleted: {p.name}"
+        except PermissionError as e:
+            return str(e)
+        except Exception as e:
+            return f"error deleting: {e}"
+
+
+# Legacy stubs — kept for registry compatibility
+class ConfirmWriteTool:
+    name        = "confirm_write"
+    description = "Confirm a pending file write."
+    async def execute(self, args, session_id, headmate, llm) -> str:
+        return "confirmed"
+
+class CancelWriteTool:
+    name        = "cancel_write"
+    description = "Cancel a pending file write."
+    async def execute(self, args, session_id, headmate, llm) -> str:
+        return "cancelled"

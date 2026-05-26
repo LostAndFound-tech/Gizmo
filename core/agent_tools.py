@@ -1,138 +1,136 @@
 """
 core/agent_tools.py
-Tool registry. Separate from the membrane so tools can be
-registered, hot-swapped, and eventually managed by the tool forge
-without touching agent.py.
+Tool registry.
 
-v1: manual registration of the tools that survived the rebuild.
-Future: tool forge registers tools here dynamically.
+All tools write to store. No JSON files. No ChromaDB.
+New tools: report_tool, wellness_tool, pattern_tool.
+Rewritten tools: correction, memory, switch_host, interaction_prefs.
+
+Registry is a flat dict: {tool_name: tool_instance}
+Agent reads TOOL_REGISTRY and TOOL_DESCRIPTIONS for prompt injection.
+
+Tool interface (all tools implement):
+  tool.name:        str
+  tool.description: str
+  tool.execute(args, session_id, headmate, llm) -> str
 """
 
-from core.log import log
-from tools.introspect_tool import IntrospectTool
-from tools.protocol_tool import CreateProtocolTool
-from tools.active_file_tool import SetActiveFileTool, CloseActiveFileTool
-from tools.recall_search_tool import RecallSearchTool
-from tools.recall_read_tool import RecallReadTool
-from tools.rewrite_file_tool import RewriteFileTool
+from core.log import log, log_error
 
-try:
-    from tools.switch_host import SwitchHostTool
-    _switch = SwitchHostTool()
-except Exception as e:
-    log("Agent", f"WARNING: switch_host tool failed to load: {e}")
-    _switch = None
 
-try:
-    from tools.correction_tool import CorrectionTool
-    _correction = CorrectionTool()
-except Exception as e:
-    log("Agent", f"WARNING: correction_tool failed to load: {e}")
-    _correction = None
+def _load(import_path: str, class_name: str, *args):
+    """Safe tool loader. Returns None and logs on failure."""
+    try:
+        module = __import__(import_path, fromlist=[class_name])
+        cls    = getattr(module, class_name)
+        return cls(*args)
+    except Exception as e:
+        log_error("ToolRegistry", f"failed to load {class_name}: {e}", exc=None)
+        return None
 
-try:
-    from tools.interaction_prefs_tool import InteractionPrefsTool, ViewInteractionPrefsTool
-    _set_prefs  = InteractionPrefsTool()
-    _view_prefs = ViewInteractionPrefsTool()
-except Exception as e:
-    log("Agent", f"WARNING: interaction_prefs_tool failed to load: {e}")
-    _set_prefs  = None
-    _view_prefs = None
 
-try:
-    from tools.memory_tool import (
-        MemoryWriteTool,
-        MemoryReadTool,
-        MemoryListTool,
-        MemoryDeleteTool,
-    )
-    _memory_write  = MemoryWriteTool()
-    _memory_read   = MemoryReadTool()
-    _memory_list   = MemoryListTool()
-    _memory_delete = MemoryDeleteTool()
-except Exception as e:
-    log("Agent", f"WARNING: memory_tool failed to load: {e}")
-    _memory_write  = None
-    _memory_read   = None
-    _memory_list   = None
-    _memory_delete = None
+# ── Core tools ────────────────────────────────────────────────────────────────
 
-try:
-    from tools.file_tool import (
-        ReadFileTool,
-        WriteFileTool,
-        AppendFileTool,
-        ListFilesTool,
-        DeleteFileTool,
-        ConfirmWriteTool,
-        CancelWriteTool,
-        
-    )
-    _read_file     = ReadFileTool()
-    _write_file    = WriteFileTool()
-    _append_file   = AppendFileTool()
-    _list_files    = ListFilesTool()
-    _delete_file   = DeleteFileTool()
-    _confirm_write = ConfirmWriteTool()
-    _cancel_write  = CancelWriteTool()
-except Exception as e:
-    log("Agent", f"WARNING: file_tool failed to load: {e}")
-    _read_file     = None
-    _write_file    = None
-    _append_file   = None
-    _list_files    = None
-    _delete_file   = None
-    _confirm_write = None
-    _cancel_write  = None
+_correction      = _load("tools.correction_tool",      "CorrectionTool")
+_switch_host     = _load("tools.switch_host",          "SwitchHostTool")
+_interaction     = _load("tools.interaction_prefs_tool","InteractionPrefsTool")
+_view_prefs      = _load("tools.interaction_prefs_tool","ViewInteractionPrefsTool")
+_memory_write    = _load("tools.memory_tool",          "MemoryWriteTool")
+_memory_read     = _load("tools.memory_tool",          "MemoryReadTool")
+_memory_search   = _load("tools.memory_tool",          "MemorySearchTool")
+_memory_delete   = _load("tools.memory_tool",          "MemoryDeleteTool")
+_read_file       = _load("tools.file_tool",            "ReadFileTool")
+_write_file      = _load("tools.file_tool",            "WriteFileTool")
+_append_file     = _load("tools.file_tool",            "AppendFileTool")
+_list_files      = _load("tools.file_tool",            "ListFilesTool")
+_delete_file     = _load("tools.file_tool",            "DeleteFileTool")
+_protocol        = _load("tools.protocol_tool",        "CreateProtocolTool")
+_introspect      = _load("tools.introspect_tool",      "IntrospectTool")
+_report          = _load("tools.report_tool",          "ReportTool")
+_wellness        = _load("tools.wellness_tool",        "WellnessTool")
+_preference_set  = _load("tools.preference_tool",     "SetPreferenceTool")
+_preference_view = _load("tools.preference_tool",     "ViewPreferenceTool")
+_question_queue  = _load("tools.preference_tool",     "QueueQuestionTool")
+_entity_create   = _load("tools.entity_tool",         "CreateEntityTool")
+_entity_view     = _load("tools.entity_tool",         "ViewEntityTool")
+_pattern_view    = _load("tools.pattern_tool",        "ViewPatternTool")
+_room_contract   = _load("tools.room_tool",           "SetRoomContractTool")
 
-try:
-    from tools.recall_search_tool import RecallSearchTool
-    from tools.recall_read_tool   import RecallReadTool
-    _recall_search = RecallSearchTool()
-    _recall_read   = RecallReadTool()
-except Exception as e:
-    log("Agent", f"WARNING: recall tools failed to load: {e}")
-    _recall_search = None
-    _recall_read   = None
- 
-try:
-    from tools.rewrite_file_tool import RewriteFileTool
-    _rewrite_file = RewriteFileTool()
-except Exception as e:
-    log("Agent", f"WARNING: rewrite_file_tool failed to load: {e}")
-    _rewrite_file = None
+# ── Build registry ────────────────────────────────────────────────────────────
 
-# Build registry — skip any tools that failed to load
-TOOL_REGISTRY = {
-    tool.name: tool for tool in [
-        IntrospectTool(),
-        CreateProtocolTool(),
-        SetActiveFileTool(),
-        CloseActiveFileTool(),
-        RecallSearchTool(),
-        RecallReadTool(),
-        RewriteFileTool()
-    ]
-}
+TOOL_REGISTRY: dict = {}
 
-for tool in [
-    _switch,
+for _tool in [
     _correction,
+    _switch_host,
+    _interaction,
+    _view_prefs,
     _memory_write,
     _memory_read,
-    _memory_list,
+    _memory_search,
     _memory_delete,
-    _set_prefs,
-    _view_prefs,
     _read_file,
     _write_file,
     _append_file,
     _list_files,
     _delete_file,
-    _confirm_write,
-    _cancel_write,
+    _protocol,
+    _introspect,
+    _report,
+    _wellness,
+    _preference_set,
+    _preference_view,
+    _question_queue,
+    _entity_create,
+    _entity_view,
+    _pattern_view,
+    _room_contract,
 ]:
-    if tool is not None:
-        TOOL_REGISTRY[tool.name] = tool
+    if _tool is not None:
+        TOOL_REGISTRY[_tool.name] = _tool
 
-log("Agent", f"tool registry loaded: {list(TOOL_REGISTRY.keys())}")
+log("ToolRegistry", f"loaded {len(TOOL_REGISTRY)} tools: {list(TOOL_REGISTRY.keys())}")
+
+
+# ── Tool descriptions for prompt injection ────────────────────────────────────
+
+def get_tool_descriptions() -> str:
+    """Compact tool list for system prompt."""
+    if not TOOL_REGISTRY:
+        return "(no tools available)"
+    return "\n".join(
+        f"- {name}: {tool.description}"
+        for name, tool in TOOL_REGISTRY.items()
+    )
+
+
+# ── Tool dispatcher ───────────────────────────────────────────────────────────
+
+async def dispatch_tool(
+    tool_name:  str,
+    args:       dict,
+    session_id: str,
+    headmate:   str,
+    llm,
+) -> str:
+    """
+    Execute a tool by name. Returns tool output string.
+    Logs and returns error string on failure — never raises.
+    """
+    tool = TOOL_REGISTRY.get(tool_name)
+    if not tool:
+        return f"[tool '{tool_name}' not found]"
+
+    try:
+        result = await tool.execute(
+            args=args,
+            session_id=session_id,
+            headmate=headmate,
+            llm=llm,
+        )
+        log("ToolRegistry", f"tool '{tool_name}' executed → {str(result)[:60]}")
+        return str(result) if result is not None else "[done]"
+
+    except Exception as e:
+        log_error("ToolRegistry", f"tool '{tool_name}' failed: {e}", exc=e)
+        return f"[tool error: {e}]"
