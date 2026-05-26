@@ -709,7 +709,7 @@ class GizmoServer:
         self._connections: dict[str, object] = {}  # session_id → websocket
         log("GizmoServer", "initialised")
 
-    async def start(self, host: str = "0.0.0.0", port: int = 8765) -> None:
+    async def start(self, host: str = "0.0.0.0", port: int = 10000) -> None:
         from fastapi import FastAPI, WebSocket, WebSocketDisconnect
         from fastapi.responses import HTMLResponse
         from fastapi.middleware.cors import CORSMiddleware
@@ -718,8 +718,6 @@ class GizmoServer:
         from core.llm import llm
         from core.session_manager import session_manager
 
-        await session_manager.start(llm=llm)
-
         app = FastAPI()
         app.add_middleware(
             CORSMiddleware,
@@ -727,6 +725,11 @@ class GizmoServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+        @app.on_event("startup")
+        async def startup():
+            await session_manager.start(llm=llm)
+            log_event("GizmoServer", "READY", host=host, port=port)
 
         # Serve the frontend
         @app.get("/")
@@ -764,15 +767,6 @@ class GizmoServer:
                 self._connections.pop(session_id, None)
                 log_event("GizmoServer", "CONNECTION_CLOSED",
                     session=session_id[:8])
-
-        # Override _send to use FastAPI WebSocket interface
-        async def _send_fastapi(websocket, data: dict) -> None:
-            try:
-                await websocket.send_text(json.dumps(data))
-            except Exception:
-                pass
-
-        self._send = _send_fastapi
 
         log_event("GizmoServer", "STARTING", host=host, port=port)
 
