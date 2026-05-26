@@ -710,24 +710,80 @@ class GizmoServer:
         log("GizmoServer", "initialised")
 
     async def start(self, host: str = "0.0.0.0", port: int = 8765) -> None:
-        import websockets
+        from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+        from fastapi.responses import HTMLResponse
+        from fastapi.middleware.cors import CORSMiddleware
+        import uvicorn
+        from pathlib import Path
         from core.llm import llm
         from core.session_manager import session_manager
 
         await session_manager.start(llm=llm)
 
+        app = FastAPI()
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        # Serve the frontend
+        @app.get("/")
+        async def index():
+            html_path = Path(__file__).parent / "index.html"
+            if html_path.exists():
+                return HTMLResponse(html_path.read_text(encoding="utf-8"))
+            return HTMLResponse("<h1>Gizmo</h1>")
+
+        # Health check for Render
+        @app.get("/health")
+        async def health():
+            return {"status": "ok"}
+
+        # WebSocket endpoint
+        @app.websocket("/ws")
+        async def ws_endpoint(websocket: WebSocket):
+            await websocket.accept()
+            session_id = f"sess_{id(websocket):016x}"
+            self._connections[session_id] = websocket
+
+            log_event("GizmoServer", "CONNECTION_OPENED",
+                session=session_id[:8])
+
+            try:
+                while True:
+                    raw_msg = await websocket.receive_text()
+                    await self._handle_message(websocket, session_id, raw_msg)
+            except WebSocketDisconnect:
+                pass
+            except Exception as e:
+                if "disconnect" not in str(e).lower():
+                    log_error("GizmoServer", f"connection error: {e}", exc=e)
+            finally:
+                self._connections.pop(session_id, None)
+                log_event("GizmoServer", "CONNECTION_CLOSED",
+                    session=session_id[:8])
+
+        # Override _send to use FastAPI WebSocket interface
+        async def _send_fastapi(websocket, data: dict) -> None:
+            try:
+                await websocket.send_text(json.dumps(data))
+            except Exception:
+                pass
+
+        self._send = _send_fastapi
+
         log_event("GizmoServer", "STARTING", host=host, port=port)
 
-        async with websockets.serve(
-            self._handle_connection,
-            host,
-            port,
-            max_size=1_000_000,
-            ping_interval=30,
-            ping_timeout=10,
-        ):
-            log_event("GizmoServer", "LISTENING", host=host, port=port)
-            await asyncio.Future()  # run forever
+        config = uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            log_level="warning",
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
 
     async def _handle_connection(self, websocket, path: str = "/") -> None:
         """Handle a single WebSocket connection."""
@@ -822,11 +878,8 @@ class GizmoServer:
             })
             return
 
-        # ── Pre-load session if first message ─────────────────────────────────
-        if sess_ctx.message_count == 0 and headmate:
-            asyncio.ensure_future(
-                session_manager.preload_session(session_id, headmate, llm)
-            )
+        # Session manager handles preloading the moment a name is known.
+        # No manual preload needed here.
 
         # ── Parse content ─────────────────────────────────────────────────────
         # Content can be:
@@ -870,6 +923,36 @@ class GizmoServer:
             ))
 
         fronters = context.get("fronters", [headmate] if headmate else [])
+
+        # ── Identify host from plain text response if none known ─────────────
+        # If no host is set and we just got a plain one-word/name response,
+        # treat it as an answer to "who's there?" and set the host
+        if not headmate and not multi and len(parts) == 1:
+            content = parts[0].get("content", "").strip()
+            # Simple name detection — single word or "it's X" / "I'm X"
+            import re as _re
+            name_match = (
+                _re.match(r"^([A-Za-z][A-Za-z0-9_\- ]{0,20})$", content) or
+                _re.search(
+                    r"(?:it'?s|i'?m|this is|call me|my name is)\s+([A-Za-z][A-Za-z0-9_\- ]{0,20})",
+                    content, _re.IGNORECASE
+                )
+            )
+            if name_match:
+                detected = name_match.group(1).strip().lower()
+                session_manager.set_host(
+                    session_id=session_id,
+                    headmate=detected,
+                    confidence=0.9,
+                )
+                context["current_host"] = detected
+                headmate = detected
+                fronters = [detected]
+                context["fronters"] = fronters
+                log_event("GizmoServer", "HOST_IDENTIFIED_FROM_ANSWER",
+                    session=session_id[:8],
+                    headmate=detected,
+                )
 
         log_event("GizmoServer", "MESSAGE_RECEIVED",
             session=session_id[:8],
@@ -985,7 +1068,7 @@ class GizmoServer:
 
     async def _send(self, websocket, data: dict) -> None:
         try:
-            await websocket.send(json.dumps(data))
+            await websocket.send_text(json.dumps(data))
         except Exception:
             pass
 

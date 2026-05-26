@@ -522,7 +522,9 @@
 
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
-const WS_URL      = `ws://${location.hostname}:8765`;
+const WS_URL = location.protocol === 'https:'
+  ? `wss://${location.hostname}/ws`
+  : `ws://${location.hostname}:8765/ws`;
 const SESSION_ID  = 'sess_' + Math.random().toString(36).slice(2, 10);
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -534,6 +536,7 @@ let currentMsgEl  = null;
 let fronters      = [];
 let primaryHost   = '';
 let voiceBoxCount = 0;
+let pendingHostIdentification = false;
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
@@ -583,12 +586,26 @@ function handleIncoming(msg) {
       currentMsgEl = appendMessage('gizmo', 'Gizmo', '', 'gizmo');
     }
     currentChunks.push(msg.content);
-    currentMsgEl.querySelector('.message-body').textContent = currentChunks.join('');
+    const fullText = currentChunks.join('');
+    currentMsgEl.querySelector('.message-body').textContent = fullText;
     scrollBottom();
     return;
   }
 
   if (msg.type === 'done') {
+    // Check if response was a "who are you?" question
+    // If so, the next message from user is the answer — listen for it
+    const fullResponse = currentChunks.join('').toLowerCase();
+    const isAskingHost = (
+      fullResponse.includes("who am i talking to") ||
+      fullResponse.includes("who's there") ||
+      fullResponse.includes("is that you,") ||
+      fullResponse.includes("don't think we've met")
+    );
+    if (isAskingHost) {
+      pendingHostIdentification = true;
+    }
+
     currentMsgEl  = null;
     currentChunks = [];
     thinking      = false;
@@ -810,6 +827,19 @@ function send() {
   // Remove secondary boxes
   document.querySelectorAll('.voice-box:not(.primary)').forEach(b => b.remove());
 
+  // If Gizmo was asking who's there, try to extract the name from the answer
+  if (pendingHostIdentification && parts.length > 0) {
+    const content = parts[0]?.content || '';
+    const detected = extractNameFromAnswer(content);
+    if (detected) {
+      primaryHost = detected.toLowerCase();
+      updatePrimaryLabel(detected);
+      fronters    = [primaryHost];
+      updateFronterChips();
+      pendingHostIdentification = false;
+    }
+  }
+
   thinking = true;
   setSendEnabled(false);
   updateCharCount();
@@ -909,6 +939,26 @@ function showThinking() {
 function hideThinking() {
   const el = document.getElementById('thinking-el');
   if (el) el.remove();
+}
+
+function extractNameFromAnswer(text) {
+  // "it's jess" / "jess" / "i'm jess" / "this is jess"
+  const patterns = [
+    /(?:it'?s|i'?m|this is|call me|my name is)\s+([A-Za-z][A-Za-z0-9_\- ]{0,20})/i,
+    /^([A-Za-z][A-Za-z0-9_\- ]{0,20})(?:\s*[!.,]|$)/,
+  ];
+  for (const p of patterns) {
+    const m = text.trim().match(p);
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+
+function updatePrimaryLabel(name) {
+  const label = document.querySelector('.voice-box.primary .voice-label');
+  if (label) {
+    label.textContent = name;
+  }
 }
 
 // ── Fronter chips ─────────────────────────────────────────────────────────────
