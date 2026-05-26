@@ -288,14 +288,13 @@ async def intake(
         "scene", "erotic", "sensual", "degradation",
     )
 
-    # ── LLM extraction ────────────────────────────────────────────────────────
-    extracted = await _extract_intelligence(
-        message=message,
-        headmate=headmate,
-        register=register,
-        has_intimate=has_intimate,
-        llm=llm,
-    )
+    # ── LLM extraction — skipped to reduce API calls ─────────────────────────
+    # Using heuristic classification only for now
+    extracted = {
+        "subjects": [], "relationships": [], "new_facts": [],
+        "needs_active": [], "vibe": [], "stress_level": "unknown",
+        "valence": 0.0, "wellbeing_observations": [],
+    }
 
     # ── Session context ───────────────────────────────────────────────────────
     sess_ctx = session_manager._sessions.get(session_id)
@@ -1274,7 +1273,7 @@ async def generate_response(
     response = await llm.generate(
         messages,
         system_prompt=system_prompt,
-        max_new_tokens=brief.word_count * 3 + 60,
+        max_new_tokens=max(200, brief.word_count * 3 + 60),
         temperature=_response_temperature(brief),
     )
 
@@ -1587,22 +1586,12 @@ class Agent:
                 yield response_text[i:i + 8]
             return
 
-        # ── 2. Parallel agents ────────────────────────────────────────────────
-        # Small stagger to avoid hammering the API simultaneously
-        knowledge_task  = asyncio.create_task(agent_knowledge(brief, llm))
-        await asyncio.sleep(0.1)
-        wellness_task   = asyncio.create_task(agent_wellness(brief, llm))
-        await asyncio.sleep(0.1)
-        therapy_task    = asyncio.create_task(agent_therapy(brief, llm))
-        await asyncio.sleep(0.1)
-        narrative_task  = asyncio.create_task(agent_narrative(brief, history, llm))
-
-        knowledge, wellness, therapy, narrative = await asyncio.gather(
-            knowledge_task,
-            wellness_task,
-            therapy_task,
-            narrative_task,
-        )
+        # ── 2. Sequential agents (rate limiting workaround) ───────────────────
+        # Run sequentially until we have proper rate limiting
+        knowledge = await agent_knowledge(brief, llm)
+        wellness  = await agent_wellness(brief, llm)
+        therapy   = await agent_therapy(brief, llm)
+        narrative = await agent_narrative(brief, history, llm)
 
         # ── 3. Director ───────────────────────────────────────────────────────
         directive = await director(
