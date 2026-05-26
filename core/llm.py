@@ -1,7 +1,7 @@
 """
 core/llm.py
-HuggingFace inference via the Inference Router.
-Uses the OpenAI-compatible endpoint at router.huggingface.co/v1.
+LLM inference via OpenRouter.
+Uses the OpenAI-compatible endpoint at openrouter.ai/api/v1.
 
 Retry logic:
   - generate() retries up to MAX_RETRIES times on empty response
@@ -18,21 +18,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-HF_TOKEN      = os.getenv("HF_TOKEN")
-HF_MODEL_ID   = os.getenv("HF_MODEL_ID", "deepseek-ai/DeepSeek-V3-0324")
-HF_ROUTER_URL = "https://router.huggingface.co/v1"
+# Support both old HF_TOKEN and new OPENROUTER_API_KEY
+API_KEY     = os.getenv("OPENROUTER_API_KEY") or os.getenv("HF_TOKEN")
+MODEL_ID    = os.getenv("HF_MODEL_ID", "deepseek-ai/DeepSeek-V3-0324")
+ROUTER_URL  = "https://openrouter.ai/api/v1"
 
 MAX_RETRIES     = 3
 RETRY_DELAY     = 1.5   # seconds between retries
-TIMEOUT_SECONDS = 45    # per-attempt timeout
+TIMEOUT_SECONDS = 60    # per-attempt timeout — OpenRouter can be slower
 
 
 class LLMClient:
-    def __init__(self, model_id: str = HF_MODEL_ID):
+    def __init__(self, model_id: str = MODEL_ID):
         self.model_id = model_id
         self.client = AsyncOpenAI(
-            base_url=HF_ROUTER_URL,
-            api_key=HF_TOKEN,
+            base_url=ROUTER_URL,
+            api_key=API_KEY,
             timeout=TIMEOUT_SECONDS,
         )
 
@@ -58,6 +59,10 @@ class LLMClient:
             max_tokens=max_new_tokens,
             temperature=temperature,
             stream=True,
+            extra_headers={
+                "HTTP-Referer": "https://gizmo-w9qo.onrender.com",
+                "X-Title": "Gizmo",
+            },
         )
 
         async for chunk in stream:
