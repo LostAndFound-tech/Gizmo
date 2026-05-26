@@ -248,18 +248,15 @@ async def intake(
     )
 
     # ── Session context ───────────────────────────────────────────────────────
-    session_dur    = 0.0
-    fronting_dur   = 0.0
-    sess_momentum  = "opening"
+    session_dur   = 0.0
+    fronting_dur  = 0.0
+    sess_momentum = "opening"
 
     try:
         sess = session_manager._sessions.get(session_id)
         if sess:
-            session_dur = ts - sess.opened_at
-
-        ht_state = host_tracker._sessions.get(session_id)
-        if ht_state:
-            fronting_dur = ts - ht_state.updated_at
+            session_dur  = ts - sess.opened_at
+            fronting_dur = ts - sess.host_updated_at
     except Exception:
         pass
 
@@ -304,9 +301,8 @@ async def intake(
     sess_ctx = session_manager._sessions.get(session_id)
 
     # ── Host identification — ask if unknown ─────────────────────────────────
-    # First message in session with no known host → Gizmo asks naturally
     _host_question = None
-    if sess_ctx.message_count == 0 and not headmate:
+    if (not sess_ctx or sess_ctx.message_count == 0) and not headmate:
         try:
             from core.agent_tools import dispatch_tool
             _host_question = await dispatch_tool(
@@ -1821,5 +1817,3 @@ def _infer_outcome(
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
 agent = Agent()
-
-#Making sure.
