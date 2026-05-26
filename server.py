@@ -316,15 +316,20 @@ async def run_single_pipeline(
 ) -> str:
     """Standard single-voice pipeline. Returns response text."""
     from core.agent import agent
-    chunks = []
-    async for chunk in agent.respond(
-        user_message=message,
-        session_id=session_id,
-        context=context,
-        history=history,
-    ):
-        chunks.append(chunk)
-    return "".join(chunks)
+    try:
+        chunks = []
+        async for chunk in agent.respond(
+            user_message=message,
+            session_id=session_id,
+            context=context,
+            history=history,
+        ):
+            chunks.append(chunk)
+        return "".join(chunks)
+    except Exception as e:
+        import traceback
+        print(f"[SINGLE PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
+        raise
 
 
 # ── Multi-part pipeline (room path) ──────────────────────────────────────────
@@ -964,7 +969,6 @@ class GizmoServer:
                     }),
                 )
             else:
-                # Fast path — single voice
                 single_msg = parts[0]["content"] if parts else raw_text
                 response   = await run_single_pipeline(
                     message=single_msg,
@@ -976,11 +980,15 @@ class GizmoServer:
                 )
 
         except Exception as e:
-            log_error("GizmoServer", "pipeline failed", exc=e)
+            import traceback
+            err = traceback.format_exc()
+            print(f"[PIPELINE ERROR]\n{err}", flush=True)
+            log_error("GizmoServer", f"pipeline error: {e}", exc=e)
             await self._send(websocket, {
                 "type":    "error",
-                "message": "something went wrong",
+                "message": f"pipeline error: {type(e).__name__}: {e}",
             })
+            setSendEnabled = None  # hint for frontend
             return
 
         # ── Stream response ───────────────────────────────────────────────────
