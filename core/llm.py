@@ -62,6 +62,7 @@ class LLMClient:
             extra_headers={
                 "HTTP-Referer": "https://gizmo-w9qo.onrender.com",
                 "X-Title": "Gizmo",
+                "X-Safety-Model": "disabled",
             },
         )
 
