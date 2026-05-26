@@ -1253,11 +1253,23 @@ async def generate_response(
     One LLM call. Writes the actual message.
     Given a perfect brief, the model just writes.
     """
+    # Hard cap on system prompt to avoid token overflows
+    if len(system_prompt) > 6000:
+        system_prompt = system_prompt[:6000] + "\n[...truncated]"
+
+    print(f"[generate_response] system_prompt length: {len(system_prompt)} chars", flush=True)
+
     messages = []
     try:
         messages = history.as_messages_with_timestamps(brief.message)
     except Exception:
-        messages = [{"role": "user", "content": brief.message}]
+        try:
+            messages = history.as_list()
+            messages.append({"role": "user", "content": brief.message})
+        except Exception:
+            messages = [{"role": "user", "content": brief.message}]
+
+    print(f"[generate_response] messages count: {len(messages)}", flush=True)
 
     response = await llm.generate(
         messages,
@@ -1266,13 +1278,15 @@ async def generate_response(
         temperature=_response_temperature(brief),
     )
 
+    print(f"[generate_response] got: '{response[:80] if response else 'EMPTY'}'", flush=True)
+
     log_event("Agent", "RESPONSE_GENERATED",
         session=brief.session_id[:8],
-        words=len(response.split()),
+        words=len(response.split()) if response else 0,
         register=brief.register,
     )
 
-    return response.strip()
+    return (response or "").strip()
 
 
 def directive_token_target(brief: Brief) -> int:
@@ -1601,7 +1615,15 @@ class Agent:
         )
 
         # ── 4. Personality layer ──────────────────────────────────────────────
-        system_prompt = personality_layer(brief, directive)
+        try:
+            system_prompt = personality_layer(brief, directive)
+        except Exception as e:
+            log_error("Agent", f"personality_layer failed: {e}", exc=e)
+            system_prompt = "You are Gizmo, a warm and present companion. Respond naturally."
+
+        # Hard cap
+        if len(system_prompt) > 6000:
+            system_prompt = system_prompt[:6000]
 
         # ── 5. Response ───────────────────────────────────────────────────────
         response_text = await generate_response(
