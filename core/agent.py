@@ -300,6 +300,9 @@ async def intake(
         llm=llm,
     )
 
+    # ── Session context ───────────────────────────────────────────────────────
+    sess_ctx = session_manager._sessions.get(session_id)
+
     # ── Host identification — ask if unknown ─────────────────────────────────
     # First message in session with no known host → Gizmo asks naturally
     _host_question = None
