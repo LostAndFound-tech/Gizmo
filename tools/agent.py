@@ -248,18 +248,15 @@ async def intake(
     )
 
     # ── Session context ───────────────────────────────────────────────────────
-    session_dur    = 0.0
-    fronting_dur   = 0.0
-    sess_momentum  = "opening"
+    session_dur   = 0.0
+    fronting_dur  = 0.0
+    sess_momentum = "opening"
 
     try:
         sess = session_manager._sessions.get(session_id)
         if sess:
-            session_dur = ts - sess.opened_at
-
-        ht_state = host_tracker._sessions.get(session_id)
-        if ht_state:
-            fronting_dur = ts - ht_state.updated_at
+            session_dur  = ts - sess.opened_at
+            fronting_dur = ts - sess.host_updated_at
     except Exception:
         pass
 
@@ -291,19 +288,20 @@ async def intake(
         "scene", "erotic", "sensual", "degradation",
     )
 
-    # ── LLM extraction ────────────────────────────────────────────────────────
-    extracted = await _extract_intelligence(
-        message=message,
-        headmate=headmate,
-        register=register,
-        has_intimate=has_intimate,
-        llm=llm,
-    )
+    # ── LLM extraction — runs async in close_loop after response ─────────────
+    # Heuristic only during intake to keep pipeline fast
+    extracted = {
+        "subjects": [], "relationships": [], "new_facts": [],
+        "needs_active": [], "vibe": [], "stress_level": "unknown",
+        "valence": 0.0, "wellbeing_observations": [],
+    }
+
+    # ── Session context ───────────────────────────────────────────────────────
+    sess_ctx = session_manager._sessions.get(session_id)
 
     # ── Host identification — ask if unknown ─────────────────────────────────
-    # First message in session with no known host → Gizmo asks naturally
     _host_question = None
-    if sess_ctx.message_count == 0 and not headmate:
+    if (not sess_ctx or sess_ctx.message_count == 0) and not headmate:
         try:
             from core.agent_tools import dispatch_tool
             _host_question = await dispatch_tool(
@@ -322,32 +320,9 @@ async def intake(
     # but we also handle explicit new names from multi-part exchanges here
 
     # ── Session manager entity processing ────────────────────────────────────
-    # Route through session manager — one LLM call connects subjects to speaker
-    # Cache populated, unknowns flagged, before parallel agents run
+    # Skipping LLM entity extraction for now to reduce concurrent API calls
+    # Heuristic classification in _classify_topics handles basic topic detection
     unknown_entities = []
-    if headmate:
-        try:
-            touched = await session_manager.process_message_entities(
-                session_id=session_id,
-                message=message,
-                headmate=headmate,
-                llm=llm,
-            )
-            # Collect unknowns — entities in cache with unknown=True
-            sess_ctx = session_manager._sessions.get(session_id)
-            if sess_ctx:
-                for name in sess_ctx.unknown_entities:
-                    cache = sess_ctx.get_entity(name)
-                    if cache:
-                        unknown_entities.append({
-                            "name":        cache.name,
-                            "entity_type": cache.entity_type,
-                            "context":     (
-                                f"mentioned in: \"{message[:80]}\""
-                            ),
-                        })
-        except Exception as e:
-            log_error("Agent", "session manager entity processing failed", exc=e)
 
     # ── Write message envelope to store ───────────────────────────────────────
     tags = list(set(
@@ -546,13 +521,19 @@ async def agent_knowledge(brief: Brief, llm) -> dict:
     sess_ctx  = session_manager._sessions.get(brief.session_id)
     hot_facts = sess_ctx.hot_facts[:8] if sess_ctx else []
 
-    # Semantic search for this specific query
-    search_results = store.search(
-        query=brief.message,
-        tables=["facts", "messages", "reflections"],
-        headmate=brief.headmate.lower(),
-        limit=6,
-    )
+    # Semantic search — only if we have data
+    search_results = []
+    try:
+        fact_count = store.count("facts", headmate=brief.headmate.lower())
+        if fact_count > 0:
+            search_results = store.search(
+                query=brief.message,
+                tables=["facts", "messages", "reflections"],
+                headmate=brief.headmate.lower(),
+                limit=6,
+            )
+    except Exception:
+        pass
 
     # Recent sessions context
     today_sessions = store.get_today_sessions(headmate=brief.headmate)
@@ -1277,26 +1258,40 @@ async def generate_response(
     One LLM call. Writes the actual message.
     Given a perfect brief, the model just writes.
     """
-    messages = []
+    # Hard cap on system prompt to avoid token overflows
+    if len(system_prompt) > 6000:
+        system_prompt = system_prompt[:6000] + "\n[...truncated]"
+
+    print(f"[generate_response] system_prompt length: {len(system_prompt)} chars", flush=True)
+
+    # Use as_messages() — clean role/content pairs, appends current message
+    # Trim to last 6 exchanges — store handles long-term memory
     try:
-        messages = history.as_messages_with_timestamps(brief.message)
-    except Exception:
+        messages = history.as_messages(brief.message)
+        if len(messages) > 7:  # 6 history + 1 current
+            messages = messages[-7:]
+    except Exception as e:
+        print(f"[generate_response] history error: {e}", flush=True)
         messages = [{"role": "user", "content": brief.message}]
+
+    print(f"[generate_response] messages count: {len(messages)}", flush=True)
 
     response = await llm.generate(
         messages,
         system_prompt=system_prompt,
-        max_new_tokens=brief.word_count * 3 + 60,
+        max_new_tokens=max(300, brief.word_count * 4 + 100),
         temperature=_response_temperature(brief),
     )
 
+    print(f"[generate_response] got: '{response[:80] if response else 'EMPTY'}'", flush=True)
+
     log_event("Agent", "RESPONSE_GENERATED",
         session=brief.session_id[:8],
-        words=len(response.split()),
+        words=len(response.split()) if response else 0,
         register=brief.register,
     )
 
-    return response.strip()
+    return (response or "").strip()
 
 
 def directive_token_target(brief: Brief) -> int:
@@ -1409,15 +1404,23 @@ async def close_loop(
             )
 
         # Check for gaps → queue questions
-        if brief.headmate:
-            asyncio.ensure_future(
-                _check_and_queue_questions(brief, directive, llm)
-            )
+        # Disabled for now — too many concurrent API calls
+        # Re-enable once rate limiting is resolved
+        # if brief.headmate:
+        #     asyncio.ensure_future(
+        #         _check_and_queue_questions(brief, directive, llm)
+        #     )
 
         log_event("Agent", "CLOSE_LOOP_COMPLETE",
             session=brief.session_id[:8],
             therapy_logged=directive.log_conditions,
             pattern=directive.pattern_action,
+        )
+
+        # ── Async extraction — runs after response sent, never blocks ─────────
+        # Extracts facts, relationships, wellbeing from the exchange
+        asyncio.ensure_future(
+            _async_extract(brief, response, llm)
         )
 
     except Exception as e:
@@ -1444,6 +1447,116 @@ async def _update_pattern_outcome(brief: Brief, directive: Directive) -> None:
         )
     except Exception as e:
         log_error("Agent", "pattern outcome update failed", exc=e)
+
+
+async def _async_extract(brief: Brief, response: str, llm) -> None:
+    """
+    Extract intelligence from the exchange after response is sent.
+    Writes facts, relationships, wellbeing to store.
+    Never blocks the response — fire and forget from close_loop.
+    """
+    try:
+        from core.store import store
+
+        extracted = await _extract_intelligence(
+            message=brief.message,
+            headmate=brief.headmate or "",
+            register=brief.register,
+            has_intimate=brief.has_intimate,
+            llm=llm,
+        )
+
+        if not extracted:
+            return
+
+        # Write facts
+        for fact in extracted.get("new_facts", []):
+            if fact and len(fact) > 5:
+                store.write("facts", {
+                    "fact":       fact,
+                    "headmate":   brief.headmate.lower() if brief.headmate else None,
+                    "fact_type":  "observation",
+                    "register":   brief.register,
+                    "context":    brief.time_of_day,
+                    "session_id": brief.session_id,
+                    "source":     "extractor",
+                    "tags":       f"fact,{brief.headmate.lower() if brief.headmate else 'unknown'},{brief.register}",
+                })
+
+        # Write relationships
+        for rel in extracted.get("relationships", []):
+            if rel.get("entity") and rel.get("label"):
+                store.write("relationships", {
+                    "speaker":               rel.get("speaker", brief.headmate or "unknown"),
+                    "entity":                rel.get("entity", ""),
+                    "entity_type":           rel.get("entity_type", "unknown"),
+                    "relationship_label":    rel.get("label", ""),
+                    "relationship_category": rel.get("category", "social_bond"),
+                    "confidence_type":       rel.get("confidence", "stated"),
+                    "intimate":              1 if rel.get("intimate") else 0,
+                    "headmate":              brief.headmate.lower() if brief.headmate else None,
+                    "session_id":            brief.session_id,
+                    "source":               "extractor",
+                    "tags":                 f"relationship,{rel.get('label','')}",
+                })
+
+        # Write wellbeing
+        for obs in extracted.get("wellbeing_observations", []):
+            if obs.get("observation"):
+                store.write("wellbeing", {
+                    "headmate":    brief.headmate.lower() if brief.headmate else None,
+                    "category":    obs.get("category", "pattern"),
+                    "observation": obs.get("observation", ""),
+                    "context":     obs.get("context", ""),
+                    "register":    brief.register,
+                    "session_id":  brief.session_id,
+                    "source":      "extractor",
+                    "confidence":  0.6,
+                    "tags":        f"wellbeing,{obs.get('category','pattern')},{brief.headmate.lower() if brief.headmate else 'unknown'}",
+                })
+
+        log_event("Agent", "EXTRACTION_COMPLETE",
+            session=brief.session_id[:8],
+            facts=len(extracted.get("new_facts", [])),
+            relationships=len(extracted.get("relationships", [])),
+            wellbeing=len(extracted.get("wellbeing_observations", [])),
+        )
+
+        # Print detailed extraction results
+        print(f"\n[EXTRACTION] headmate={brief.headmate} register={brief.register}", flush=True)
+        print(f"[EXTRACTION] message: {brief.message[:80]}", flush=True)
+
+        facts_written = extracted.get("new_facts", [])
+        if facts_written:
+            print(f"[EXTRACTION] facts ({len(facts_written)}):", flush=True)
+            for f in facts_written:
+                print(f"  → fact: {f}", flush=True)
+        else:
+            print(f"[EXTRACTION] facts: none", flush=True)
+
+        rels_written = extracted.get("relationships", [])
+        if rels_written:
+            print(f"[EXTRACTION] relationships ({len(rels_written)}):", flush=True)
+            for r in rels_written:
+                print(f"  → {r.get('speaker','?')} --[{r.get('label','?')}]--> {r.get('entity','?')} ({r.get('confidence','?')})", flush=True)
+        else:
+            print(f"[EXTRACTION] relationships: none", flush=True)
+
+        wb_written = extracted.get("wellbeing_observations", [])
+        if wb_written:
+            print(f"[EXTRACTION] wellbeing ({len(wb_written)}):", flush=True)
+            for w in wb_written:
+                print(f"  → [{w.get('category','?')}] {w.get('observation','')[:80]}", flush=True)
+        else:
+            print(f"[EXTRACTION] wellbeing: none", flush=True)
+
+        vibe = extracted.get("vibe", [])
+        stress = extracted.get("stress_level", "unknown")
+        valence = extracted.get("valence", 0.0)
+        print(f"[EXTRACTION] vibe={vibe} stress={stress} valence={valence:+.2f}\n", flush=True)
+
+    except Exception as e:
+        log_error("Agent", "async extraction failed", exc=e)
 
 
 async def _log_pattern_instance(
@@ -1595,18 +1708,12 @@ class Agent:
                 yield response_text[i:i + 8]
             return
 
-        # ── 2. Parallel agents ────────────────────────────────────────────────
-        knowledge_task  = asyncio.create_task(agent_knowledge(brief, llm))
-        wellness_task   = asyncio.create_task(agent_wellness(brief, llm))
-        therapy_task    = asyncio.create_task(agent_therapy(brief, llm))
-        narrative_task  = asyncio.create_task(agent_narrative(brief, history, llm))
-
-        knowledge, wellness, therapy, narrative = await asyncio.gather(
-            knowledge_task,
-            wellness_task,
-            therapy_task,
-            narrative_task,
-        )
+        # ── 2. Sequential agents (rate limiting workaround) ───────────────────
+        # Run sequentially until we have proper rate limiting
+        knowledge = await agent_knowledge(brief, llm)
+        wellness  = await agent_wellness(brief, llm)
+        therapy   = await agent_therapy(brief, llm)
+        narrative = await agent_narrative(brief, history, llm)
 
         # ── 3. Director ───────────────────────────────────────────────────────
         directive = await director(
@@ -1619,7 +1726,15 @@ class Agent:
         )
 
         # ── 4. Personality layer ──────────────────────────────────────────────
-        system_prompt = personality_layer(brief, directive)
+        try:
+            system_prompt = personality_layer(brief, directive)
+        except Exception as e:
+            log_error("Agent", f"personality_layer failed: {e}", exc=e)
+            system_prompt = "You are Gizmo, a warm and present companion. Respond naturally."
+
+        # Hard cap
+        if len(system_prompt) > 6000:
+            system_prompt = system_prompt[:6000]
 
         # ── 5. Response ───────────────────────────────────────────────────────
         response_text = await generate_response(

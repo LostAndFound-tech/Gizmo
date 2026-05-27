@@ -826,6 +826,8 @@ function handleIncoming(msg) {
     }
     return;
   }
+
+  if (msg.type === 'thinking') {
     setStatus('thinking');
     showThinking();
     return;
