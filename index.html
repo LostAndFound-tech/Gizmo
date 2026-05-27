@@ -682,7 +682,18 @@
 
   <!-- Input -->
   <div id="input-area">
-    <div id="voice-boxes"></div>
+    <div id="voice-boxes">
+      <!-- Primary voice box — JS will enhance this, but fallback works too -->
+      <div class="voice-box primary" id="primary-box" data-type="speech">
+        <div class="voice-label" id="primary-label">you</div>
+        <textarea class="voice-textarea" id="primary-textarea" rows="1"
+          placeholder="say something..."
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send();}"
+          oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,200)+'px';updateCharCount();detectNamePrefix(this);"
+        ></textarea>
+        <div></div>
+      </div>
+    </div>
     <div id="input-controls">
       <button id="add-voice-btn" onclick="addVoiceBox()">+ add voice</button>
       <div class="controls-right">
@@ -702,8 +713,8 @@
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
 const WS_URL = location.protocol === 'https:'
-  ? `wss://${location.hostname}/ws`
-  : `ws://${location.hostname}:10000/ws`;
+  ? `wss://${location.hostname}`
+  : `ws://${location.hostname}:10000`;
 
 // Client owns the session ID — persists across reconnects
 function getOrCreateSessionId() {
@@ -865,7 +876,24 @@ function handleIncoming(msg) {
 }
 
 // ── Voice boxes ───────────────────────────────────────────────────────────────
+function detectNamePrefix(textarea) {
+  const match = textarea.value.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:/);
+  if (match) {
+    const name = match[1].trim();
+    document.getElementById('primary-label').textContent = name;
+    primaryHost = name.toLowerCase();
+    updateFronterChips();
+  }
+}
+
 function initPrimaryBox() {
+  // If HTML fallback already rendered the primary box, just wire it up
+  const existing = document.getElementById('primary-textarea');
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  // Otherwise create it dynamically
   const box = createVoiceBox(true);
   document.getElementById('voice-boxes').appendChild(box);
   box.querySelector('.voice-textarea').focus();
@@ -999,48 +1027,43 @@ function send() {
     return;
   }
 
-  const boxes     = document.querySelectorAll('.voice-box');
-  const parts     = [];
+  // Try dynamic voice boxes first, fall back to static primary textarea
+  const dynamicBoxes = document.querySelectorAll('.voice-box');
+  const staticTA     = document.getElementById('primary-textarea');
+
+  const parts    = [];
   let   hasContent = false;
 
-  boxes.forEach((box, idx) => {
-    const isPrimary  = box.classList.contains('primary');
-    const type       = box.dataset.type || 'speech';
-    const textarea   = box.querySelector('.voice-textarea');
-    const content    = textarea ? textarea.value.trim() : '';
+  if (dynamicBoxes.length > 0) {
+    dynamicBoxes.forEach((box) => {
+      const isPrimary  = box.classList.contains('primary');
+      const type       = box.dataset.type || 'speech';
+      const textarea   = box.querySelector('.voice-textarea') || (isPrimary ? staticTA : null);
+      const content    = textarea ? textarea.value.trim() : '';
 
-    // Get name
-    let name = '';
-    if (isPrimary) {
-      name = primaryHost || '';
-      // Check for [Name]: prefix
-      const match = content.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:\s*(.*)/s);
-      if (match) {
-        name = match[1].trim().toLowerCase();
-        // Don't strip the prefix — server handles it
+      let name = '';
+      if (isPrimary) {
+        name = primaryHost || '';
+        const match = content.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:\s*(.*)/s);
+        if (match) name = match[1].trim().toLowerCase();
+      } else {
+        const nameInput = box.querySelector('input');
+        name = nameInput ? nameInput.value.trim().toLowerCase() : '';
       }
-    } else {
-      const nameInput = box.querySelector('input');
-      name = nameInput ? nameInput.value.trim().toLowerCase() : '';
-    }
 
-    if (type === 'silent') {
-      if (name) {
-        parts.push({ headmate: name, content: null, content_type: 'presence' });
+      if (type === 'silent') {
+        if (name) parts.push({ headmate: name, content: null, content_type: 'presence' });
+        return;
       }
-      return;
-    }
-
-    if (content) {
-      hasContent = true;
-      parts.push({
-        headmate:     name || null,
-        content:      content,
-        content_type: type,
-        directed_at:  null,
-      });
-    }
-  });
+      if (content) {
+        hasContent = true;
+        parts.push({ headmate: name || null, content, content_type: type, directed_at: null });
+      }
+    });
+  } else if (staticTA && staticTA.value.trim()) {
+    hasContent = true;
+    parts.push({ headmate: primaryHost || null, content: staticTA.value.trim(), content_type: 'speech', directed_at: 'gizmo' });
+  }
 
   if (!hasContent) return;
 
@@ -1079,18 +1102,14 @@ function send() {
   }
 
   // Clear inputs
-  boxes.forEach(box => {
-    if (!box.classList.contains('silent')) {
-      const ta = box.querySelector('.voice-textarea');
-      if (ta) {
-        ta.value = '';
-        ta.style.height = 'auto';
-      }
+  document.querySelectorAll('.voice-box:not(.primary)').forEach(b => b.remove());
+  const allTAs = document.querySelectorAll('.voice-textarea, #primary-textarea');
+  allTAs.forEach(ta => {
+    if (!ta.closest('.voice-box.silent')) {
+      ta.value = '';
+      ta.style.height = 'auto';
     }
   });
-
-  // Remove secondary boxes
-  document.querySelectorAll('.voice-box:not(.primary)').forEach(b => b.remove());
 
   // If Gizmo was asking who's there, try to extract the name from the answer
   if (pendingHostIdentification && parts.length > 0) {
