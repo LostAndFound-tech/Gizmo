@@ -717,10 +717,13 @@ class GizmoServer:
     async def start(self, host: str = "0.0.0.0", port: int = 10000) -> None:
         from aiohttp import web
         from pathlib import Path
-        from core.llm import llm
-        from core.session_manager import session_manager
+        async def on_startup(app):
+            from core.llm import llm
+            from core.session_manager import session_manager
+            await session_manager.start(llm=llm)
+            log_event("GizmoServer", "READY")
 
-        await session_manager.start(llm=llm)
+        app.on_startup.append(on_startup)
 
         app = web.Application()
 
