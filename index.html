@@ -1084,8 +1084,6 @@ function send() {
     },
   };
 
-  ws.send(JSON.stringify(payload));
-
   // If not connected, queue it
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     console.warn('[send] not connected, queuing message');
