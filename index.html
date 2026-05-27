@@ -704,7 +704,32 @@
 const WS_URL = location.protocol === 'https:'
   ? `wss://${location.hostname}/ws`
   : `ws://${location.hostname}:10000/ws`;
-const SESSION_ID  = 'sess_' + Math.random().toString(36).slice(2, 10);
+
+// Client owns the session ID — persists across reconnects
+function getOrCreateSessionId() {
+  let sid = sessionStorage.getItem('gizmo_session_id');
+  if (!sid) {
+    sid = 'sess_' + Math.random().toString(36).slice(2, 12);
+    sessionStorage.setItem('gizmo_session_id', sid);
+  }
+  return sid;
+}
+
+let SESSION_ID = getOrCreateSessionId();
+
+function switchSession(sid) {
+  SESSION_ID = sid;
+  sessionStorage.setItem('gizmo_session_id', sid);
+  // Clear current messages
+  const msgs = document.getElementById('messages');
+  msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">continuing session...</div></div>';
+  currentChunks = [];
+  currentMsgEl  = null;
+  // Tell server to restore this session
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'restore_session', session_id: sid }));
+  }
+}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let ws            = null;
@@ -775,7 +800,21 @@ function connect() {
 function handleIncoming(msg) {
   if (msg.type === 'pong') return;
 
-  if (msg.type === 'thinking') {
+  if (msg.type === 'session_restored') {
+    // Switch to the new branch session ID
+    if (msg.session_id) {
+      SESSION_ID = msg.session_id;
+      sessionStorage.setItem('gizmo_session_id', msg.session_id);
+    }
+    // Restore fronter chips — Gizmo's opening comes via chunk/done
+    if (msg.hosts && msg.hosts.length) {
+      primaryHost = msg.hosts[0].toLowerCase();
+      fronters    = msg.hosts.map(h => h.toLowerCase());
+      updatePrimaryLabel(msg.hosts[0]);
+      updateFronterChips();
+    }
+    return;
+  }
     setStatus('thinking');
     showThinking();
     return;
@@ -1288,8 +1327,12 @@ async function loadSessions() {
       const mood    = s.mood || '—';
       const hosts   = (s.hosts || []).map(h => h.charAt(0).toUpperCase() + h.slice(1)).join(', ');
 
+      // A session is a branch if its ID contains more than one underscore segment after 'sess_'
+      const isBranch = (s.id.match(/_/g) || []).length > 1;
+      const depth    = (s.id.match(/_/g) || []).length - 1; // nesting depth
+      const indent   = '↳ '.repeat(depth > 1 ? depth - 1 : depth > 0 ? 1 : 0);
       el.innerHTML = `
-        <div class="session-date">${dateStr} ${timeStr}</div>
+        <div class="session-date">${indent}${dateStr} ${timeStr}</div>
         <div class="session-mood">${mood}${hosts ? ' · <span style="color:var(--accent);font-size:11px">' + hosts + '</span>' : ''}</div>
         <div class="session-topics">${topics}</div>
       `;
@@ -1361,6 +1404,23 @@ async function openSession(sessionId) {
         <div class="detail-label">notable</div>
         ${notable.map(n => `<div class="detail-text" style="font-size:12px">— ${n}</div>`).join('')}
       </div>` : ''}
+
+      <div class="detail-section" style="margin-top:8px">
+        <button onclick="continueSession('${sid}')" style="
+          background:var(--accent-lo);
+          border:1px solid var(--accent)66;
+          border-radius:var(--radius);
+          color:var(--accent);
+          font-family:var(--mono);
+          font-size:12px;
+          padding:8px 18px;
+          cursor:pointer;
+          transition:all 0.15s;
+        " onmouseover="this.style.background='var(--accent)22'" 
+           onmouseout="this.style.background='var(--accent-lo)'">
+          continue this conversation →
+        </button>
+      </div>
     `;
 
     // Draw arc chart
@@ -1429,6 +1489,12 @@ function drawArc(arc) {
   ctx.lineTo(pad + (W - pad * 2), zeroY);
   ctx.closePath();
   ctx.fill();
+}
+
+function continueSession(sid) {
+  closeDetail();
+  if (sidebarOpen) toggleSidebar();
+  switchSession(sid);
 }
 
 function closeDetail() {

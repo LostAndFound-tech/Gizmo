@@ -747,12 +747,13 @@ class GizmoServer:
                     limit=50,
                 )
                 items = [{
-                    "id":        s["id"],
-                    "opened_at": s.get("opened_at"),
-                    "mood":      s.get("mood"),
-                    "topics":    s.get("topics") or [],
-                    "hosts":     s.get("hosts") or [],
-                    "summary":   (s.get("summary") or "")[:100],
+                    "id":                s["id"],
+                    "opened_at":         s.get("opened_at"),
+                    "mood":              s.get("mood"),
+                    "topics":            s.get("topics") or [],
+                    "hosts":             s.get("hosts") or [],
+                    "summary":           (s.get("summary") or "")[:100],
+                    "parent_session_id": s.get("parent_session_id"),
                 } for s in sessions]
                 return web.Response(
                     text=json.dumps({"sessions": items}),
@@ -876,6 +877,10 @@ class GizmoServer:
         # ── Control messages ──────────────────────────────────────────────────
         if msg_type == "ping":
             await self._send(websocket, {"type": "pong"})
+            return
+
+        if msg_type == "restore_session":
+            await self._handle_restore_session(websocket, msg)
             return
 
         if msg_type == "switch_host":
@@ -1090,7 +1095,169 @@ class GizmoServer:
 
     # ── Host/fronter control ──────────────────────────────────────────────────
 
-    async def _handle_switch_host(self, session_id: str, msg: dict) -> None:
+    async def _handle_restore_session(self, websocket, msg: dict) -> None:
+        """
+        Restore a previous session — reload history from store,
+        reactivate in session manager, send summary to client.
+        Then generate a natural opening from Gizmo acknowledging
+        the time that's passed and who's here.
+        """
+        from core.store import store
+        from core.session_manager import session_manager
+        from core.llm import llm
+        import time as _time
+        import random, string
+
+        sid = msg.get("session_id", "")
+        if not sid:
+            return
+
+        # Load parent session record
+        session = store.get("sessions", sid)
+        if not session:
+            await self._send(websocket, {
+                "type":    "error",
+                "message": "session not found",
+            })
+            return
+
+        # Create branch session ID — parent ID + new suffix
+        # sess_abc → sess_abc_xyz so lineage is visible in the ID itself
+        suffix    = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        branch_id = f"{sid}_{suffix}"
+
+        # How long has it been?
+        now          = _time.time()
+        last_ts      = session.get("closed_at") or session.get("updated_at") or session.get("opened_at") or now
+        elapsed_secs = now - last_ts
+        elapsed_hrs  = elapsed_secs / 3600
+
+        if elapsed_hrs < 0.5:
+            time_note = "just a few minutes ago"
+        elif elapsed_hrs < 2:
+            time_note = f"about {int(elapsed_hrs * 60)} minutes ago"
+        elif elapsed_hrs < 24:
+            time_note = f"about {int(elapsed_hrs)} hours ago"
+        elif elapsed_hrs < 48:
+            time_note = "yesterday"
+        else:
+            days = int(elapsed_hrs / 24)
+            time_note = f"{days} days ago"
+
+        # Restore history into the new branch session
+        history  = session_manager.get_history(branch_id)
+        messages = store.query("messages",
+            session_id=sid, active=1,
+            order_by="created_at ASC", limit=20,
+        )
+        responses = store.query("responses",
+            session_id=sid, active=1,
+            order_by="created_at ASC", limit=20,
+        )
+
+        all_msgs = (
+            [{"role": "user",      "content": m["content"], "ts": m.get("created_at", 0)} for m in messages if m.get("content")] +
+            [{"role": "assistant", "content": r["content"], "ts": r.get("created_at", 0)} for r in responses if r.get("content")]
+        )
+        all_msgs.sort(key=lambda x: x["ts"])
+
+        for m in all_msgs[-12:]:
+            try:
+                history.add(m["role"], m["content"])
+            except Exception:
+                pass
+
+        # Restore host
+        hosts = session.get("hosts") or []
+        if hosts:
+            session_manager.set_host(
+                session_id=branch_id,
+                headmate=hosts[0],
+                confidence=0.9,
+                fronters=hosts,
+            )
+
+        # Write the branch session record to store
+        store.write("sessions", {
+            "id":                branch_id,
+            "opened_at":         now,
+            "hosts":             hosts,
+            "fronters":          hosts,
+            "parent_session_id": sid,
+            "branch_point":      now,
+            "headmate":          hosts[0].lower() if hosts else None,
+            "source":            "branch",
+            "tags":              f"session,branch,{hosts[0].lower() if hosts else 'unknown'}",
+        })
+
+        # Tell client — send the new branch session ID
+        await self._send(websocket, {
+            "type":       "session_restored",
+            "session_id": branch_id,
+            "hosts":      hosts,
+        })
+
+        log_event("GizmoServer", "SESSION_BRANCHED",
+            parent=sid[:8],
+            branch=branch_id[:8],
+            hosts=hosts,
+            elapsed_hrs=round(elapsed_hrs, 1),
+        )
+
+        # ── Generate Gizmo's opening ──────────────────────────────────────────
+        host_name  = hosts[0].title() if hosts else "you"
+        mood       = session.get("mood", "")
+        summary    = session.get("summary", "")
+        unresolved = session.get("unresolved", "")
+        notable    = (session.get("notable") or [])
+
+        last_exchange = ""
+        if all_msgs:
+            last_few = all_msgs[-3:]
+            last_exchange = "\n".join(
+                f"{'User' if m['role']=='user' else 'Gizmo'}: {m['content'][:80]}"
+                for m in last_few
+            )
+
+        try:
+            await self._send(websocket, {"type": "thinking"})
+
+            opening = await llm.generate(
+                [{"role": "user", "content": (
+                    f"You are reconnecting with {host_name}. "
+                    f"It has been {time_note} since you last spoke.\n\n"
+                    f"Last session mood: {mood or 'unknown'}\n"
+                    f"Summary: {summary[:200] if summary else 'no summary'}\n"
+                    f"Unresolved: {unresolved or 'nothing specific'}\n"
+                    f"Notable: {'; '.join(notable[:2]) if notable else 'nothing specific'}\n\n"
+                    f"Last few exchanges:\n{last_exchange or '(none)'}\n\n"
+                    f"Write ONE short, natural opening — 1-2 sentences. "
+                    f"Acknowledge the time that's passed in your own way. "
+                    f"Reference the last session if something was left hanging. "
+                    f"Don't be formal. Don't say 'welcome back'. "
+                    f"Just be present. Address {host_name} directly."
+                )}],
+                system_prompt=(
+                    f"You are Gizmo. You are reconnecting with {host_name} "
+                    f"after {time_note}. Be natural, warm, present. "
+                    f"One or two sentences only. No preamble."
+                ),
+                max_new_tokens=80,
+                temperature=0.85,
+            )
+
+            if opening and opening.strip():
+                await self._send(websocket, {
+                    "type":    "chunk",
+                    "content": opening.strip(),
+                })
+                await self._send(websocket, {
+                    "type":       "done",
+                    "session_id": branch_id,
+                })
+
+        except Exception as e:
+            log_error("GizmoServer", "restore opening failed", exc=e)
         from core.session_manager import session_manager
         headmate = msg.get("headmate", "")
         if headmate:
