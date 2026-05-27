@@ -717,6 +717,9 @@ class GizmoServer:
     async def start(self, host: str = "0.0.0.0", port: int = 10000) -> None:
         from aiohttp import web
         from pathlib import Path
+
+        app = web.Application()
+
         async def on_startup(app):
             from core.llm import llm
             from core.session_manager import session_manager
@@ -724,8 +727,6 @@ class GizmoServer:
             log_event("GizmoServer", "READY")
 
         app.on_startup.append(on_startup)
-
-        app = web.Application()
 
         # ── HTTP routes ───────────────────────────────────────────────────────
         async def handle_index(request):
