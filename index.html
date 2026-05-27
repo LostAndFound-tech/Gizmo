@@ -713,8 +713,8 @@
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
 const WS_URL = location.protocol === 'https:'
-  ? `wss://${location.hostname}`
-  : `ws://${location.hostname}:10000`;
+  ? `wss://${location.hostname}/ws`
+  : `ws://${location.hostname}:10000/ws`;
 
 // Client owns the session ID — persists across reconnects
 function getOrCreateSessionId() {
