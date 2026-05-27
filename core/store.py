@@ -305,6 +305,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     unresolved      TEXT,
     transcript_path TEXT,
     arc             TEXT,       -- JSON: time-of-day buckets
+    parent_session_id TEXT,     -- session this was branched from
+    branch_point    REAL,       -- timestamp of the branch
     -- universal
     headmate    TEXT,
     source      TEXT DEFAULT 'archiver',
@@ -712,9 +714,14 @@ _TABLE_PREFIXES = {
 }
 
 
-def _new_id(table: str) -> str:
-    prefix = _TABLE_PREFIXES.get(table, "rec")
-    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+def _sanitize_fts_query(query: str) -> str:
+    """Sanitize query for FTS5 — strip special chars, wrap in quotes."""
+    import re
+    clean = re.sub(r"[^a-zA-Z0-9\s]", " ", query)
+    clean = " ".join(clean.split())
+    if not clean.strip():
+        return None  # caller should skip search on empty query
+    return f'"{clean[:100]}"'
 
 
 def _now() -> float:
@@ -932,55 +939,73 @@ class Store:
     ) -> list[dict]:
         """
         Full-text search across one or more tables.
-        If semantic=True and embeddings are available, re-ranks by
-        vector similarity after FTS retrieval.
-
-        Returns results sorted by relevance, each with a _score field
-        and a _table field indicating which table it came from.
+        Skips tables with no rows — FTS on empty tables causes errors.
+        Falls back to empty list gracefully on any failure.
         """
         search_tables = tables or list(_FTS_TABLES.keys())
         results       = []
+
+        clean_query = _sanitize_fts_query(query)
+        if not clean_query:
+            return []
 
         query_embedding = _embed(query) if semantic else None
 
         for table in search_tables:
             if table not in _FTS_TABLES:
                 continue
-            fts_table = f"fts_{table}"
-            fts_col   = _FTS_TABLES[table]
 
             try:
+                fts_table = f"fts_{table}"
+                fts_col   = _FTS_TABLES[table]
+
                 headmate_clause = "AND t.headmate = ?" if headmate else ""
                 headmate_param  = [headmate] if headmate else []
 
                 with _conn() as con:
-                    rows = con.execute(f"""
-                        SELECT t.*, fts.rank AS fts_rank
-                        FROM {fts_table} fts
-                        JOIN {table} t ON t.rowid = fts.rowid
-                        WHERE fts_{table} MATCH ?
-                          AND t.active = 1
-                          {headmate_clause}
-                        ORDER BY fts.rank
-                        LIMIT ?
-                    """, [query, *headmate_param, limit * 2]).fetchall()
+                    # Skip if table is empty
+                    count = con.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE active = 1"
+                    ).fetchone()[0]
+                    if count == 0:
+                        continue
+
+                    # Try FTS first
+                    rows = []
+                    try:
+                        rows = con.execute(f"""
+                            SELECT t.*, fts.rank AS fts_rank
+                            FROM {fts_table} fts
+                            JOIN {table} t ON t.rowid = fts.rowid
+                            WHERE {fts_table} MATCH ?
+                              AND t.active = 1
+                              {headmate_clause}
+                            ORDER BY fts.rank
+                            LIMIT ?
+                        """, [clean_query, *headmate_param, limit * 2]).fetchall()
+                    except Exception:
+                        # FTS failed — fall back to LIKE search on the text column
+                        like_terms = clean_query.strip('"').strip()
+                        if like_terms:
+                            like_param = f"%{like_terms[:50]}%"
+                            rows = con.execute(f"""
+                                SELECT *, 0 AS fts_rank FROM {table}
+                                WHERE {fts_col} LIKE ?
+                                  AND active = 1
+                                  {headmate_clause}
+                                LIMIT ?
+                            """, [like_param, *headmate_param, limit * 2]).fetchall()
 
                 for row in rows:
                     d = self._deserialize(dict(row))
                     d["_table"]     = table
-                    d["_fts_score"] = row["fts_rank"]
-                    d["_score"]     = abs(row["fts_rank"])  # FTS rank is negative
-
-                    # Vector re-rank
-                    if semantic and query_embedding and d.get("embedding"):
-                        sim = _cosine(query_embedding, d["embedding"])
-                        d["_score"] = d["_score"] * 0.4 + sim * 0.6
+                    d["_fts_score"] = row["fts_rank"] if "fts_rank" in row.keys() else 0
+                    d["_score"]     = abs(d["_fts_score"])
                     results.append(d)
 
             except Exception as e:
                 log_error("Store", f"search failed on {table}: {e}", exc=None)
 
-        # Sort by score descending, return top N
         results.sort(key=lambda x: x.get("_score", 0), reverse=True)
         return results[:limit]
 
