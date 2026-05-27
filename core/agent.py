@@ -520,12 +520,13 @@ async def close_loop(
         # ── Memory encoding — fire and forget ─────────────────────────────────
         asyncio.ensure_future(
             memory_encoder.encode_safe(
-                transcript = build_transcript(history),
-                headmate   = brief.headmate,
-                session_id = brief.session_id,
-                duration_s = time.time() - brief.timestamp,
-                register   = brief.register,
-                llm        = llm,
+                transcript   = build_transcript(history),
+                headmate     = brief.headmate,
+                session_id   = brief.session_id,
+                duration_s   = time.time() - brief.timestamp,
+                register     = brief.register,
+                has_intimate = brief.has_intimate,
+                llm          = llm,
             )
         )
 

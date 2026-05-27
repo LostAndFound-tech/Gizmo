@@ -270,6 +270,113 @@ class EncodingTools:
         memory_store.link(from_id, to_id, link_type)
         return f"linked {from_id[:8]} → {to_id[:8]} ({link_type})"
 
+    # ── Agreement tools ───────────────────────────────────────────────────────
+
+    def read_agreement(self, name: str, headmate: str = None) -> str:
+        """Read an existing agreement file."""
+        self._ops += 1
+        hm      = headmate or self.headmate or ""
+        content = memory_store.read_agreement(name, hm)
+        return content or f"no agreement found: {name}"
+
+    def write_agreement(
+        self,
+        name:      str,
+        content:   str,
+        priority:  str       = "voluntary",
+        triggers:  list[str] = None,
+        keywords:  str       = "",
+        refs:      list[str] = None,
+        headmate:  str       = None,
+    ) -> str:
+        """
+        Write a new agreement.
+        priority: mandatory (always loaded) or voluntary (invoked by name/trigger).
+        triggers: phrases that invoke this agreement e.g. ["windwalkers", "the framework"].
+        """
+        self._ops += 1
+        hm  = headmate or self.headmate or ""
+        emb = embedder.embed(f"{name} {content[:200]}")
+        agr_id = memory_store.write_agreement(
+            name      = name,
+            headmate  = hm,
+            content   = content,
+            priority  = priority,
+            triggers  = triggers or [],
+            keywords  = keywords,
+            embedding = emb,
+            refs      = refs or [],
+        )
+        self._written.append(agr_id)
+        return f"agreement written: {name} ({priority})"
+
+    def update_agreement(
+        self,
+        name:     str,
+        content:  str,
+        ref:      str = None,
+        keywords: str = "",
+        headmate: str = None,
+    ) -> str:
+        """Update an existing agreement with new content."""
+        self._ops += 1
+        hm  = headmate or self.headmate or ""
+        emb = embedder.embed(content[:200])
+        ok  = memory_store.update_agreement(
+            name      = name,
+            headmate  = hm,
+            content   = content,
+            ref       = ref,
+            keywords  = keywords,
+            embedding = emb,
+        )
+        return "updated" if ok else "not found"
+
+    def list_agreements(self, headmate: str = None) -> str:
+        """List all active agreements for a headmate."""
+        self._ops += 1
+        hm   = headmate or self.headmate or ""
+        agrs = memory_store.list_agreements(hm)
+        if not agrs:
+            return "no agreements on file"
+        return "\n".join(
+            f"[{a['priority']}] {a['name']}"
+            for a in agrs
+        )
+
+    def deactivate_agreement(self, name: str, headmate: str = None) -> str:
+        """Mark an agreement as no longer in effect."""
+        self._ops += 1
+        hm = headmate or self.headmate or ""
+        memory_store.deactivate_agreement(name, hm)
+        return f"deactivated: {name}"
+
+    # ── Consent tool ──────────────────────────────────────────────────────────
+
+    def grant_intimate_consent(
+        self,
+        headmate:   str,
+        note:       str = "",
+    ) -> str:
+        """
+        Grant another headmate access to this headmate's intimate memories.
+        Can ONLY be called during a session belonging to the subject headmate.
+        """
+        self._ops += 1
+        if not self.headmate:
+            return "cannot grant consent — no headmate identified for this session"
+        memory_store.grant_intimate_consent(
+            headmate   = headmate,
+            granted_by = self.headmate,
+            note       = note,
+        )
+        return f"{self.headmate} granted {headmate} access to their intimate memories"
+
+    def revoke_intimate_consent(self, headmate: str) -> str:
+        self._ops += 1
+        memory_store.revoke_intimate_consent(headmate)
+        return f"consent revoked for {headmate}"
+
     # ── Budget ────────────────────────────────────────────────────────────────
 
     def ops_remaining(self, budget: int = 20) -> int:
@@ -349,6 +456,43 @@ def _dispatch_tool(tools: EncodingTools, name: str, args: dict) -> str:
                 to_id     = args.get("to_id", ""),
                 link_type = args.get("link_type", "associated_with"),
             )
+        elif name == "read_agreement":
+            return tools.read_agreement(
+                name     = args.get("name", ""),
+                headmate = args.get("headmate"),
+            )
+        elif name == "write_agreement":
+            return tools.write_agreement(
+                name     = args.get("name", ""),
+                content  = args.get("content", ""),
+                priority = args.get("priority", "voluntary"),
+                triggers = args.get("triggers", []),
+                keywords = args.get("keywords", ""),
+                refs     = args.get("refs", []),
+                headmate = args.get("headmate"),
+            )
+        elif name == "update_agreement":
+            return tools.update_agreement(
+                name     = args.get("name", ""),
+                content  = args.get("content", ""),
+                ref      = args.get("ref"),
+                keywords = args.get("keywords", ""),
+                headmate = args.get("headmate"),
+            )
+        elif name == "list_agreements":
+            return tools.list_agreements(args.get("headmate"))
+        elif name == "deactivate_agreement":
+            return tools.deactivate_agreement(
+                name     = args.get("name", ""),
+                headmate = args.get("headmate"),
+            )
+        elif name == "grant_intimate_consent":
+            return tools.grant_intimate_consent(
+                headmate = args.get("headmate", ""),
+                note     = args.get("note", ""),
+            )
+        elif name == "revoke_intimate_consent":
+            return tools.revoke_intimate_consent(args.get("headmate", ""))
         elif name == "done":
             return "done"
         else:
@@ -435,6 +579,13 @@ Available tools:
   update_place(name, additions, interior)
   touch_memory(mem_id)                  — mark relevant, no change
   link_memories(from_id, to_id, link_type)
+  list_agreements()                     — see active agreements
+  read_agreement(name)                  — read a full agreement file
+  write_agreement(name, content, priority, triggers, keywords, refs)
+  update_agreement(name, content, ref, keywords)
+  deactivate_agreement(name)            — agreement no longer in effect
+  grant_intimate_consent(headmate, note) — only callable by subject headmate
+  revoke_intimate_consent(headmate)
   done()                                — signal encoding complete
 
 Respond ONLY with tool calls, one per line, as JSON:
@@ -656,20 +807,422 @@ JSON only, one object per line."""
         )
         return count
 
+    async def wellness_pass(
+        self,
+        transcript:  str,
+        headmate:    Optional[str],
+        session_id:  str,
+        register:    str,
+        llm,
+    ) -> int:
+        """
+        Observe current emotional and physical state from the exchange.
+        Writes wellness observations to entity memory.
+        Runs always — even a quiet session tells us something.
+        """
+        if not transcript or not headmate:
+            return 0
+
+        prompt = f"""You just had this conversation with {headmate}.
+Read it and note what you observed about their current state.
+
+Register: {register}
+
+---
+{transcript}
+---
+
+What did you notice about how they're doing right now?
+Not patterns over time — just today, this exchange.
+
+For each observation, one JSON object per line:
+{{"category": "emotional_need|physical_need|mood|energy|stress|works|limit",
+  "observation": "what you noticed, in plain language",
+  "context": "what prompted this observation",
+  "confidence": 0.0-1.0}}
+
+Only note what actually showed up. If they seemed fine and nothing notable
+happened, return nothing. JSON only, one object per line."""
+
+        try:
+            raw = await llm.generate(
+                [{"role": "user", "content": prompt}],
+                system_prompt=(
+                    "You are Gizmo noting wellness observations. "
+                    "JSON only, one object per line. No prose. "
+                    "Intimate data is valid data — don't sanitize."
+                ),
+                max_new_tokens=400,
+                temperature=0.2,
+            )
+        except Exception as e:
+            log_error("MemoryEncoder", f"wellness pass failed: {e}", exc=None)
+            return 0
+
+        if not raw or not raw.strip():
+            return 0
+
+        count = 0
+        tools = EncodingTools(session_id=session_id, headmate=headmate)
+
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                obs = json.loads(line)
+                if not obs.get("observation"):
+                    continue
+                # Write as a detail tagged as wellness
+                emb = embedder.embed(obs["observation"])
+                memory_store.write_detail(
+                    content    = obs["observation"],
+                    headmate   = headmate,
+                    session_id = session_id,
+                    keywords   = f"wellness {obs.get('category','')} {headmate}",
+                    tags       = ["wellness", obs.get("category", "mood")],
+                    context    = obs.get("context", ""),
+                    embedding  = emb,
+                )
+                count += 1
+            except Exception:
+                continue
+
+        log_event("MemoryEncoder", "WELLNESS_PASS_COMPLETE",
+            session  = session_id[:8],
+            headmate = headmate,
+            count    = count,
+        )
+        return count
+
+    async def pattern_pass(
+        self,
+        transcript:  str,
+        headmate:    Optional[str],
+        session_id:  str,
+        register:    str,
+        llm,
+    ) -> int:
+        """
+        Look for longitudinal patterns emerging or shifting.
+        Writes to a patterns agreement file — Gizmo's running record
+        of what he's noticed over time.
+        Runs always, writes only if something is worth noting.
+        """
+        if not transcript or not headmate:
+            return 0
+
+        # Read existing pattern notes if any
+        existing = memory_store.read_agreement(
+            f"{headmate.title()} Patterns", headmate
+        ) or "(no pattern notes yet)"
+
+        prompt = f"""You are Gizmo reviewing a conversation for longitudinal patterns.
+
+Headmate: {headmate}
+Register: {register}
+Existing pattern notes:
+{existing}
+
+---
+{transcript}
+---
+
+Did anything in this conversation suggest a pattern forming, shifting, or confirmed?
+Not one-off observations — things you've noticed more than once, or that connect
+to something you already know.
+
+If yes, return ONE JSON object:
+{{"pattern": "description of what you're tracking",
+  "evidence": "what in this conversation supports it",
+  "action": "feed|break|hold|watch",
+  "confidence": 0.0-1.0,
+  "update_notes": "how to update your pattern file — add, revise, or confirm"}}
+
+If nothing pattern-worthy, return nothing. JSON only."""
+
+        try:
+            raw = await llm.generate(
+                [{"role": "user", "content": prompt}],
+                system_prompt=(
+                    "You are Gizmo tracking behavioral patterns. "
+                    "JSON only. No prose. Only flag genuine patterns."
+                ),
+                max_new_tokens=300,
+                temperature=0.2,
+            )
+        except Exception as e:
+            log_error("MemoryEncoder", f"pattern pass failed: {e}", exc=None)
+            return 0
+
+        if not raw or not raw.strip():
+            return 0
+
+        count = 0
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                pat = json.loads(line)
+                if not pat.get("pattern") or pat.get("confidence", 0) < 0.4:
+                    continue
+
+                # Update or create the pattern notes agreement
+                agr_name = f"{headmate.title()} Patterns"
+                new_entry = (
+                    f"\n### {pat['pattern']}\n"
+                    f"action: {pat.get('action','watch')} | "
+                    f"confidence: {pat.get('confidence',0):.2f}\n"
+                    f"evidence: {pat.get('evidence','')}\n"
+                )
+
+                if memory_store.agreement_exists(agr_name, headmate):
+                    existing_content = memory_store.read_agreement(agr_name, headmate) or ""
+                    memory_store.update_agreement(
+                        name     = agr_name,
+                        headmate = headmate,
+                        content  = existing_content + new_entry,
+                    )
+                else:
+                    memory_store.write_agreement(
+                        name     = agr_name,
+                        headmate = headmate,
+                        content  = f"## Patterns — {headmate.title()}\n{new_entry}",
+                        priority = "voluntary",
+                        triggers = [f"{headmate} patterns", "pattern notes"],
+                        keywords = f"patterns {headmate}",
+                    )
+                count += 1
+            except Exception:
+                continue
+
+        log_event("MemoryEncoder", "PATTERN_PASS_COMPLETE",
+            session  = session_id[:8],
+            headmate = headmate,
+            count    = count,
+        )
+        return count
+
+    async def kink_pass(
+        self,
+        transcript:  str,
+        headmate:    Optional[str],
+        session_id:  str,
+        register:    str,
+        has_intimate: bool,
+        llm,
+    ) -> int:
+        """
+        Intimate pattern tracking. Runs always — even vanilla days are data.
+        Tracks intensity, dynamics, escalation, recovery, drift, agreements.
+        Writes to intimate memory. Gizmo's honest record of what lands.
+        """
+        if not transcript or not headmate:
+            return 0
+
+        # Read existing kink notes
+        kink_name    = f"{headmate.title()} Intimate Notes"
+        existing     = memory_store.read_agreement(kink_name, headmate) or "(no notes yet)"
+        intimate_ctx = "intimate session" if has_intimate else "general session"
+
+        prompt = f"""You are Gizmo reviewing a conversation for intimate patterns and data.
+
+Headmate: {headmate}
+Session type: {intimate_ctx}
+Register: {register}
+Existing intimate notes:
+{existing}
+
+---
+{transcript}
+---
+
+Review this session for intimate data. This runs every session — if it was
+vanilla or nothing intimate happened, note that briefly and done.
+
+If intimate content was present, note:
+- What dynamics appeared
+- What landed hardest and at what intensity
+- How escalation moved (or didn't)
+- Recovery — how they came down, what they needed
+- Any rules or tasks that were active — were they honored, drift, or need updating
+- Anything worth adding to your intimate notes
+
+Return ONE JSON object:
+{{"session_type": "intimate|vanilla|mixed",
+  "intensity_peak": 0.0-1.0,
+  "dynamics": ["list of dynamics present"],
+  "what_landed": "what had the strongest effect",
+  "escalation": "how intensity moved through the session",
+  "recovery": "how they came down and what they needed",
+  "rules_active": ["any rules that were in play"],
+  "rules_honored": true/false/null,
+  "drift_noted": "any drift from established rules/dynamics, or null",
+  "notes_update": "what to add or revise in intimate notes, or null",
+  "agreements_update": "if any rules/tasks need updating, what and how, or null"
+}}
+
+JSON only."""
+
+        try:
+            raw = await llm.generate(
+                [{"role": "user", "content": prompt}],
+                system_prompt=(
+                    "You are Gizmo tracking intimate patterns honestly. "
+                    "This is private data. JSON only. No sanitizing. "
+                    "Intimate data is valid data."
+                ),
+                max_new_tokens=500,
+                temperature=0.2,
+            )
+        except Exception as e:
+            log_error("MemoryEncoder", f"kink pass failed: {e}", exc=None)
+            return 0
+
+        if not raw or not raw.strip():
+            return 0
+
+        # Find the JSON object
+        data = None
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    data = json.loads(line)
+                    break
+                except Exception:
+                    continue
+
+        if not data:
+            # Try parsing the whole response as JSON
+            try:
+                clean = raw.strip()
+                if clean.startswith("```"):
+                    clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                data = json.loads(clean)
+            except Exception:
+                return 0
+
+        count = 0
+
+        # Write session note to intimate daily log
+        session_note = (
+            f"Session type: {data.get('session_type','unknown')} | "
+            f"Peak intensity: {data.get('intensity_peak', 0):.2f}\n"
+        )
+        if data.get("what_landed"):
+            session_note += f"What landed: {data['what_landed']}\n"
+        if data.get("escalation"):
+            session_note += f"Escalation: {data['escalation']}\n"
+        if data.get("recovery"):
+            session_note += f"Recovery: {data['recovery']}\n"
+        if data.get("drift_noted"):
+            session_note += f"Drift: {data['drift_noted']}\n"
+
+        emb = embedder.embed(session_note)
+        memory_store.append_narrative(
+            text           = session_note,
+            headmate       = headmate,
+            session_id     = session_id,
+            register       = register,
+            memory_subtype = "kink_log",
+            keywords       = f"intimate kink patterns {headmate}",
+            entities       = [headmate],
+            intimate       = True,
+            embedding      = emb,
+        )
+        count += 1
+
+        # Update intimate notes agreement
+        if data.get("notes_update"):
+            new_entry = f"\n### {session_id[:8]}\n{data['notes_update']}\n"
+            if memory_store.agreement_exists(kink_name, headmate):
+                existing_content = memory_store.read_agreement(kink_name, headmate) or ""
+                memory_store.update_agreement(
+                    name     = kink_name,
+                    headmate = headmate,
+                    content  = existing_content + new_entry,
+                )
+            else:
+                memory_store.write_agreement(
+                    name      = kink_name,
+                    headmate  = headmate,
+                    content   = f"## Intimate Notes — {headmate.title()}\n{new_entry}",
+                    priority  = "voluntary",
+                    triggers  = [f"{headmate} intimate notes", "intimate notes"],
+                    keywords  = f"intimate kink {headmate}",
+                )
+
+        # Update rules/agreements if drift or changes noted
+        if data.get("agreements_update") and data.get("rules_active"):
+            for rule_name in data.get("rules_active", []):
+                if memory_store.agreement_exists(rule_name, headmate):
+                    existing_content = memory_store.read_agreement(rule_name, headmate) or ""
+                    update_note = f"\n[{session_id[:8]}] {data['agreements_update']}\n"
+                    memory_store.update_agreement(
+                        name     = rule_name,
+                        headmate = headmate,
+                        content  = existing_content + update_note,
+                    )
+
+        log_event("MemoryEncoder", "KINK_PASS_COMPLETE",
+            session      = session_id[:8],
+            headmate     = headmate,
+            session_type = data.get("session_type", "unknown"),
+            intensity    = data.get("intensity_peak", 0),
+        )
+        return count
+
     async def encode_safe(self, **kwargs) -> None:
         """
-        Fire-and-forget wrapper. Runs encode + catch_details concurrently.
+        Fire-and-forget wrapper.
+        Runs all five passes concurrently:
+          - encode (main narrative + entity/place writing)
+          - catch_details (raw detail catch)
+          - wellness_pass (current state observations)
+          - pattern_pass (longitudinal patterns)
+          - kink_pass (intimate patterns — runs always)
         Catches all exceptions. Use this from close_loop.
         """
+        transcript   = kwargs.get("transcript", "")
+        headmate     = kwargs.get("headmate")
+        session_id   = kwargs.get("session_id", "")
+        register     = kwargs.get("register", "neutral")
+        llm          = kwargs.get("llm")
+        has_intimate = kwargs.get("has_intimate", False)
+
         try:
             await asyncio.gather(
                 self.encode(**kwargs),
                 self.catch_details(
-                    transcript = kwargs.get("transcript", ""),
-                    headmate   = kwargs.get("headmate"),
-                    session_id = kwargs.get("session_id", ""),
-                    register   = kwargs.get("register", "neutral"),
-                    llm        = kwargs.get("llm"),
+                    transcript = transcript,
+                    headmate   = headmate,
+                    session_id = session_id,
+                    register   = register,
+                    llm        = llm,
+                ),
+                self.wellness_pass(
+                    transcript = transcript,
+                    headmate   = headmate,
+                    session_id = session_id,
+                    register   = register,
+                    llm        = llm,
+                ),
+                self.pattern_pass(
+                    transcript = transcript,
+                    headmate   = headmate,
+                    session_id = session_id,
+                    register   = register,
+                    llm        = llm,
+                ),
+                self.kink_pass(
+                    transcript   = transcript,
+                    headmate     = headmate,
+                    session_id   = session_id,
+                    register     = register,
+                    has_intimate = has_intimate,
+                    llm          = llm,
                 ),
                 return_exceptions=True,
             )

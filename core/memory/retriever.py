@@ -40,8 +40,12 @@ class MemoryContext:
     Assembled memory context for one incoming message.
     Passed to the response LLM as readable context.
     """
+    # Agreements — loaded before everything else
+    mandatory_agreements:  list[dict] = field(default_factory=list)  # always loaded
+    invoked_agreements:    list[dict] = field(default_factory=list)  # loaded on trigger
+
     # Ranked memory hits — each is a dict with content + metadata
-    memories:       list[dict]  = field(default_factory=list)
+    memories:       list[dict]     = field(default_factory=list)
 
     # Entity documents loaded — living docs about named things
     entities:       dict[str, str] = field(default_factory=dict)  # name → content
@@ -50,7 +54,7 @@ class MemoryContext:
     places:         dict[str, str] = field(default_factory=dict)  # name → content
 
     # Raw details that might be relevant
-    details:        list[dict]  = field(default_factory=list)
+    details:        list[dict]     = field(default_factory=list)
 
     # Recent daily narrative (last day or two)
     recent_narrative: Optional[str] = None
@@ -64,7 +68,9 @@ class MemoryContext:
 
     def is_empty(self) -> bool:
         return (
-            not self.memories
+            not self.mandatory_agreements
+            and not self.invoked_agreements
+            and not self.memories
             and not self.entities
             and not self.places
             and not self.details
@@ -74,29 +80,42 @@ class MemoryContext:
     def to_prompt_block(self) -> str:
         """
         Render the context as a readable block for the system prompt.
-        Gizmo reads this before responding.
+        Agreements first — always. Memory context after.
         """
         if self.is_empty():
             return ""
 
         sections = []
 
-        # Recent narrative first — sets the scene
-        if self.recent_narrative:
-            sections.append(
-                "[Recent]\n" + self.recent_narrative.strip()
-            )
+        # ── Mandatory agreements — top of everything ──────────────────────────
+        if self.mandatory_agreements:
+            for agr in self.mandatory_agreements:
+                content = agr.get("content", "").strip()
+                name    = agr.get("name", "Agreement")
+                if content:
+                    sections.append(f"[{name} — in effect]\n{content}")
 
-        # Entity docs — who and what Gizmo knows
+        # ── Invoked voluntary agreements ──────────────────────────────────────
+        if self.invoked_agreements:
+            for agr in self.invoked_agreements:
+                content = agr.get("content", "").strip()
+                name    = agr.get("name", "Agreement")
+                if content:
+                    sections.append(f"[{name}]\n{content}")
+
+        # ── Recent narrative ──────────────────────────────────────────────────
+        if self.recent_narrative:
+            sections.append("[Recent]\n" + self.recent_narrative.strip())
+
+        # ── Entity docs ───────────────────────────────────────────────────────
         if self.entities:
             for name, content in self.entities.items():
-                # Trim entity docs — first 400 chars is usually enough
                 snippet = content.strip()[:400]
                 if len(content.strip()) > 400:
                     snippet += "\n..."
                 sections.append(f"[{name}]\n{snippet}")
 
-        # Place docs
+        # ── Place docs ────────────────────────────────────────────────────────
         if self.places:
             for name, content in self.places.items():
                 snippet = content.strip()[:300]
@@ -104,7 +123,7 @@ class MemoryContext:
                     snippet += "\n..."
                 sections.append(f"[Place: {name}]\n{snippet}")
 
-        # Memory hits — narratives, associations, patterns
+        # ── Memory hits ───────────────────────────────────────────────────────
         if self.memories:
             mem_lines = []
             for m in self.memories[:6]:
@@ -117,7 +136,7 @@ class MemoryContext:
             if mem_lines:
                 sections.append("[Memory]\n" + "\n".join(mem_lines))
 
-        # Details — raw catches that might be relevant
+        # ── Details ───────────────────────────────────────────────────────────
         if self.details:
             detail_lines = []
             for d in self.details[:4]:
@@ -169,6 +188,30 @@ class MemoryRetriever:
 
         if not message or not message.strip():
             return ctx
+
+        # ── 0. Agreements — always first ──────────────────────────────────────
+        if headmate:
+            # Mandatory — always loaded, no questions asked
+            mandatory = memory_store.get_mandatory_agreements(headmate)
+            for agr in mandatory:
+                content = memory_store.read_agreement(agr["name"], headmate)
+                if content:
+                    ctx.mandatory_agreements.append({
+                        "name":    agr["name"],
+                        "content": content,
+                        "id":      agr["id"],
+                    })
+
+            # Voluntary — only if message triggers them
+            triggered = memory_store.match_agreement_trigger(message, headmate)
+            for agr in triggered:
+                content = memory_store.read_agreement(agr["name"], headmate)
+                if content:
+                    ctx.invoked_agreements.append({
+                        "name":    agr["name"],
+                        "content": content,
+                        "id":      agr["id"],
+                    })
 
         # ── Resolve intimate access ───────────────────────────────────────────
         if intimate_ok is None:

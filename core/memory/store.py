@@ -60,9 +60,16 @@ class MemoryStore:
             self.root / "entities",
             self.root / "places" / "interior",
             self.root / "places" / "external",
+            self.root / "agreements",
             self.root / "system",
         ]:
             d.mkdir(parents=True, exist_ok=True)
+
+    def agreement_path(self, headmate: str, name: str) -> Path:
+        slug = _slugify(name)
+        p    = self.root / "agreements" / headmate.lower()
+        p.mkdir(parents=True, exist_ok=True)
+        return p / f"{slug}.md"
 
     def _init_db(self) -> None:
         con = self._connect()
@@ -117,7 +124,26 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_memory_private    ON memory_index(private);
             CREATE INDEX IF NOT EXISTS idx_consent_headmate  ON intimate_consent(headmate);
 
-            CREATE TABLE IF NOT EXISTS memory_links (
+            CREATE TABLE IF NOT EXISTS agreements (
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,        -- human name e.g. "Windwalkers", "Jess's Slave Rules"
+                headmate      TEXT NOT NULL,
+                priority      TEXT DEFAULT 'voluntary', -- mandatory|voluntary
+                triggers      TEXT,                 -- JSON list of invocation phrases
+                file_path     TEXT NOT NULL,        -- path to the markdown file
+                keywords      TEXT,                 -- space-separated for search
+                embedding     BLOB,                 -- embedded from name+content summary
+                created_at    REAL,
+                last_accessed REAL,
+                last_updated  REAL,
+                active        INTEGER DEFAULT 1
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agreements_headmate  ON agreements(headmate);
+            CREATE INDEX IF NOT EXISTS idx_agreements_priority  ON agreements(priority);
+            CREATE INDEX IF NOT EXISTS idx_agreements_name      ON agreements(name);
+
+
                 id         TEXT PRIMARY KEY,
                 from_id    TEXT NOT NULL,
                 to_id      TEXT NOT NULL,
@@ -220,7 +246,244 @@ class MemoryStore:
         con.close()
         return [dict(r) for r in rows]
 
-    def entity_path(self, name: str) -> Path:
+    # ── Agreements ────────────────────────────────────────────────────────────
+
+    def write_agreement(
+        self,
+        name:      str,
+        headmate:  str,
+        content:   str,
+        priority:  str        = "voluntary",
+        triggers:  list[str]  = None,
+        keywords:  str        = "",
+        embedding: Optional[bytes] = None,
+        refs:      list[str]  = None,
+    ) -> str:
+        """
+        Write a new agreement file.
+        Returns the agreement id.
+        """
+        path   = self.agreement_path(headmate, name)
+        agr_id = _make_id("agreement", headmate.lower(), _slugify(name))
+        now    = time.time()
+
+        trigger_list = triggers or []
+        refs_section = ""
+        if refs:
+            refs_section = "\n## References\n" + "\n".join(f"- {r}" for r in refs) + "\n"
+
+        file_content = (
+            f"# {name}\n"
+            f"priority: {priority}\n"
+            f"headmate: {headmate.lower()}\n"
+            f"triggers: {', '.join(trigger_list)}\n"
+            f"last_updated: {_fmt_date(now)}\n\n"
+            f"{content.strip()}\n"
+            + refs_section
+        )
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(file_content)
+
+        con = self._connect()
+        con.execute("""
+            INSERT OR REPLACE INTO agreements
+              (id, name, headmate, priority, triggers, file_path,
+               keywords, embedding, created_at, last_accessed, last_updated, active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """, (
+            agr_id,
+            name,
+            headmate.lower(),
+            priority,
+            json.dumps(trigger_list),
+            str(path.relative_to(self.root)),
+            (keywords + " " + name.lower() + " " + " ".join(trigger_list)).strip(),
+            embedding,
+            now, now, now,
+        ))
+        con.commit()
+        con.close()
+        return agr_id
+
+    def update_agreement(
+        self,
+        name:      str,
+        headmate:  str,
+        content:   str,
+        ref:       Optional[str] = None,
+        keywords:  str           = "",
+        embedding: Optional[bytes] = None,
+    ) -> bool:
+        """
+        Update an existing agreement file.
+        Rewrites the content section, preserving header metadata.
+        Returns True if found, False if not.
+        """
+        path = self.agreement_path(headmate, name)
+        if not path.exists():
+            return False
+
+        existing = path.read_text(encoding="utf-8")
+        now      = time.time()
+
+        # Update last_updated in header
+        lines = existing.splitlines()
+        new_lines = []
+        for line in lines:
+            if line.startswith("last_updated:"):
+                new_lines.append(f"last_updated: {_fmt_date(now)}")
+            else:
+                new_lines.append(line)
+
+        # Find where header ends (first blank line after metadata)
+        header_end = 0
+        in_header  = True
+        for i, line in enumerate(new_lines):
+            if in_header and line.startswith("#"):
+                continue
+            if in_header and (line.startswith("priority:") or
+                              line.startswith("headmate:") or
+                              line.startswith("triggers:") or
+                              line.startswith("last_updated:")):
+                header_end = i
+                continue
+            if in_header and line.strip() == "":
+                in_header  = False
+                header_end = i
+                break
+
+        # Rebuild: header + new content + refs
+        header = "\n".join(new_lines[:header_end + 1])
+        refs_block = ""
+        if "## References" in existing:
+            refs_block = "\n## References" + existing.split("## References", 1)[1]
+        if ref:
+            if refs_block:
+                refs_block = refs_block.rstrip() + f"\n- {ref}\n"
+            else:
+                refs_block = f"\n## References\n- {ref}\n"
+
+        new_content = f"{header}\n\n{content.strip()}\n{refs_block}"
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        agr_id = _make_id("agreement", headmate.lower(), _slugify(name))
+        con    = self._connect()
+        update = {"last_updated": now, "last_accessed": now}
+        if embedding:
+            update["embedding"] = embedding
+        if keywords:
+            row = con.execute(
+                "SELECT keywords FROM agreements WHERE id = ?", (agr_id,)
+            ).fetchone()
+            existing_kw = row["keywords"] if row else ""
+            update["keywords"] = (existing_kw + " " + keywords).strip()
+        sets = ", ".join(f"{k} = ?" for k in update)
+        con.execute(
+            f"UPDATE agreements SET {sets} WHERE id = ?",
+            list(update.values()) + [agr_id],
+        )
+        con.commit()
+        con.close()
+        return True
+
+    def read_agreement(self, name: str, headmate: str) -> Optional[str]:
+        """Read an agreement file by name and headmate."""
+        path = self.agreement_path(headmate, name)
+        if not path.exists():
+            return None
+        agr_id = _make_id("agreement", headmate.lower(), _slugify(name))
+        con    = self._connect()
+        con.execute(
+            "UPDATE agreements SET last_accessed = ? WHERE id = ?",
+            (time.time(), agr_id)
+        )
+        con.commit()
+        con.close()
+        return path.read_text(encoding="utf-8")
+
+    def get_mandatory_agreements(self, headmate: str) -> list[dict]:
+        """Get all mandatory agreements for a headmate — loaded every session."""
+        con  = self._connect()
+        rows = con.execute(
+            "SELECT * FROM agreements WHERE headmate = ? AND priority = 'mandatory' "
+            "AND active = 1 ORDER BY last_updated DESC",
+            (headmate.lower(),)
+        ).fetchall()
+        con.close()
+        return [dict(r) for r in rows]
+
+    def get_voluntary_agreements(self, headmate: str) -> list[dict]:
+        """Get all voluntary agreements for a headmate — loaded on invocation."""
+        con  = self._connect()
+        rows = con.execute(
+            "SELECT * FROM agreements WHERE headmate = ? AND priority = 'voluntary' "
+            "AND active = 1 ORDER BY last_accessed DESC",
+            (headmate.lower(),)
+        ).fetchall()
+        con.close()
+        return [dict(r) for r in rows]
+
+    def match_agreement_trigger(
+        self,
+        message:  str,
+        headmate: str,
+    ) -> list[dict]:
+        """
+        Check if a message invokes any voluntary agreements.
+        Returns matching agreements sorted by match strength.
+        """
+        voluntary = self.get_voluntary_agreements(headmate)
+        if not voluntary:
+            return []
+
+        msg_lower = message.lower()
+        matches   = []
+
+        for agr in voluntary:
+            # Direct name match
+            if agr["name"].lower() in msg_lower:
+                matches.append((agr, 2.0))
+                continue
+            # Trigger phrase match
+            try:
+                triggers = json.loads(agr.get("triggers") or "[]")
+                for trigger in triggers:
+                    if trigger.lower() in msg_lower:
+                        matches.append((agr, 1.0))
+                        break
+            except Exception:
+                pass
+
+        matches.sort(key=lambda x: x[1], reverse=True)
+        return [m[0] for m in matches]
+
+    def agreement_exists(self, name: str, headmate: str) -> bool:
+        return self.agreement_path(headmate, name).exists()
+
+    def list_agreements(self, headmate: str) -> list[dict]:
+        """List all active agreements for a headmate."""
+        con  = self._connect()
+        rows = con.execute(
+            "SELECT id, name, priority, triggers, last_updated FROM agreements "
+            "WHERE headmate = ? AND active = 1 ORDER BY priority DESC, name ASC",
+            (headmate.lower(),)
+        ).fetchall()
+        con.close()
+        return [dict(r) for r in rows]
+
+    def deactivate_agreement(self, name: str, headmate: str) -> bool:
+        """Deactivate an agreement — it's no longer in effect."""
+        agr_id = _make_id("agreement", headmate.lower(), _slugify(name))
+        con    = self._connect()
+        con.execute(
+            "UPDATE agreements SET active = 0 WHERE id = ?", (agr_id,)
+        )
+        con.commit()
+        con.close()
+        return True
         slug = _slugify(name)
         return self.root / "entities" / f"{slug}.md"
 
@@ -861,6 +1124,10 @@ def _slugify(name: str) -> str:
     name = re.sub(r"[^\w\s-]", "", name)
     name = re.sub(r"[\s_-]+", "_", name)
     return name.strip("_")
+
+
+def _fmt_date(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
 def _make_id(*parts: str) -> str:
