@@ -1416,8 +1416,17 @@ async def close_loop(
 
         # ── Async extraction — runs after response sent, never blocks ─────────
         # Extracts facts, relationships, wellbeing from the exchange
+        from core.memory import memory_encoder, build_transcript
+
         asyncio.ensure_future(
-            _async_extract(brief, response, llm)
+            memory_encoder.encode_safe(
+                transcript = build_transcript(history),
+                headmate   = brief.headmate,
+                session_id = brief.session_id,
+                duration_s = time.time() - brief.timestamp,
+                register   = brief.register,
+                llm        = llm,
+            )
         )
 
     except Exception as e:
