@@ -737,6 +737,67 @@ class GizmoServer:
         async def handle_health(request):
             return web.Response(text='{"status":"ok"}', content_type="application/json")
 
+        # ── Session list ──────────────────────────────────────────────────────
+        async def handle_sessions(request):
+            try:
+                from core.store import store
+                sessions = store.query("sessions",
+                    active=1,
+                    order_by="opened_at DESC",
+                    limit=50,
+                )
+                items = [{
+                    "id":        s["id"],
+                    "opened_at": s.get("opened_at"),
+                    "mood":      s.get("mood"),
+                    "topics":    s.get("topics") or [],
+                    "hosts":     s.get("hosts") or [],
+                    "summary":   (s.get("summary") or "")[:100],
+                } for s in sessions]
+                return web.Response(
+                    text=json.dumps({"sessions": items}),
+                    content_type="application/json",
+                )
+            except Exception as e:
+                return web.Response(
+                    text=json.dumps({"sessions": [], "error": str(e)}),
+                    content_type="application/json",
+                )
+
+        # ── Session detail ────────────────────────────────────────────────────
+        async def handle_session_detail(request):
+            sid = request.match_info.get("session_id", "")
+            try:
+                from core.store import store
+                session = store.get("sessions", sid)
+                if not session:
+                    return web.Response(
+                        text=json.dumps({"error": "not found"}),
+                        content_type="application/json",
+                        status=404,
+                    )
+                arc = store.query("emotion_log",
+                    session_id=sid,
+                    active=1,
+                    order_by="created_at ASC",
+                    limit=100,
+                )
+                session["emotion_arc"] = [{
+                    "valence":   p.get("valence", 0),
+                    "intensity": p.get("intensity", 0),
+                    "register":  p.get("register", ""),
+                } for p in arc]
+                return web.Response(
+                    text=json.dumps(session),
+                    content_type="application/json",
+                )
+            except Exception as e:
+                return web.Response(
+                    text=json.dumps({"error": str(e)}),
+                    content_type="application/json",
+                    status=500,
+                )
+
         # ── WebSocket route ───────────────────────────────────────────────────
         async def handle_ws(request):
             ws = web.WebSocketResponse()
@@ -759,9 +820,11 @@ class GizmoServer:
 
             return ws
 
-        app.router.add_get("/",       handle_index)
-        app.router.add_get("/health", handle_health)
-        app.router.add_get("/ws",     handle_ws)
+        app.router.add_get("/",                    handle_index)
+        app.router.add_get("/health",              handle_health)
+        app.router.add_get("/ws",                  handle_ws)
+        app.router.add_get("/sessions",            handle_sessions)
+        app.router.add_get("/sessions/{session_id}", handle_session_detail)
 
         log_event("GizmoServer", "STARTING", host=host, port=port)
 
