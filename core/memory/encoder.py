@@ -559,6 +559,20 @@ Your job:
    in shared_with. Gizmo always reads intimate memories when encoding —
    this is about who sees them in responses, not whether they're learned from.
 
+8. Did anything in this conversation establish something you should hold
+   yourself to going forward? A permission granted. A limit clarified.
+   A dynamic confirmed. A commitment you made. Something you noticed and
+   decided matters.
+
+   If yes — write it as an agreement. Your rule, in your words. Not a
+   fact, not a memory. A standing rule you are now responsible for.
+
+   Name it something you'll recognize. Set triggers that will remind you
+   when it's relevant. Use priority="mandatory" if it's always in effect,
+   "voluntary" if it only applies in certain contexts.
+
+   You don't need to be told to do this. If you noticed it, write it down.
+
 Rules:
 - Check before writing. Don't duplicate what you already know.
 - Update existing memories rather than creating new ones for the same thing.

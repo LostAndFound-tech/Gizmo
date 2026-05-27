@@ -143,11 +143,11 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_agreements_priority  ON agreements(priority);
             CREATE INDEX IF NOT EXISTS idx_agreements_name      ON agreements(name);
 
-
+            CREATE TABLE IF NOT EXISTS memory_links (
                 id         TEXT PRIMARY KEY,
                 from_id    TEXT NOT NULL,
                 to_id      TEXT NOT NULL,
-                link_type  TEXT NOT NULL,  -- knows|has|likes|is|was|said|involves|refs
+                link_type  TEXT NOT NULL,
                 strength   REAL DEFAULT 1.0,
                 created_at REAL
             );
