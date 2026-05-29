@@ -621,12 +621,13 @@ class MemoryEncoder:
 
     async def encode(
         self,
-        transcript:  str,
-        headmate:    Optional[str],
-        session_id:  str,
-        duration_s:  float,
-        register:    str,
+        transcript:   str,
+        headmate:     Optional[str],
+        session_id:   str,
+        duration_s:   float,
+        register:     str,
         llm,
+        has_intimate: bool = False,  # accepted but handled by kink_pass separately
     ) -> dict:
         """
         Run the full encoding pass for one conversation.
