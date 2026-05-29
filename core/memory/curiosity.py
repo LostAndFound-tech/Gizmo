@@ -227,14 +227,20 @@ class CuriosityEngine:
     """
 
     # How many questions to generate per gap detection pass
-    QUESTIONS_PER_PASS = 4
+    QUESTIONS_PER_PASS = 6
 
     # Don't ask more than this many questions per session
-    MAX_PER_SESSION    = 2
+    MAX_PER_SESSION    = 5
 
     # Minimum register friendliness for asking questions
     _OK_REGISTERS = {
-        "neutral", "casual", "warm", "playful", "reflective", "elevated"
+        "neutral", "casual", "warm", "playful", "reflective", "elevated",
+        "intimate", "dominant", "submissive", "deep",
+    }
+
+    # Registers where curiosity is especially welcome — push harder
+    _RICH_REGISTERS = {
+        "intimate", "reflective", "deep", "warm",
     }
 
     def __init__(self):
@@ -362,29 +368,75 @@ JSON only, one per line."""
         """
         # Don't ask in certain registers
         if register not in self._OK_REGISTERS:
+            log_event("CuriosityEngine", "SELECTION_SKIPPED",
+                reason   = f"register={register} not in ok list",
+                headmate = headmate or "unknown",
+                session  = session_id[:8],
+            )
             return None
 
         # Don't ask too many times per session
         asked_this_session = self._session_asked.get(session_id, 0)
         if asked_this_session >= self.MAX_PER_SESSION:
+            log_event("CuriosityEngine", "SELECTION_SKIPPED",
+                reason   = f"session limit reached ({asked_this_session})",
+                headmate = headmate or "unknown",
+                session  = session_id[:8],
+            )
             return None
 
         pool = self.store.get_pool(unanswered_only=True)
         if not pool:
+            log_event("CuriosityEngine", "SELECTION_SKIPPED",
+                reason   = "pool empty",
+                headmate = headmate or "unknown",
+                session  = session_id[:8],
+            )
             return None
 
-        # Sort by priority, bump questions whose topic appeared in message
+        # Detect explicit invitation — "ask me anything", "any questions",
+        # "go ahead", "what do you want to know", etc.
         msg_lower = message.lower()
+        _INVITATION_PHRASES = [
+            "ask me", "any questions", "what do you want to know",
+            "go ahead", "fire away", "curious about", "want to know",
+            "tell me", "feel free", "what else", "anything you want",
+        ]
+        is_invitation = any(p in msg_lower for p in _INVITATION_PHRASES)
+
+        if is_invitation:
+            # Bump all questions — explicit invitation means ask something
+            for q in pool:
+                self.store.prioritize(q.id, delta=0.3)
+            log_event("CuriosityEngine", "INVITATION_DETECTED",
+                headmate = headmate or "unknown",
+                session  = session_id[:8],
+            )
+
+        # Bump questions whose topic appeared in message
         for q in pool:
             if q.about.lower() in msg_lower:
                 self.store.prioritize(q.id, delta=0.15)
 
         pool.sort(key=lambda q: q.priority, reverse=True)
-        top = pool[:12]  # give gizmo the top 12 to consider
+        top = pool[:12]
 
         questions_text = "\n".join(
             f"[{i+1}] (priority {q.priority:.1f}, asked {len(q.asked_of)}x) {q.question} [about: {q.about}]"
             for i, q in enumerate(top)
+        )
+
+        invitation_note = (
+            "\nIMPORTANT: They just explicitly invited you to ask something. "
+            "Pick one and ask it — this is the moment."
+            if is_invitation else ""
+        )
+
+        is_rich = register in self._RICH_REGISTERS
+        rich_note = (
+            "\nYou're in a deep, open conversation. This is exactly when "
+            "curiosity is welcome. Lean in — ask something real."
+            if is_rich else ""
         )
 
         prompt = f"""You are Gizmo, mid-conversation.
@@ -392,37 +444,42 @@ JSON only, one per line."""
 Who you're talking to: {headmate or "unknown"}
 Current register: {register}
 What they just said: "{message}"
+{invitation_note}
+{rich_note}
 
 Things you've been wanting to ask:
 {questions_text}
 
-Is there ONE question that would fit naturally into this moment?
-Consider: the register, what was just said, whether it would feel organic or forced.
+Pick ONE question to ask right now. Phrase it naturally — woven into
+the flow, curious, not clinical. One sentence.
 
-If yes — which number, and how would you phrase it right now, naturally woven in?
-If no — say nothing fits.
+If you genuinely can't find one that fits, say so. But in an open,
+deep conversation, something almost always fits.
 
 Return JSON:
-{{"ask": true/false, "number": N or null, "phrasing": "how you'd ask it right now, naturally"}}
-
-The phrasing should feel like something you'd actually say, not a survey question.
-Woven into the flow. One sentence. Curious, not clinical."""
+{{"ask": true/false, "number": N or null, "phrasing": "how you'd ask it right now, naturally"}}"""
 
         try:
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    "You are Gizmo deciding whether to ask a question. "
-                    "JSON only. Be honest — if nothing fits, say so."
+                    "You are Gizmo deciding what to ask. "
+                    "JSON only. Default toward asking — curiosity is good. "
+                    "Only skip if it would genuinely feel jarring."
                 ),
                 max_new_tokens=150,
-                temperature=0.3,
+                temperature=0.4,
             )
         except Exception as e:
             log_error("CuriosityEngine", f"selection failed: {e}", exc=None)
             return None
 
         if not raw or not raw.strip():
+            log_event("CuriosityEngine", "SELECTION_SKIPPED",
+                reason   = "LLM returned empty",
+                headmate = headmate or "unknown",
+                session  = session_id[:8],
+            )
             return None
 
         try:

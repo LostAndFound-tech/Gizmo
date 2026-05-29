@@ -778,7 +778,11 @@ def _classify_register(message: str) -> str:
         ("degradation", r"\b(worthless|pathetic|stupid|useless|nothing|object|use me)\b"),
         ("subspace",    r"\b(floaty|drifting|gone|yours|yes sir|yes ma'am|please)\b"),
         ("dominant",    r"\b(good girl|good boy|kneel|obey|mine|owned)\b"),
-        ("intimate",    r"\b(touch|hold|want you|need you|close|skin|kiss|soft)\b"),
+        ("intimate",    r"\b(touch|hold|want you|need you|close|skin|kiss|soft|"
+                        r"lonely|vulnerable|scared|trust|safe|honest|"
+                        r"system|plural|front|headmate|trauma|built you|"
+                        r"never told|only you|just me|hard to say|"
+                        r"real with you|don't tell|between us)\b"),
         ("reflective",  r"\b(think|wonder|feel like|realize|notice|meaning|why)\b"),
         ("playful",     r"\b(haha|lol|lmao|joke|silly|fun|play|tease)\b"),
         ("warm",        r"\b(love|miss|appreciate|grateful|thank|hug|cuddle)\b"),

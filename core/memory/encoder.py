@@ -1029,11 +1029,28 @@ If nothing pattern-worthy, return nothing. JSON only."""
         llm,
     ) -> int:
         """
-        Intimate pattern tracking. Runs always — even vanilla days are data.
-        Tracks intensity, dynamics, escalation, recovery, drift, agreements.
-        Writes to intimate memory. Gizmo's honest record of what lands.
+        Intimate pattern tracking. Only writes to sexuality log if
+        session actually contained sexual content.
+        Runs always to check — but only logs if sexual.
         """
         if not transcript or not headmate:
+            return 0
+
+        # Quick check — is there sexual content worth logging?
+        try:
+            check = await llm.generate(
+                [{"role": "user", "content": (
+                    f"Was there sexual content in this conversation?\n\n"
+                    f"{transcript[-1000:]}\n\n"
+                    f"Reply with only: yes or no"
+                )}],
+                system_prompt="You determine if a conversation contains sexual content. Reply only: yes or no.",
+                max_new_tokens=5,
+                temperature=0.0,
+            )
+            if not check or "yes" not in check.lower():
+                return 0
+        except Exception:
             return 0
 
         # Read existing kink notes
