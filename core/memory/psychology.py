@@ -84,8 +84,8 @@ class PsychologyEngine:
     """
 
     # How often to run synthesis passes
-    CONVERSATIONAL_SYNTHESIS_EVERY = 10   # sessions
-    INTIMATE_SYNTHESIS_EVERY       = 5    # intimate sessions
+    CONVERSATIONAL_SYNTHESIS_EVERY = 3    # sessions
+    INTIMATE_SYNTHESIS_EVERY       = 2    # intimate sessions
 
     def __init__(self):
         self._session_counts:        dict[str, int] = {}  # headmate → total sessions
