@@ -350,7 +350,31 @@ class MemoryRetriever:
             if content:
                 ctx.places[name] = content
 
-        # ── 9. Detail scan ────────────────────────────────────────────────────
+        # ── 8b. Load psychology docs ──────────────────────────────────────────
+        if headmate:
+            try:
+                from core.memory.psychology import load_psychology_for_retrieval
+                psych = load_psychology_for_retrieval(
+                    headmate    = headmate,
+                    intimate_ok = intimate_ok,
+                )
+                # Only load synthesis section — keep it lean
+                if psych.get("conversational"):
+                    conv = psych["conversational"]
+                    if "## Current Understanding" in conv:
+                        section = conv.split("## Current Understanding", 1)[1]
+                        section = section.split("## Observations", 1)[0].strip()
+                        if section:
+                            ctx.entities[f"{headmate.title()} (psychology)"] = section
+                if psych.get("intimate") and intimate_ok:
+                    intim = psych["intimate"]
+                    if "## Current Understanding" in intim:
+                        section = intim.split("## Current Understanding", 1)[1]
+                        section = section.split("## Observations", 1)[0].strip()
+                        if section:
+                            ctx.entities[f"{headmate.title()} (intimate)"] = section
+            except Exception:
+                pass
         if not fast:
             detail_hits = memory_store.search_details(
                 keywords = message,
@@ -375,6 +399,41 @@ class MemoryRetriever:
 
         # ── 10. Recent narrative ──────────────────────────────────────────────
         ctx.recent_narrative = self._load_recent_narrative(headmate)
+
+        # ── 10b. Objects — surface in-rotation or meaningfully dormant ────────
+        if headmate and intimate_ok:
+            try:
+                from core.memory.psychology import _load_object_memories
+                now     = time.time()
+                objects = _load_object_memories(headmate)
+                active  = []
+                dormant = []
+
+                for obj in objects.values():
+                    if obj.frequency < 2:
+                        continue  # not established enough
+                    days_since = (now - obj.last_used) / 86400
+                    if days_since <= 60:
+                        active.append(obj)   # in rotation — can reference naturally
+                    elif days_since >= 90:
+                        dormant.append(obj)  # nostalgia territory
+
+                if active:
+                    names = ", ".join(obj.name for obj in active[:4])
+                    ctx.details.append({
+                        "content": f"Objects currently in rotation: {names}",
+                        "context": "can reference naturally",
+                        "id":      "active_objects",
+                    })
+                if dormant:
+                    names = ", ".join(obj.name for obj in dormant[:3])
+                    ctx.details.append({
+                        "content": f"Objects not used in 3+ months: {names}",
+                        "context": "nostalgia territory — only if it comes up naturally",
+                        "id":      "dormant_objects",
+                    })
+            except Exception:
+                pass
 
         # ── 11. Budget trim ───────────────────────────────────────────────────
         ctx = _trim_to_budget(ctx, self.TOKEN_BUDGET)

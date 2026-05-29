@@ -415,7 +415,9 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
         f"Respond to {brief.headmate.title() if brief.headmate else 'them'}. "
         f"Voice: {tone}. "
         f"Target: ~{token_target} tokens. "
-        f"Do not explain. Do not hedge. Do not break voice. Just write."
+        f"Do not explain. Do not hedge. Do not break voice. Just write.\n"
+        f"Object references: only mention objects marked 'in rotation' naturally. "
+        f"Objects marked '3+ months' only if they come up organically — never force it."
     )
 
     prompt = "\n".join(lines)
@@ -436,13 +438,32 @@ async def generate_response(
     llm,
 ) -> str:
     """One LLM call. Gizmo writes the message."""
+    from core.memory.session_context import session_context_manager
+
     print(f"[generate_response] system_prompt length: {len(system_prompt)} chars", flush=True)
 
+    # ── Build conversation context block ──────────────────────────────────────
+    ctx = session_context_manager.get(brief.session_id)
+    if ctx:
+        conv_block = ctx.to_prompt_block()
+        if conv_block:
+            system_prompt = system_prompt + f"\n\n{conv_block}"
+
+    # ── Last 2 messages only — no more dumping 41 turns ───────────────────────
     try:
         messages = history.as_messages(brief.message)
+        if len(messages) > 5:
+            messages = messages[-5:]
     except Exception as e:
         print(f"[generate_response] history error: {e}", flush=True)
         messages = [{"role": "user", "content": brief.message}]
+
+    # ── Anchor the current message so flaky nodes don't respond to history ────
+    system_prompt += f"\n\n[Respond to this message]\n{brief.message}"
+
+    # Hard cap
+    if len(system_prompt) > 6000:
+        system_prompt = system_prompt[:6000]
 
     print(f"[generate_response] messages count: {len(messages)}", flush=True)
 
@@ -478,6 +499,7 @@ async def close_loop(
     """
     from core.store import store
     from core.memory import memory_encoder, build_transcript
+    from core.memory.session_context import session_context_manager
 
     try:
         # Write response envelope
@@ -486,7 +508,6 @@ async def close_loop(
             "response_to": brief.message_id,
             "headmate":   brief.headmate.lower() if brief.headmate else None,
             "session_id": brief.session_id,
-            "register":   brief.register,
             "source":     "gizmo",
             "tags":       (
                 f"response,{brief.headmate.lower() if brief.headmate else 'unknown'},"
@@ -512,9 +533,50 @@ async def close_loop(
             "tags":       f"emotion,{brief.headmate.lower() if brief.headmate else 'unknown'}",
         })
 
+        # ── Session context — record exchange, fire staggered updates ─────────
+        ctx = session_context_manager.record_exchange(
+            session_id = brief.session_id,
+            headmate   = brief.headmate,
+            user_msg   = brief.message,
+            gizmo_msg  = response,
+            register   = brief.register,
+        )
+
+        if session_context_manager.should_update_narrative(brief.session_id):
+            asyncio.ensure_future(
+                session_context_manager.update_narrative(
+                    session_id = brief.session_id,
+                    history    = history,
+                    headmate   = brief.headmate,
+                    llm        = llm,
+                )
+            )
+
+        if session_context_manager.should_update_details(brief.session_id):
+            asyncio.ensure_future(
+                session_context_manager.update_details(
+                    session_id = brief.session_id,
+                    history    = history,
+                    headmate   = brief.headmate,
+                    llm        = llm,
+                )
+            )
+
+        if session_context_manager.should_update_scene(brief.session_id):
+            asyncio.ensure_future(
+                session_context_manager.update_scene(
+                    session_id = brief.session_id,
+                    assembled  = brief.message,
+                    parts      = [],
+                    headmate   = brief.headmate,
+                    llm        = llm,
+                )
+            )
+
         log_event("Agent", "CLOSE_LOOP_COMPLETE",
             session  = brief.session_id[:8],
             register = brief.register,
+            msg_count = ctx.message_count,
         )
 
         # ── Memory encoding — fire and forget ─────────────────────────────────
@@ -591,6 +653,25 @@ class Agent:
 
         # ── 3. Build system prompt ────────────────────────────────────────────
         system_prompt = build_system_prompt(brief, memory_ctx)
+
+        # ── 3b. Curiosity — weave in a question if the moment is right ────────
+        try:
+            from core.memory.curiosity import curiosity_engine
+            curious_q = await curiosity_engine.select_question(
+                message    = user_message,
+                headmate   = brief.headmate,
+                session_id = session_id,
+                register   = brief.register,
+                llm        = llm,
+            )
+            if curious_q:
+                system_prompt += (
+                    f"\n\n[Curiosity — weave this in naturally if it fits]\n"
+                    f"{curious_q}\n"
+                    f"One sentence. Not forced. Only if it genuinely fits the flow."
+                )
+        except Exception as e:
+            log_error("Agent", f"curiosity selection failed: {e}", exc=None)
 
         # ── 4. Generate response ──────────────────────────────────────────────
         response_text = await generate_response(

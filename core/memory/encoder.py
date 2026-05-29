@@ -1238,10 +1238,75 @@ JSON only."""
                     has_intimate = has_intimate,
                     llm          = llm,
                 ),
+                self._curiosity_pass(
+                    transcript = transcript,
+                    headmate   = headmate,
+                    session_id = session_id,
+                    llm        = llm,
+                ),
+                self._psychology_pass(
+                    transcript   = transcript,
+                    headmate     = headmate,
+                    session_id   = session_id,
+                    register     = register,
+                    has_intimate = has_intimate,
+                    llm          = llm,
+                ),
                 return_exceptions=True,
             )
         except Exception as e:
             log_error("MemoryEncoder", f"encode_safe failed: {e}", exc=e)
+
+    async def _psychology_pass(
+        self,
+        transcript:   str,
+        headmate:     Optional[str],
+        session_id:   str,
+        register:     str,
+        has_intimate: bool,
+        llm,
+    ) -> None:
+        """Run psychology engine pass. Fire and forget."""
+        try:
+            from core.memory.psychology import psychology_engine
+            await psychology_engine.run(
+                transcript   = transcript,
+                headmate     = headmate,
+                session_id   = session_id,
+                register     = register,
+                has_intimate = has_intimate,
+                llm          = llm,
+            )
+        except Exception as e:
+            log_error("MemoryEncoder", f"psychology pass failed: {e}", exc=None)
+
+    async def _curiosity_pass(
+        self,
+        transcript:  str,
+        headmate:    Optional[str],
+        session_id:  str,
+        llm,
+    ) -> None:
+        """Detect knowledge gaps and capture answers. Fire and forget."""
+        try:
+            from core.memory.curiosity import curiosity_engine
+            await asyncio.gather(
+                curiosity_engine.detect_gaps(
+                    transcript = transcript,
+                    headmate   = headmate,
+                    session_id = session_id,
+                    llm        = llm,
+                ),
+                curiosity_engine.capture_answers(
+                    transcript = transcript,
+                    headmate   = headmate,
+                    session_id = session_id,
+                    llm        = llm,
+                ),
+                return_exceptions=True,
+            )
+        except Exception as e:
+            log_error("MemoryEncoder", f"curiosity pass failed: {e}", exc=None)
 
 
 # ── Transcript builder ────────────────────────────────────────────────────────
