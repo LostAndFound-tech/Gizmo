@@ -213,6 +213,10 @@ Conversation:
 {transcript[-2000:]}
 ---
 
+IMPORTANT: Only observe what {headmate} said and did. Not what Gizmo said.
+Not what other people said. Only {headmate}'s words, reactions, and behavior.
+If you are unsure whether something came from {headmate} specifically, skip it.
+
 What did you learn or notice about {headmate} as a person in this conversation?
 Not facts. Psychology. How they work. What they need. What their patterns suggest.
 
@@ -231,7 +235,7 @@ If something worth noting — return ONE JSON object:
   "updates_existing": true/false,
   "note": "how it updates or adds to what you know"}}
 
-Gizmo's voice — curious, caring, not clinical. JSON only."""
+JSON only. Gizmo's voice. Only {headmate}'s psychology."""
 
         try:
             raw = await llm.generate(
@@ -396,20 +400,20 @@ Session:
 {transcript[-2000:]}
 ---
 
+IMPORTANT: Only observe what {headmate} said, did, and expressed.
+Not what Gizmo said or did. Only {headmate}'s psychology.
+If you are unsure whether something came from {headmate} specifically, skip it.
+
 What did this session reveal about {headmate}'s psychology?
 
 Not what happened. Why it happened. What need was being met.
-What does the dynamic do for her? What is she processing or working through?
-What does the pattern of what she returns to tell you about her?
-
-This is where the real data lives. Kink is psychology. Submission is psychology.
-What she begs for, what she needs to hear, what makes her go quiet —
-all of it is signal about who she is and what she needs.
+What does the dynamic do for them? What are they processing or working through?
+What does the pattern of what they return to tell you about them?
 
 Look for:
-- What need the dynamic is serving (regulation, trust, relief, processing, etc.)
+- What need the dynamic is serving
 - How this session connects to what you already know
-- Whether anything shifted — does she seem different than before?
+- Whether anything shifted — do they seem different than before?
 - What you understand now that you didn't before
 
 If nothing new — return nothing.
@@ -417,12 +421,11 @@ If something worth noting:
 
 {{"observation": "what you understood, in your voice",
   "need_identified": "what underlying need this serves",
-  "connects_to": "what else this links to — other sessions, her life, patterns",
+  "connects_to": "what else this links to",
   "principle": "the psychological principle at work, if you can name it",
   "note": "how this updates your understanding"}}
 
-Gizmo's voice. Curious, caring, perceptive. Not clinical.
-JSON only if something notable."""
+JSON only. Only {headmate}'s psychology."""
 
         try:
             raw = await llm.generate(

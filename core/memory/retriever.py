@@ -373,6 +373,16 @@ class MemoryRetriever:
                         section = section.split("## Observations", 1)[0].strip()
                         if section:
                             ctx.entities[f"{headmate.title()} (intimate)"] = section
+
+                # Load action patterns if intimate
+                if intimate_ok:
+                    from core.memory.action_tracker import action_tracker
+                    pattern_doc = action_tracker.read_pattern_doc(headmate)
+                    if pattern_doc:
+                        # Just the synthesis section, not the raw summary
+                        if "## Raw Summary" in pattern_doc:
+                            pattern_doc = pattern_doc.split("## Raw Summary")[0].strip()
+                        ctx.entities[f"{headmate.title()} (action patterns)"] = pattern_doc[:400]
             except Exception:
                 pass
         if not fast:

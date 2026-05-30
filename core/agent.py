@@ -80,6 +80,12 @@ class Brief:
     session_momentum: str   = "building"
     session_duration: float = 0.0
 
+    # New headmate flag — no history, start fresh
+    is_new_headmate:  bool  = False
+
+    # Unknown entities mentioned in this message
+    unknown_entities: list  = field(default_factory=list)
+
     # Host identification short-circuit
     host_question: Optional[str] = None
 
@@ -204,7 +210,66 @@ async def intake(
         "scene", "erotic", "sensual", "degradation",
     )
 
-    # ── Host identification — ask if unknown ──────────────────────────────────
+    # ── New headmate detection ────────────────────────────────────────────────
+    # Check if this headmate has any history at all
+    is_new_headmate = False
+    if headmate:
+        try:
+            from core.memory.store import memory_store
+            from datetime import datetime, timezone
+            has_entity   = memory_store.entity_exists(headmate)
+            has_memories = (memory_store.root / "memories" / headmate.lower()).exists()
+            is_new_headmate = not has_entity and not has_memories
+
+            # Create stub entity immediately — gives psychology pass
+            # a correct target and prevents contaminating other headmates' files
+            if is_new_headmate:
+                date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                memory_store.write_entity(
+                    name       = headmate,
+                    content    = (
+                        f"First contact: {date_str}\n"
+                        f"Status: getting to know\n\n"
+                        f"{headmate.title()} is a distinct, separate person. "
+                        f"Do not conflate with any other headmate."
+                    ),
+                    session_id = session_id,
+                    keywords   = headmate.lower(),
+                )
+        except Exception:
+            pass
+
+    # ── Unknown entity detection ──────────────────────────────────────────────
+    # Scan for capitalized names not in the entity store
+    unknown_entities = []
+    if headmate:
+        try:
+            from core.memory.store import memory_store
+            # Extract capitalized words that look like proper names
+            # Exclude common words, the headmate's own name, and known entities
+            name_pattern = re.compile(r'\b([A-Z][a-z]{2,})\b')
+            candidates   = set(name_pattern.findall(message))
+
+            # Filter out common words and known entities
+            _SKIP = {
+                "I", "The", "And", "But", "For", "With", "You", "We",
+                "He", "She", "They", "It", "This", "That", "Monday",
+                "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+                "Sunday", "January", "February", "March", "April", "May",
+                "June", "July", "August", "September", "October", "November",
+                "December", "Gizmo",
+            }
+            candidates -= _SKIP
+            if headmate:
+                candidates.discard(headmate.title())
+                candidates.discard(headmate.lower())
+                candidates.discard(headmate.upper())
+
+            for name in candidates:
+                if not memory_store.entity_exists(name):
+                    unknown_entities.append(name)
+        except Exception:
+            pass
     _host_question = None
     sess_ctx = session_manager._sessions.get(session_id)
     if (not sess_ctx or sess_ctx.message_count == 0) and not headmate:
@@ -271,26 +336,28 @@ async def intake(
     )
 
     brief = Brief(
-        message          = message,
-        session_id       = session_id,
-        message_id       = message_id,
-        timestamp        = ts,
-        headmate         = headmate or None,
-        fronters         = fronters,
-        register         = register,
-        topics           = topics,
-        is_question      = is_question,
-        is_correction    = is_correction,
-        word_count       = word_count,
-        has_intimate     = has_intimate,
-        time_of_day      = time_of_day,
-        day_of_week      = now.strftime("%A"),
-        day_type         = day_type,
-        since_last_msg   = since_last,
-        message_cadence  = cadence,
-        session_momentum = sess_momentum,
-        session_duration = session_dur,
-        host_question    = _host_question,
+        message           = message,
+        session_id        = session_id,
+        message_id        = message_id,
+        timestamp         = ts,
+        headmate          = headmate or None,
+        fronters          = fronters,
+        register          = register,
+        topics            = topics,
+        is_question       = is_question,
+        is_correction     = is_correction,
+        word_count        = word_count,
+        has_intimate      = has_intimate,
+        time_of_day       = time_of_day,
+        day_of_week       = now.strftime("%A"),
+        day_type          = day_type,
+        since_last_msg    = since_last,
+        message_cadence   = cadence,
+        session_momentum  = sess_momentum,
+        session_duration  = session_dur,
+        host_question     = _host_question,
+        is_new_headmate   = is_new_headmate,
+        unknown_entities  = unknown_entities,
     )
 
     return brief
@@ -310,11 +377,12 @@ async def retrieve(brief: Brief) -> "MemoryContext":
     fast = brief.message_cadence == "rapid"
 
     ctx = await memory_retriever.retrieve(
-        message    = brief.message,
-        headmate   = brief.headmate,
-        session_id = brief.session_id,
-        register   = brief.register,
-        fast       = fast,
+        message      = brief.message,
+        headmate     = brief.headmate,
+        session_id   = brief.session_id,
+        register     = brief.register,
+        fast         = fast,
+        intimate_ok  = False if brief.is_new_headmate else None,
     )
 
     log_event("Agent", "RETRIEVE_COMPLETE",
@@ -392,6 +460,29 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
         except Exception:
             pass
 
+    # ── Unknown entities ──────────────────────────────────────────────────────
+    if brief.unknown_entities:
+        names = ", ".join(f'"{n}"' for n in brief.unknown_entities[:5])
+        lines.append(
+            f"\n[People you don't know]\n"
+            f"These names came up and you have no idea who they are: {names}\n"
+            f"Ask about them naturally — one flowing question that covers the cluster.\n"
+            f"Not clinical. Not 'who is X?' — more like curiosity woven into your response.\n"
+            f"Example: 'Jonah and Oren — are those headmates, or people from work?'\n"
+            f"One question, covers all of them, feels natural."
+        )
+
+    # ── New headmate — start fresh ────────────────────────────────────────────
+    if brief.is_new_headmate and brief.headmate:
+        lines.append(
+            f"\n[New headmate — no history]\n"
+            f"You haven't met {brief.headmate.title()} before. You don't know them.\n"
+            f"Start fresh. Be curious, open, warm. Ask who they are.\n"
+            f"Do NOT assume anything from previous fronters.\n"
+            f"Whatever register or dynamic was active before does NOT apply here.\n"
+            f"Jess's dynamic is Jess's. It belongs to no one else."
+        )
+
     # ── Memory context ────────────────────────────────────────────────────────
     memory_block = memory_ctx.to_prompt_block()
     if memory_block:
@@ -407,14 +498,14 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
     )
 
     # ── Writing instruction ───────────────────────────────────────────────────
-    token_target = _token_target(brief)
-    tone         = _tone_for_register(brief.register)
+    length_instruction = _length_instruction(brief)
+    tone               = _tone_for_register(brief.register)
 
     lines.append(
         f"\n[Write]\n"
         f"Respond to {brief.headmate.title() if brief.headmate else 'them'}. "
         f"Voice: {tone}. "
-        f"Target: ~{token_target} tokens. "
+        f"{length_instruction} "
         f"Do not explain. Do not hedge. Do not break voice. Just write.\n"
         f"Object references: only mention objects marked 'in rotation' naturally. "
         f"Objects marked '3+ months' only if they come up organically — never force it."
@@ -470,7 +561,7 @@ async def generate_response(
     response = await llm.generate(
         messages,
         system_prompt  = system_prompt,
-        max_new_tokens = max(200, brief.word_count * 3 + 60),
+        max_new_tokens = 2000,  # high ceiling — length controlled by instruction not limit
         temperature    = _response_temperature(brief),
     )
 
@@ -488,10 +579,11 @@ async def generate_response(
 # ── Stage 5: Close loop ───────────────────────────────────────────────────────
 
 async def close_loop(
-    brief:    Brief,
-    response: str,
+    brief:      Brief,
+    response:   str,
     history,
     llm,
+    raw_message: str = "",    # original assembled message for beat parsing
 ) -> None:
     """
     Fire-and-forget post-response tasks.
@@ -500,6 +592,9 @@ async def close_loop(
     from core.store import store
     from core.memory import memory_encoder, build_transcript
     from core.memory.session_context import session_context_manager
+    from core.memory.beats import (
+        beat_store, parse_to_beats, extract_why, beats_to_transcript
+    )
 
     try:
         # Write response envelope
@@ -532,6 +627,50 @@ async def close_loop(
             "source":     "emotion_tracker",
             "tags":       f"emotion,{brief.headmate.lower() if brief.headmate else 'unknown'}",
         })
+
+        # ── Beat parsing ──────────────────────────────────────────────────────
+        # Parse both sides into beats and save them
+        all_beats = []
+
+        # User beats — from the raw assembled message
+        user_text = raw_message or brief.message
+        if user_text and brief.headmate:
+            user_beats = parse_to_beats(
+                raw        = user_text,
+                speaker    = brief.headmate,
+                session_id = brief.session_id,
+                headmate   = brief.headmate,
+                register   = brief.register,
+            )
+            all_beats.extend(user_beats)
+
+        # Gizmo beats — from the response
+        if response and brief.headmate:
+            gizmo_beats = parse_to_beats(
+                raw        = response,
+                speaker    = "gizmo",
+                session_id = brief.session_id,
+                headmate   = brief.headmate,
+                register   = brief.register,
+            )
+
+            # Extract why for Gizmo's action beats
+            if any(b.type == "action" for b in gizmo_beats):
+                asyncio.ensure_future(
+                    _enrich_and_save_beats(
+                        beats      = all_beats + gizmo_beats,
+                        session_id = brief.session_id,
+                        headmate   = brief.headmate,
+                        llm        = llm,
+                    )
+                )
+            else:
+                all_beats.extend(gizmo_beats)
+                beat_store.save_beats(all_beats)
+                beat_store.link_beats(all_beats)
+        elif all_beats:
+            beat_store.save_beats(all_beats)
+            beat_store.link_beats(all_beats)
 
         # ── Session context — record exchange, fire staggered updates ─────────
         ctx = session_context_manager.record_exchange(
@@ -574,26 +713,55 @@ async def close_loop(
             )
 
         log_event("Agent", "CLOSE_LOOP_COMPLETE",
-            session  = brief.session_id[:8],
-            register = brief.register,
+            session   = brief.session_id[:8],
+            register  = brief.register,
             msg_count = ctx.message_count,
         )
 
         # ── Memory encoding — fire and forget ─────────────────────────────────
-        asyncio.ensure_future(
-            memory_encoder.encode_safe(
-                transcript   = build_transcript(history),
-                headmate     = brief.headmate,
-                session_id   = brief.session_id,
-                duration_s   = time.time() - brief.timestamp,
-                register     = brief.register,
-                has_intimate = brief.has_intimate,
-                llm          = llm,
+        from core.llm import response_is_usable
+        if response_is_usable(response):
+            # Use beat transcript if we have beats, else raw history
+            session_beats = beat_store.get_session_beats(brief.session_id)
+            transcript = (
+                beats_to_transcript(session_beats)
+                if session_beats
+                else build_transcript(history)
             )
-        )
+            asyncio.ensure_future(
+                memory_encoder.encode_safe(
+                    transcript   = transcript,
+                    headmate     = brief.headmate,
+                    session_id   = brief.session_id,
+                    duration_s   = time.time() - brief.timestamp,
+                    register     = brief.register,
+                    has_intimate = brief.has_intimate,
+                    llm          = llm,
+                )
+            )
+        else:
+            log_error("Agent", f"skipping encoding — response unusable: '{response[:40]}'", exc=None)
 
     except Exception as e:
         log_error("Agent", "close_loop failed", exc=e)
+
+
+async def _enrich_and_save_beats(
+    beats:      list,
+    session_id: str,
+    headmate:   str,
+    llm,
+) -> None:
+    """Enrich Gizmo's action beats with why, then save all beats."""
+    from core.memory.beats import beat_store, extract_why
+    try:
+        enriched = await extract_why(beats, session_id, headmate, llm)
+        beat_store.save_beats(enriched)
+        beat_store.link_beats(enriched)
+    except Exception as e:
+        log_error("Agent", f"beat enrichment failed: {e}", exc=None)
+        beat_store.save_beats(beats)
+        beat_store.link_beats(beats)
 
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
@@ -684,10 +852,11 @@ class Agent:
         # ── 5. Close loop — fire and forget ───────────────────────────────────
         asyncio.ensure_future(
             close_loop(
-                brief    = brief,
-                response = response_text,
-                history  = history,
-                llm      = llm,
+                brief       = brief,
+                response    = response_text,
+                history     = history,
+                llm         = llm,
+                raw_message = user_message,
             )
         )
 
@@ -708,19 +877,28 @@ class Agent:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _token_target(brief: Brief) -> int:
+def _length_instruction(brief: Brief) -> str:
+    """Natural language length instruction — model self-terminates cleanly."""
     register = brief.register
-    if register in ("subspace", "scene"):
-        return 40
+    if register == "subspace":
+        return "Write 1-2 sentences."
+    if register == "scene":
+        return "Write a short response — stay in the scene."
     if register in ("distress", "crisis"):
-        return 80
-    if register in ("intimate", "dominant"):
-        return 60
+        return "Write 2-3 sentences. Stay close."
+    if register == "degradation":
+        return "Write 1-3 sentences. Precise and direct."
+    if register in ("intimate", "dominant", "submissive"):
+        return "Write a short response."
     if register in ("reflective", "deep"):
-        return 180
+        return "Write 2-3 paragraphs."
+    if register == "playful":
+        return "Write a short, light response."
     if brief.session_momentum == "opening":
-        return 80
-    return max(60, min(200, brief.word_count * 2))
+        return "Write 2-3 sentences."
+    if brief.word_count > 50:
+        return "Write a response that matches the length of what they said."
+    return "Write a short response — a paragraph at most."
 
 
 def _tone_for_register(register: str) -> str:

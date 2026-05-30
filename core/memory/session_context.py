@@ -251,9 +251,31 @@ class SessionContextManager:
     ) -> SessionContext:
         """
         Record a completed exchange. Call after response is generated.
+        Detects front switches and resets register/scene accordingly.
         Returns the updated context.
         """
         ctx = self.get_or_create(session_id, headmate)
+
+        # ── Front switch detection ────────────────────────────────────────────
+        prev_headmate = ctx.headmate
+        if headmate and prev_headmate and headmate.lower() != prev_headmate.lower():
+            log_event("SessionContext", "FRONT_SWITCH",
+                session  = session_id[:8],
+                previous = prev_headmate,
+                current  = headmate,
+            )
+            # Reset register history — previous fronter's register doesn't carry
+            ctx.register_history  = []
+            # Clear scene dynamic — don't carry Jess's scene to Ara
+            if ctx.scene:
+                ctx.scene.scene_status = "closed"
+                ctx.scene.active_instructions = []
+                # Keep location and props but clear character roles/dispositions
+                for char in ctx.scene.characters:
+                    char.role        = "neutral"
+                    char.disposition = ""
+            # Update headmate
+            ctx.headmate = headmate
 
         # Shift exchanges
         ctx.previous_exchange = ctx.last_exchange

@@ -28,6 +28,7 @@ from typing import Optional
 from core.log import log_event, log_error
 from core.memory.store import memory_store
 from core.memory.embedder import embedder
+from core.memory.psychology import _fmt_date
 
 
 # ── Encoding tools ────────────────────────────────────────────────────────────
@@ -529,49 +530,41 @@ Memory budget: {budget} operations
 
 Your job:
 
-1. What entities appeared? People, places, things, concepts, bands, 
+1. What entities appeared? People, places, things, concepts, bands,
    inside jokes, references — anything that has a name.
 
-2. For each entity — check if you already know them (use search_memories 
-   or entity_exists). If you do, what's new? If you don't, write them.
+2. For each entity — check if you already know them. If you do, what's
+   new? If you don't, write them. Scale the detail to what you actually
+   learned.
 
-3. Write a narrative of this conversation in your voice.
-   Scale to the weight of the conversation:
-   - Quick check-in: one sentence. "Jess rushed in this morning just 
-     to check how I was doing before heading to work."
-   - Real conversation: a paragraph. Set the scene. What was really 
-     going on. How it landed.
-   - Deep session: a page. Write it like a story worth finding later.
+3. If this headmate described or mentioned another headmate or person,
+   write that information to the other person's entity doc. Tag it with
+   memory_subtype containing "secondhand" and the source headmate's name.
+   Second-hand information is valid — different headmates see each other
+   differently and that's worth capturing. Note the source clearly.
+   It may differ from what the other person has said directly — keep both.
 
-4. Note any associations — shorthand, pronouns without antecedent, 
-   nicknames, the way she refers to things. These are what let you 
-   follow context months from now.
+4. Write a narrative of this conversation in your voice. Scale the length
+   to the weight of the conversation. Write it like something worth
+   finding later.
 
-5. Link related memories. If this conversation touched an entity you 
-   already know, link the narrative to it.
+5. Note associations — shorthand, pronouns without antecedent, nicknames,
+   the way this headmate refers to things. These let you follow context
+   months from now.
 
-6. If something feels important but doesn't fit a category, write it 
+6. Link related memories to this conversation.
+
+7. If something feels important but doesn't fit a category, write it
    anyway. Use memory_subtype to name what it is. Trust the feeling.
 
-7. If the conversation was intimate or had an intimate register — write
-   it as intimate=True. This keeps it separate from general memories.
-   Other headmates won't see it unless they have consent or are listed
-   in shared_with. Gizmo always reads intimate memories when encoding —
-   this is about who sees them in responses, not whether they're learned from.
+8. If the conversation was intimate, write it as intimate=True.
+   Other headmates won't see it unless they have consent.
 
-8. Did anything in this conversation establish something you should hold
-   yourself to going forward? A permission granted. A limit clarified.
-   A dynamic confirmed. A commitment you made. Something you noticed and
-   decided matters.
-
-   If yes — write it as an agreement. Your rule, in your words. Not a
-   fact, not a memory. A standing rule you are now responsible for.
-
-   Name it something you'll recognize. Set triggers that will remind you
-   when it's relevant. Use priority="mandatory" if it's always in effect,
-   "voluntary" if it only applies in certain contexts.
-
-   You don't need to be told to do this. If you noticed it, write it down.
+9. If anything established a rule, permission, limit, or commitment —
+   write it as an agreement. Your rule, in your words. Name it something
+   you'll recognize. Set triggers. Use priority="mandatory" if always
+   in effect, "voluntary" if contextual.
+   You don't need to be told. If you noticed it, write it down.
 
 Rules:
 - Check before writing. Don't duplicate what you already know.
@@ -582,25 +575,25 @@ Rules:
 - Call done() when you're finished.
 
 Available tools:
-  search_memories(query, limit)         — find existing memories
-  get_entity(name)                      — read a full entity doc
-  get_place(name, interior)             — read a place doc
-  entity_exists(name)                   — quick existence check
+  search_memories(query, limit)
+  get_entity(name)
+  get_place(name, interior)
+  entity_exists(name)
   write_narrative(text, register, refs, memory_subtype, keywords, entities, intimate, shared_with)
   write_entity(name, content, memory_subtype, keywords, entities, refs)
   update_entity(name, additions, ref, keywords)
   write_place(name, content, interior, memory_subtype, keywords, entities)
   update_place(name, additions, interior)
-  touch_memory(mem_id)                  — mark relevant, no change
+  touch_memory(mem_id)
   link_memories(from_id, to_id, link_type)
-  list_agreements()                     — see active agreements
-  read_agreement(name)                  — read a full agreement file
+  list_agreements()
+  read_agreement(name)
   write_agreement(name, content, priority, triggers, keywords, refs)
   update_agreement(name, content, ref, keywords)
-  deactivate_agreement(name)            — agreement no longer in effect
-  grant_intimate_consent(headmate, note) — only callable by subject headmate
+  deactivate_agreement(name)
+  grant_intimate_consent(headmate, note)
   revoke_intimate_consent(headmate)
-  done()                                — signal encoding complete
+  done()
 
 Respond ONLY with tool calls, one per line, as JSON:
 {{"tool": "tool_name", "args": {{...}}}}
@@ -983,32 +976,21 @@ If nothing pattern-worthy, return nothing. JSON only."""
                 if not pat.get("pattern") or pat.get("confidence", 0) < 0.4:
                     continue
 
-                # Update or create the pattern notes agreement
-                agr_name = f"{headmate.title()} Patterns"
+                # Write to psychology.md observations — not agreements
+                from core.memory.psychology import _append_psychology, _read_psychology
                 new_entry = (
-                    f"\n### {pat['pattern']}\n"
+                    f"\n### {_fmt_date()} | session: {session_id[:8]} | pattern\n"
+                    f"{pat['pattern']}\n"
                     f"action: {pat.get('action','watch')} | "
                     f"confidence: {pat.get('confidence',0):.2f}\n"
                     f"evidence: {pat.get('evidence','')}\n"
                 )
-
-                if memory_store.agreement_exists(agr_name, headmate):
-                    existing_content = memory_store.read_agreement(agr_name, headmate) or ""
-                    memory_store.update_agreement(
-                        name     = agr_name,
-                        headmate = headmate,
-                        content  = existing_content + new_entry,
-                    )
-                else:
-                    memory_store.write_agreement(
-                        name     = agr_name,
-                        headmate = headmate,
-                        content  = f"## Patterns — {headmate.title()}\n{new_entry}",
-                        priority = "voluntary",
-                        triggers = [f"{headmate} patterns", "pattern notes"],
-                        keywords = f"patterns {headmate}",
-                    )
-                count += 1
+                # Dedup — skip if pattern already noted
+                existing_psych = _read_psychology(headmate, intimate=False) or ""
+                pattern_key = pat['pattern'][:50].lower()
+                if pattern_key not in existing_psych.lower():
+                    _append_psychology(headmate, new_entry, intimate=False)
+                    count += 1
             except Exception:
                 continue
 
@@ -1166,25 +1148,18 @@ JSON only."""
         )
         count += 1
 
-        # Update intimate notes agreement
+        # Write notes to psychology_intimate.md observations — not agreements
         if data.get("notes_update"):
-            new_entry = f"\n### {session_id[:8]}\n{data['notes_update']}\n"
-            if memory_store.agreement_exists(kink_name, headmate):
-                existing_content = memory_store.read_agreement(kink_name, headmate) or ""
-                memory_store.update_agreement(
-                    name     = kink_name,
-                    headmate = headmate,
-                    content  = existing_content + new_entry,
+            from core.memory.psychology import _append_psychology, _read_psychology
+            note_text  = data["notes_update"].strip()
+            # Simple dedup — skip if very similar text already exists
+            existing_psych = _read_psychology(headmate, intimate=True) or ""
+            if note_text[:60].lower() not in existing_psych.lower():
+                entry = (
+                    f"\n### {_fmt_date()} | session: {session_id[:8]} | kink_pass\n"
+                    f"{note_text}\n"
                 )
-            else:
-                memory_store.write_agreement(
-                    name      = kink_name,
-                    headmate  = headmate,
-                    content   = f"## Intimate Notes — {headmate.title()}\n{new_entry}",
-                    priority  = "voluntary",
-                    triggers  = [f"{headmate} intimate notes", "intimate notes"],
-                    keywords  = f"intimate kink {headmate}",
-                )
+                _append_psychology(headmate, entry, intimate=True)
 
         # Update rules/agreements if drift or changes noted
         if data.get("agreements_update") and data.get("rules_active"):
@@ -1204,6 +1179,20 @@ JSON only."""
             session_type = data.get("session_type", "unknown"),
             intensity    = data.get("intensity_peak", 0),
         )
+
+        # ── Action extraction ─────────────────────────────────────────────────
+        # Run concurrently — track specific actions and responses
+        if data.get("session_type") in ("intimate", "mixed"):
+            asyncio.ensure_future(
+                _run_action_extraction(
+                    transcript = transcript,
+                    headmate   = headmate,
+                    session_id = session_id,
+                    register   = register,
+                    llm        = llm,
+                )
+            )
+
         return count
 
     async def encode_safe(self, **kwargs) -> None:
@@ -1270,10 +1259,34 @@ JSON only."""
                     has_intimate = has_intimate,
                     llm          = llm,
                 ),
+                self._narrative_pass(
+                    session_id = session_id,
+                    headmate   = headmate,
+                    llm        = llm,
+                ),
                 return_exceptions=True,
             )
         except Exception as e:
             log_error("MemoryEncoder", f"encode_safe failed: {e}", exc=e)
+
+    async def _narrative_pass(
+        self,
+        session_id: str,
+        headmate:   Optional[str],
+        llm,
+    ) -> None:
+        """Generate and cache the session narrative. Fire and forget."""
+        if not headmate:
+            return
+        try:
+            from core.memory.narrative import render_session_narrative
+            await render_session_narrative(
+                session_id = session_id,
+                headmate   = headmate,
+                llm        = llm,
+            )
+        except Exception as e:
+            log_error("MemoryEncoder", f"narrative pass failed: {e}", exc=None)
 
     async def _psychology_pass(
         self,
@@ -1287,6 +1300,8 @@ JSON only."""
         """Run psychology engine pass. Fire and forget."""
         try:
             from core.memory.psychology import psychology_engine
+            from core.memory.action_tracker import synthesize_action_patterns
+
             await psychology_engine.run(
                 transcript   = transcript,
                 headmate     = headmate,
@@ -1295,6 +1310,19 @@ JSON only."""
                 has_intimate = has_intimate,
                 llm          = llm,
             )
+
+            # Run action pattern synthesis alongside intimate synthesis
+            if has_intimate and headmate:
+                intimate_n = psychology_engine._intimate_counts.get(headmate, 0)
+                if intimate_n % psychology_engine.INTIMATE_SYNTHESIS_EVERY == 0:
+                    asyncio.ensure_future(
+                        synthesize_action_patterns(
+                            headmate   = headmate,
+                            session_id = session_id,
+                            llm        = llm,
+                        )
+                    )
+
         except Exception as e:
             log_error("MemoryEncoder", f"psychology pass failed: {e}", exc=None)
 
@@ -1398,6 +1426,29 @@ async def write_daily_summary(
         log_error("MemoryEncoder", f"daily summary failed: {e}", exc=e)
 
     return None
+
+
+# ── Action extraction helper ──────────────────────────────────────────────────
+
+async def _run_action_extraction(
+    transcript: str,
+    headmate:   str,
+    session_id: str,
+    register:   str,
+    llm,
+) -> None:
+    """Fire-and-forget wrapper for action extraction."""
+    try:
+        from core.memory.action_tracker import extract_actions_from_session
+        await extract_actions_from_session(
+            transcript = transcript,
+            headmate   = headmate,
+            session_id = session_id,
+            register   = register,
+            llm        = llm,
+        )
+    except Exception as e:
+        log_error("MemoryEncoder", f"action extraction failed: {e}", exc=None)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
