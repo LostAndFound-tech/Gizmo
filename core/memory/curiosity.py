@@ -230,12 +230,12 @@ class CuriosityEngine:
     QUESTIONS_PER_PASS = 6
 
     # Don't ask more than this many questions per session
-    MAX_PER_SESSION    = 5
+    MAX_PER_SESSION    = 99
 
     # Minimum register friendliness for asking questions
     _OK_REGISTERS = {
         "neutral", "casual", "warm", "playful", "reflective", "elevated",
-        "intimate", "dominant", "submissive", "deep",
+        "intimate", "dominant", "submissive", "deep", "degrading"
     }
 
     # Registers where curiosity is especially welcome — push harder
