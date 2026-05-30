@@ -314,9 +314,9 @@ class GizmoServer:
         await self._send(websocket, {"type": "thinking"})
 
         try:
-            single_msg = parts[0]["content"] if parts else raw_text
-            response   = await run_single_pipeline(
-                message=single_msg, session_id=session_id,
+            response = await run_single_pipeline(
+                message=raw_text,
+                session_id=session_id,
                 headmate=headmate, context=context,
                 history=history, llm=llm,
             )
