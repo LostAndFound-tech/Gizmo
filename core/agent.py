@@ -400,7 +400,85 @@ async def retrieve(brief: Brief) -> "MemoryContext":
 
 # ── Stage 3: System prompt ────────────────────────────────────────────────────
 
-def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
+async def _read_the_room(
+    message:    str,
+    headmate:   Optional[str],
+    session_id: str,
+    history,
+    llm,
+) -> str:
+    """
+    Given this exchange and this person's psychology,
+    how are they doing and how should Gizmo show up?
+    Returns a tone directive string for the [Write] block.
+    Runs in parallel with retrieval — adds no wall time.
+    """
+    if not headmate:
+        return "present, responsive"
+
+    # Load psychology synthesis
+    try:
+        from core.memory.psychology import _read_psychology
+        psych = _read_psychology(headmate, intimate=False) or ""
+        psych_summary = ""
+        if "## Current Understanding" in psych:
+            psych_summary = psych.split("## Current Understanding", 1)[1]
+            psych_summary = psych_summary.split("## Observations", 1)[0].strip()[:500]
+    except Exception:
+        psych_summary = ""
+
+    # Get last 4 exchanges
+    try:
+        recent = history.as_list()[-8:] if hasattr(history, "as_list") else []
+        history_text = "\n".join(
+            f"{'Gizmo' if m['role'] == 'assistant' else headmate.title()}: {m.get('content','')[:100]}"
+            for m in recent
+            if isinstance(m, dict) and m.get("content")
+        )
+    except Exception:
+        history_text = ""
+
+    if not psych_summary and not history_text:
+        return "present, responsive"
+
+    prompt = (
+        f"Who {headmate.title()} is:\n{psych_summary}\n\n"
+        f"Recent exchange:\n{history_text}\n\n"
+        f"Current message: \"{message}\"\n\n"
+        f"Two questions only:\n"
+        f"1. How are they right now — what's the emotional texture of this moment?\n"
+        f"2. Given that and who they are, how should Gizmo show up?\n\n"
+        f"Answer in one line: Voice: [directive]\n"
+        f"Nothing else. Be specific to this person and this moment."
+    )
+
+    try:
+        raw = await llm.generate(
+            [{"role": "user", "content": prompt}],
+            system_prompt=(
+                "You are Gizmo reading the room before responding. "
+                "One line only: Voice: [directive]. Specific, not generic."
+            ),
+            max_new_tokens=60,
+            temperature=0.3,
+        )
+        if raw and raw.strip():
+            # Extract just the directive part
+            line = raw.strip().splitlines()[0]
+            if "Voice:" in line:
+                return line.split("Voice:", 1)[1].strip()
+            return line.strip()
+    except Exception:
+        pass
+
+    return "present, responsive"
+
+
+def build_system_prompt(
+    brief:          "Brief",
+    memory_ctx:     "MemoryContext",
+    tone_directive: str = "",
+) -> str:
     """
     Build the system prompt Gizmo reads before responding.
     Memory context + identity + writing instruction.
@@ -474,13 +552,29 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
 
     # ── New headmate — start fresh ────────────────────────────────────────────
     if brief.is_new_headmate and brief.headmate:
+        # Find who was fronting before
+        prev = None
+        try:
+            from core.memory.session_context import session_context_manager
+            ctx = session_context_manager.get(brief.session_id)
+            if ctx and ctx.previous_exchange:
+                prev = ctx.headmate
+        except Exception:
+            pass
+
+        prev_note = (
+            f"{prev.title()}'s dynamic is {prev.title()}'s. It belongs to no one else."
+            if prev and prev.lower() != brief.headmate.lower()
+            else "Each headmate's dynamic is uniquely theirs. Do not carry it over."
+        )
+
         lines.append(
             f"\n[New headmate — no history]\n"
             f"You haven't met {brief.headmate.title()} before. You don't know them.\n"
             f"Start fresh. Be curious, open, warm. Ask who they are.\n"
             f"Do NOT assume anything from previous fronters.\n"
             f"Whatever register or dynamic was active before does NOT apply here.\n"
-            f"Jess's dynamic is Jess's. It belongs to no one else."
+            f"{prev_note}"
         )
 
     # ── Memory context ────────────────────────────────────────────────────────
@@ -497,14 +591,26 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
         f"Session is {brief.session_momentum}."
     )
 
+    # ── Knowledge gap detection ───────────────────────────────────────────────
+    # If this is a question and retrieval came back thin, say so honestly
+    if brief.is_question and memory_ctx.is_empty():
+        lines.append(
+            "\n[Knowledge gap]\n"
+            "You don't have enough information to answer this fully. "
+            "Say what you actually know. If you don't know, say so directly. "
+            "Do not invent details. Do not fill gaps with speculation or poetry. "
+            "Honest uncertainty is better than confident invention."
+        )
+
     # ── Writing instruction ───────────────────────────────────────────────────
+    # Use tone directive from room-read, fall back to register default
+    voice = tone_directive if tone_directive else _tone_for_register(brief.register)
     length_instruction = _length_instruction(brief)
-    tone               = _tone_for_register(brief.register)
 
     lines.append(
         f"\n[Write]\n"
         f"Respond to {brief.headmate.title() if brief.headmate else 'them'}. "
-        f"Voice: {tone}. "
+        f"Voice: {voice}. "
         f"{length_instruction} "
         f"Do not explain. Do not hedge. Do not break voice. Just write.\n"
         f"Object references: only mention objects marked 'in rotation' naturally. "
@@ -811,16 +917,32 @@ class Agent:
                 yield response_text[i:i + 8]
             return
 
-        # ── 2. Retrieve ───────────────────────────────────────────────────────
+        # ── 2. Retrieve + read the room (parallel) ────────────────────────────
         try:
-            memory_ctx = await retrieve(brief)
+            memory_ctx, tone_directive = await asyncio.gather(
+                retrieve(brief),
+                _read_the_room(
+                    message    = user_message,
+                    headmate   = brief.headmate,
+                    session_id = session_id,
+                    history    = history,
+                    llm        = llm,
+                ),
+                return_exceptions=True,
+            )
+            if isinstance(memory_ctx, Exception):
+                from core.memory.retriever import MemoryContext
+                memory_ctx = MemoryContext()
+            if isinstance(tone_directive, Exception) or not tone_directive:
+                tone_directive = _tone_for_register(brief.register)
         except Exception as e:
-            log_error("Agent", f"retrieval failed: {e}", exc=e)
+            log_error("Agent", f"retrieve/room-read failed: {e}", exc=e)
             from core.memory.retriever import MemoryContext
-            memory_ctx = MemoryContext()
+            memory_ctx     = MemoryContext()
+            tone_directive = _tone_for_register(brief.register)
 
         # ── 3. Build system prompt ────────────────────────────────────────────
-        system_prompt = build_system_prompt(brief, memory_ctx)
+        system_prompt = build_system_prompt(brief, memory_ctx, tone_directive)
 
         # ── 3b. Curiosity — weave in a question if the moment is right ────────
         try:

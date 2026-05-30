@@ -230,13 +230,7 @@ class CuriosityEngine:
     QUESTIONS_PER_PASS = 6
 
     # Don't ask more than this many questions per session
-    MAX_PER_SESSION    = 99
-
-    # Minimum register friendliness for asking questions
-    _OK_REGISTERS = {
-        "neutral", "casual", "warm", "playful", "reflective", "elevated",
-        "intimate", "dominant", "submissive", "deep", "degrading"
-    }
+    MAX_PER_SESSION    = 5
 
     # Registers where curiosity is especially welcome — push harder
     _RICH_REGISTERS = {
@@ -366,13 +360,8 @@ JSON only, one per line."""
         Returns the question phrased naturally for this moment,
         or None if nothing fits.
         """
-        # Don't ask in certain registers
-        if register not in self._OK_REGISTERS:
-            log_event("CuriosityEngine", "SELECTION_SKIPPED",
-                reason   = f"register={register} not in ok list",
-                headmate = headmate or "unknown",
-                session  = session_id[:8],
-            )
+        # Don't ask during crisis or active distress — not the moment
+        if register in ("crisis", "distress"):
             return None
 
         # Don't ask too many times per session

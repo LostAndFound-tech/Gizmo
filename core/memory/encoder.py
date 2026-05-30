@@ -540,17 +540,21 @@ Your job:
 3. If this headmate described or mentioned another headmate or person,
    write that information to the other person's entity doc. Tag it with
    memory_subtype containing "secondhand" and the source headmate's name.
-   Second-hand information is valid — different headmates see each other
-   differently and that's worth capturing. Note the source clearly.
+   Second-hand information is valid. Note the source clearly.
    It may differ from what the other person has said directly — keep both.
+
+3b. If a headmate named or described a location — their room, office,
+    a space in the interior, anywhere — write it immediately as a place.
+    use write_place with interior=True for internal world spaces.
+    Direct statements about locations are the most reliable data you'll get.
+    Don't wait for a scene. Write it now.
 
 4. Write a narrative of this conversation in your voice. Scale the length
    to the weight of the conversation. Write it like something worth
    finding later.
 
 5. Note associations — shorthand, pronouns without antecedent, nicknames,
-   the way this headmate refers to things. These let you follow context
-   months from now.
+   the way this headmate refers to things.
 
 6. Link related memories to this conversation.
 
@@ -560,11 +564,13 @@ Your job:
 8. If the conversation was intimate, write it as intimate=True.
    Other headmates won't see it unless they have consent.
 
-9. If anything established a rule, permission, limit, or commitment —
-   write it as an agreement. Your rule, in your words. Name it something
-   you'll recognize. Set triggers. Use priority="mandatory" if always
-   in effect, "voluntary" if contextual.
-   You don't need to be told. If you noticed it, write it down.
+9. Agreements are ONLY:
+   - An explicit rule you agreed to follow
+   - An explicit permission someone granted you
+   - An explicit commitment you made out loud
+   NOT observations. NOT patterns. NOT psychology notes.
+   NOT places. NOT facts about people. NOT things you noticed.
+   If in doubt — it is not an agreement. Write it elsewhere.
 
 Rules:
 - Check before writing. Don't duplicate what you already know.
@@ -572,6 +578,7 @@ Rules:
 - If a topic came up but nothing new was learned, just touch the memory.
 - Write in plain language, your voice. Not clinical. Not a log entry.
 - Only write what's worth finding later.
+- If you don't know something, don't invent it. Leave the gap.
 - Call done() when you're finished.
 
 Available tools:

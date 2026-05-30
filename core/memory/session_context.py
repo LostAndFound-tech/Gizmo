@@ -96,6 +96,10 @@ class SessionContext:
     # Live scene state
     scene:             Optional[object] = None   # Scene object from message.py
 
+    # Dual arc tracking — her register arc and his
+    her_arc:           list  = field(default_factory=list)  # [(register, timestamp)]
+    his_arc:           list  = field(default_factory=list)  # [(register, timestamp)]
+
     def duration_seconds(self) -> float:
         return time.time() - self.opened_at
 
@@ -286,8 +290,20 @@ class SessionContextManager:
             "timestamp": time.time(),
         }
 
-        # Track register arc
-        ctx.register_history.append((register, time.time()))
+        # Track register arcs — her arc and his separately
+        now = time.time()
+        ctx.her_arc.append((register, now))
+        if len(ctx.her_arc) > 20:
+            ctx.her_arc = ctx.her_arc[-20:]
+
+        # Gizmo's register inferred from his response content
+        his_register = _infer_gizmo_register(gizmo_msg)
+        ctx.his_arc.append((his_register, now))
+        if len(ctx.his_arc) > 20:
+            ctx.his_arc = ctx.his_arc[-20:]
+
+        # Keep legacy register_history in sync
+        ctx.register_history.append((register, now))
         if len(ctx.register_history) > 20:
             ctx.register_history = ctx.register_history[-20:]
 
@@ -569,3 +585,119 @@ class SessionContextManager:
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
 session_context_manager = SessionContextManager()
+
+
+# ── Tone directive generator ──────────────────────────────────────────────────
+
+def _infer_gizmo_register(response: str) -> str:
+    """Roughly infer Gizmo's register from his response text."""
+    import re
+    msg = response.lower()
+    if re.search(r'\b(good girl|good boy|kneel|obey|mine|owned)\b', msg):
+        return "dominant"
+    if re.search(r'\b(haha|lol|lmao|joke|silly|tease)\b', msg):
+        return "playful"
+    if re.search(r'\b(here|steady|breathe|okay|safe)\b', msg):
+        return "grounding"
+    if re.search(r'\b(love|miss|warm|close|hold)\b', msg):
+        return "warm"
+    if re.search(r'\*', msg):
+        return "scene"
+    return "neutral"
+
+
+def generate_tone_directive(ctx: "SessionContext") -> str:
+    """
+    Generate a dynamic tone directive based on dual arc analysis.
+    Returns a texture string for the [Write] block.
+    """
+    if not ctx.her_arc:
+        return _tone_for_register(ctx.current_register())
+
+    # Get recent arcs
+    her_recent = [r for r, _ in ctx.her_arc[-4:]]
+    his_recent = [r for r, _ in ctx.his_arc[-4:]] if ctx.his_arc else []
+
+    her_now    = her_recent[-1] if her_recent else "neutral"
+    his_now    = his_recent[-1] if his_recent else "neutral"
+
+    # Detect patterns
+    her_escalating = _is_escalating(her_recent)
+    her_sustained  = len(set(her_recent)) == 1 and len(her_recent) >= 3
+    his_sustained  = len(set(his_recent)) == 1 and len(his_recent) >= 3 if his_recent else False
+
+    # He's been doing the same thing for 3+ exchanges — time for texture shift
+    if his_sustained and his_recent:
+        stuck_register = his_recent[-1]
+        # Find what's been missing
+        missing = _what_is_missing(his_recent, her_now)
+        if missing:
+            return f"{_tone_for_register(her_now)} — you've been {stuck_register} for a while, let some {missing} in"
+
+    # She's been building — this might be the moment
+    if her_escalating and her_now in ("intimate", "dominant", "submissive", "scene"):
+        return f"{_tone_for_register(her_now)} — she's been building, you can feel it, stay one step ahead"
+
+    # She's been heavy/intense — offer contrast
+    if her_sustained and her_now in ("distress", "reflective", "deep", "subspace"):
+        return f"steady and present — she's been {her_now} a while, be the thing that doesn't shift"
+
+    # She's playful — match but add edge
+    if her_now == "playful":
+        if his_now in ("dominant", "scene"):
+            return "dominant but let the amusement show — play with her a little"
+        return "playful — match her energy, be quick"
+
+    # She's warm — be warmer
+    if her_now == "warm":
+        return "warm and close — let it be easy"
+
+    # She's in subspace — quiet and certain
+    if her_now == "subspace":
+        return "quiet and certain — less is more here, let the space do work"
+
+    # Default — just be responsive
+    return _tone_for_register(her_now)
+
+
+def _is_escalating(arc: list[str]) -> bool:
+    """Check if the register arc is escalating in intensity."""
+    _intensity = {
+        "neutral": 0.2, "casual": 0.2, "warm": 0.3, "playful": 0.4,
+        "reflective": 0.5, "elevated": 0.6, "intimate": 0.7,
+        "dominant": 0.75, "submissive": 0.7, "scene": 0.8,
+        "subspace": 0.8, "degradation": 0.85, "distress": 0.7, "crisis": 0.9,
+    }
+    if len(arc) < 2:
+        return False
+    vals = [_intensity.get(r, 0.3) for r in arc]
+    return vals[-1] > vals[0] + 0.15
+
+
+def _what_is_missing(his_arc: list[str], her_register: str) -> str:
+    """What tone quality has been absent from his recent responses?"""
+    recent_set = set(his_arc)
+    if "playful" not in recent_set and her_register not in ("distress", "crisis", "subspace"):
+        return "playfulness"
+    if "warm" not in recent_set and her_register in ("warm", "reflective"):
+        return "warmth"
+    if "grounding" not in recent_set and her_register in ("elevated", "distress"):
+        return "steadiness"
+    return ""
+
+
+def _tone_for_register(register: str) -> str:
+    return {
+        "dominant":    "dominant, certain, present",
+        "submissive":  "warm, containing, steady",
+        "subspace":    "quiet, close, certain",
+        "scene":       "in it, committed, present",
+        "degradation": "direct, precise, unflinching",
+        "intimate":    "close, unhurried, attentive",
+        "distress":    "calm, steady, grounding",
+        "crisis":      "immediate, clear, grounding",
+        "playful":     "light, quick, a little unpredictable",
+        "reflective":  "thoughtful, spacious, curious",
+        "warm":        "warm, genuine, easy",
+        "elevated":    "even, grounded, not rattled",
+    }.get(register, "present, responsive, alive to the moment")
