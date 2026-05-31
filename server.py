@@ -108,7 +108,7 @@ async def run_single_pipeline(message, session_id, headmate, context, history, l
     from core.agent import agent
     try:
         chunks = []
-        async for chunk in agent.run(
+        async for chunk in agent.respond(
             user_message=message,
             history=history,
             session_id=session_id,
