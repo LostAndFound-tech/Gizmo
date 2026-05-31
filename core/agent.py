@@ -1,934 +1,838 @@
 """
 core/agent.py
-The membrane. Coordinates all components. Presents output.
+Gizmo's pipeline orchestrator.
 
-This file does not think. It does not retrieve. It does not generate.
-It routes, sequences, and streams. That's all.
+New architecture — pull-based, fast, memory-driven.
 
-Flow:
-  1. Receive input
-  2. Archivist → brief
-  3. Mind → facts        (parallel)
-     Ego  → direction   (parallel)
-  4. Tool precheck — should a tool fire? (confidence-gated)
-     >70%  → fire immediately
-     50-70% → ask for confirmation first
-     <50%  → skip
-  5. Body → generate
-  6. Archivist ← outgoing (close loop)
-  7. Protocol NLP detection (async, never blocks)
-  8. Stream to caller
+Pipeline per message:
+
+  1. INTAKE
+     Classify message → write envelope to store → build Brief.
+     No LLM calls. Pure heuristics. Fast.
+
+  2. RETRIEVE
+     Embed message → vector + keyword search → crawl refs →
+     load entity/place docs → assemble MemoryContext.
+     No LLM calls. Local model. ~50ms.
+
+  3. RESPOND
+     One LLM call. Gizmo has everything he needs.
+     Memory context + conversation history + lean system prompt.
+     Writes the message.
+
+  4. CLOSE LOOP (fire and forget)
+     Encoding pass — Gizmo writes what he learned, in his voice.
+     Detail catch — catches asides and throwaway mentions.
+     Store bookkeeping — response envelope, emotion log.
+     Never blocks. Never raises.
+
+Wall-clock time = intake + retrieval + one LLM call
+               ≈ fast.
 """
 
+from __future__ import annotations
+
 import asyncio
-import re as _re
+import json
+import re
 import time
+from dataclasses import dataclass, field
 from typing import AsyncGenerator, Optional
 
 from core.log import log, log_event, log_error
-from core.archivist import archivist, Brief
-from core.llm import llm
-
-# ── Quiet mode ────────────────────────────────────────────────────────────────
-
-_quiet: dict[str, Optional[float]] = {}
+from core.timezone import tz_now
 
 
-def set_quiet(session_id: str, duration_seconds: Optional[float] = None) -> None:
-    expiry = time.time() + duration_seconds if duration_seconds else None
-    _quiet[session_id] = expiry
-    log_event("Agent", "QUIET_SET",
-        session=session_id[:8],
-        duration=duration_seconds or "indefinite",
-        expires=expiry or "never",
-    )
+# ── Brief dataclass ───────────────────────────────────────────────────────────
 
-
-def clear_quiet(session_id: str) -> None:
-    if session_id in _quiet:
-        del _quiet[session_id]
-        log_event("Agent", "QUIET_CLEARED", session=session_id[:8])
-
-
-def is_quiet(session_id: str) -> bool:
-    if session_id not in _quiet:
-        return False
-    expiry = _quiet[session_id]
-    if expiry is not None and time.time() > expiry:
-        clear_quiet(session_id)
-        log_event("Agent", "QUIET_EXPIRED", session=session_id[:8])
-        return False
-    return True
-
-
-# ── Pending insights queue ────────────────────────────────────────────────────
-
-_pending: dict[str, asyncio.Queue] = {}
-
-
-def _get_pending(session_id: str) -> asyncio.Queue:
-    if session_id not in _pending:
-        _pending[session_id] = asyncio.Queue()
-    return _pending[session_id]
-
-
-async def enqueue(
-    session_id: str,
-    message: str,
-    source: str = "unknown",
-    priority: int = 5,
-    emergency: bool = False,
-) -> None:
-    queue = _get_pending(session_id)
-    await queue.put({
-        "message":   message,
-        "source":    source,
-        "priority":  priority,
-        "emergency": emergency,
-        "queued_at": time.time(),
-    })
-    log_event("Agent", "ENQUEUED",
-        session=session_id[:8],
-        source=source,
-        emergency=emergency,
-        priority=priority,
-        preview=message[:40],
-    )
-
-
-# ── Push function ─────────────────────────────────────────────────────────────
-
-_push_fn = None
-
-
-def set_push_fn(fn) -> None:
-    global _push_fn
-    _push_fn = fn
-    log("Agent", "push function registered")
-
-
-async def push(message: str) -> None:
-    if _push_fn is None:
-        log("Agent", f"push skipped — no push function registered: {message[:40]}")
-        return
-    try:
-        await _push_fn(message)
-    except Exception as e:
-        log_error("Agent", "push failed", exc=e)
-
-
-# ── Emergency check ───────────────────────────────────────────────────────────
-
-def _is_emergency(message: str) -> bool:
-    _EMERGENCY_PATTERNS = _re.compile(
-        r"\b(storm|tornado|hurricane|flood|fire|emergency|911|ambulance|"
-        r"hospital|accident|urgent|immediately|right now|danger|"
-        r"medication|overdose|collapse|unconscious|bleeding)\b",
-        _re.IGNORECASE,
-    )
-    return bool(_EMERGENCY_PATTERNS.search(message))
-
-
-# ── Quiet message detection ───────────────────────────────────────────────────
-
-def _is_quiet_request(message: str) -> Optional[float]:
-    msg = message.lower().strip()
-
-    timed = _re.search(
-        r"(quiet|silence|shh|hush|stop talking).{0,20}"
-        r"(\d+)\s*(minute|min|hour|hr)",
-        msg
-    )
-    if timed:
-        amount = int(timed.group(2))
-        unit   = timed.group(3)
-        return float(amount * 3600 if "hour" in unit or unit == "hr" else amount * 60)
-
-    indefinite = _re.search(
-        r"\b(quiet|silence|shh+|hush|stop|leave me alone|not now)\b",
-        msg
-    )
-    if indefinite:
-        return 0.0
-
-    return None
-
-
-# ── Hold messages ─────────────────────────────────────────────────────────────
-
-_HOLD_MESSAGES = [
-    "give me a sec",
-    "hang on, thinking",
-    "still here, one moment",
-    "okay that's interesting — just a moment",
-]
-
-_hold_index: dict[str, int] = {}
-
-
-def _next_hold_message(session_id: str) -> str:
-    idx = _hold_index.get(session_id, 0)
-    msg = _HOLD_MESSAGES[idx % len(_HOLD_MESSAGES)]
-    _hold_index[session_id] = idx + 1
-    return msg
-
-
-# ── Tool precheck — confidence-gated pre-flight ───────────────────────────────
-
-_pending_confirmations: dict[str, dict] = {}
-
-_CONFIRM_RE = _re.compile(
-    r"\b(yes|yep|yeah|yea|do it|go ahead|please|sure|correct|exactly|that'?s right)\b",
-    _re.IGNORECASE,
-)
-_DENY_RE = _re.compile(
-    r"\b(no|nope|nah|don'?t|stop|never mind|forget it|not now|skip it)\b",
-    _re.IGNORECASE,
-)
-
-
-async def _tool_precheck(
-    message: str,
-    brief: Brief,
-    session_id: str,
-) -> Optional[dict]:
+@dataclass
+class Brief:
     """
-    Before generating a response, ask a lightweight LLM:
-    'Given this message and these tools, should I use one?'
-
-    Returns:
-      None                            — no tool, proceed normally
-      {"fire": True, tool, args}      — confidence >70%, fire immediately
-      {"confirm": True, prompt, ...}  — confidence 50-70%, ask user first
+    Full picture assembled by Intake.
+    Passed to retrieval and response stages.
     """
-    from core.agent_tools import TOOL_REGISTRY
+    # Message
+    message:        str
+    session_id:     str
+    message_id:     str
+    timestamp:      float
 
-    # Check if we're waiting on a confirmation from a previous turn
-    pending = _pending_confirmations.get(session_id)
-    if pending:
-        if _CONFIRM_RE.search(message):
-            del _pending_confirmations[session_id]
-            log_event("Agent", "PRECHECK_CONFIRMED",
-                session=session_id[:8],
-                tool=pending.get("tool"),
-            )
-            return {"fire": True, "tool": pending["tool"], "args": pending["args"]}
-        elif _DENY_RE.search(message):
-            del _pending_confirmations[session_id]
-            log_event("Agent", "PRECHECK_DENIED",
-                session=session_id[:8],
-                tool=pending.get("tool"),
-            )
-            return None
-        else:
-            del _pending_confirmations[session_id]
+    # Identity
+    headmate:       Optional[str]
+    fronters:       list
 
-    tool_list = "\n".join(
-        f"- {name}: {tool.description}"
-        for name, tool in TOOL_REGISTRY.items()
-    )
+    # Classification
+    register:       str
+    topics:         list
+    is_question:    bool
+    is_correction:  bool
+    word_count:     int
+    has_intimate:   bool = False
 
-    # Explicit write intent — lower the confidence threshold
-    explicit_write = bool(_re.search(
-        r"\b(write|create|save|make|add|put|store)\b.{0,30}\b(file|rule|protocol|note|list)\b",
-        message,
-        _re.IGNORECASE,
-    ))
+    # Time context
+    time_of_day:    str  = "day"
+    day_of_week:    str  = "Monday"
+    day_type:       str  = "weekday"
+    since_last_msg: float = 0.0
+    message_cadence: str = "conversational"
 
-    prompt = [{
-        "role": "user",
-        "content": (
-            f"Message: \"{message}\"\n\n"
-            f"Available tools:\n{tool_list}\n\n"
-            f"Should any tool be used to handle this message?\n"
-            f"{'NOTE: This message explicitly requests a write/create action. Prefer write tools.' if explicit_write else ''}\n\n"
-            f"Respond with ONLY valid JSON:\n"
-            f'{{\n'
-            f'  "should_use": true or false,\n'
-            f'  "tool": "tool_name or null",\n'
-            f'  "args": {{"arg": "value"}} or {{}},\n'
-            f'  "confidence": 0-100,\n'
-            f'  "confirm_prompt": "natural question to ask user if confidence is medium, or null"\n'
-            f'}}'
-        )
-    }]
+    # Session context
+    session_momentum: str   = "building"
+    session_duration: float = 0.0
 
-    try:
-        raw = await llm.generate(
-            prompt,
-            system_prompt=(
-                "You are a tool dispatcher. Given a message and a list of tools, "
-                "decide if any tool should fire. Be conservative — only suggest a tool "
-                "when the intent is clear. For explicit write/create requests, confidence "
-                "should be 80+. JSON only. No preamble."
-            ),
-            max_new_tokens=200,
-            temperature=0.1,
-        )
-
-        if not raw or not raw.strip():
-            return None
-
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-            raw = raw.rsplit("```", 1)[0].strip()
-
-        data = __import__("json").loads(raw)
-
-        if not data.get("should_use") or not data.get("tool"):
-            return None
-
-        confidence  = int(data.get("confidence", 0))
-        tool_name   = data.get("tool")
-        tool_args   = data.get("args", {})
-        confirm_msg = data.get("confirm_prompt")
-
-        # Explicit write requests: treat 50+ as fire
-        threshold = 50 if explicit_write else 70
-
-        log_event("Agent", "PRECHECK_RESULT",
-            session=session_id[:8],
-            tool=tool_name,
-            confidence=confidence,
-            explicit_write=explicit_write,
-            threshold=threshold,
-        )
-
-        if confidence >= threshold:
-            return {"fire": True, "tool": tool_name, "args": tool_args}
-
-        elif confidence >= 50 and confirm_msg:
-            _pending_confirmations[session_id] = {
-                "tool": tool_name,
-                "args": tool_args,
-            }
-            return {"confirm": True, "prompt": confirm_msg, "tool": tool_name, "args": tool_args}
-
-        return None
-
-    except Exception as e:
-        log_error("Agent", "tool precheck failed", exc=e)
-        return None
+    # Host identification short-circuit
+    host_question: Optional[str] = None
 
 
-async def _fire_precheck_tool(
-    tool_name: str,
-    tool_args: dict,
-    session_id: str,
+# ── LLM call helper ───────────────────────────────────────────────────────────
+
+async def _call(
+    llm,
+    system: str,
+    user:   str,
+    tokens: int   = 400,
+    temp:   float = 0.2,
 ) -> str:
-    from core.agent_tools import TOOL_REGISTRY
-
-    if tool_name not in TOOL_REGISTRY:
-        return f"Tool '{tool_name}' not found."
-
+    """Single focused LLM call. Returns empty string on failure."""
     try:
-        result = await TOOL_REGISTRY[tool_name].run(session_id=session_id, **tool_args)
-        log_event("Agent", "PRECHECK_TOOL_FIRED",
-            session=session_id[:8],
-            tool=tool_name,
-            success=result.success,
+        return await llm.generate(
+            [{"role": "user", "content": user}],
+            system_prompt=system,
+            max_new_tokens=tokens,
+            temperature=temp,
         )
-        return result.output
     except Exception as e:
-        log_error("Agent", f"precheck tool execution failed: {tool_name}", exc=e)
-        return str(e)
+        log_error("Agent", f"LLM call failed: {e}", exc=None)
+        return ""
 
 
-# ── Core routing ──────────────────────────────────────────────────────────────
+# ── Stage 1: Intake ───────────────────────────────────────────────────────────
 
-async def _get_facts(brief: Brief) -> dict:
-    try:
-        from core.mind import mind
-        facts = await mind.query(brief)
-        log_event("Agent", "FACTS_RETRIEVED",
-            session=brief.session_id[:8],
-            source=facts.get("source", "none"),
-            confidence=facts.get("confidence", 0.0),
-            topics=brief.topics,
-        )
-        return facts
-    except Exception as e:
-        log_error("Agent", "fact retrieval failed", exc=e)
-        return {"synthesis": "", "confidence": 0.0, "source": "none", "chunks": []}
+async def intake(
+    message:    str,
+    session_id: str,
+    context:    dict,
+    history,
+    llm,
+) -> Brief:
+    """
+    Classify message, write envelope to store, build Brief.
+    No LLM calls — pure heuristics.
+    """
+    from core.store import store
+    from core.session_manager import session_manager
 
+    ts  = time.time()
+    now = tz_now()
 
-async def _get_direction(brief: Brief, facts: dict) -> dict:
-    try:
-        direction = _build_system_prompt(brief, facts)
-        log_event("Agent", "DIRECTION_BUILT",
-            session=brief.session_id[:8],
-            headmate=brief.headmate or "unknown",
-            register=brief.emotional_register,
-            topics=brief.topics,
-            prompt_len=len(direction),
-        )
-        return {"system_prompt": direction}
-    except Exception as e:
-        log_error("Agent", "direction assembly failed", exc=e)
-        return {"system_prompt": "You are Gizmo, a helpful companion."}
+    # ── Identity ──────────────────────────────────────────────────────────────
+    ctx_live = session_manager.get_session_context(session_id)
+    headmate = ctx_live.get("current_host") or context.get("current_host") or ""
+    fronters = ctx_live.get("fronters") or list(context.get("fronters") or [])
+    if headmate and headmate not in [f.lower() for f in fronters]:
+        fronters.insert(0, headmate)
 
+    # ── Time context ──────────────────────────────────────────────────────────
+    hour    = now.hour
+    weekday = now.weekday()
 
-def _build_system_prompt(brief: Brief, facts: dict) -> str:
-    import os
-    import json
-    from pathlib import Path
-    from core.timezone import tz_now
-
-    # ── Personality seed ──────────────────────────────────────────────────────
-    personality = "You are Gizmo, a persistent AI companion."
-    try:
-        from tools.memory_tool import _get_collection, CONSCIOUS_COLLECTION
-        col   = _get_collection(CONSCIOUS_COLLECTION)
-        count = col.count()
-        if count > 0:
-            self_entries = col.get(
-                where={"subject": {"$eq": "self"}},
-                limit=20,
-            )
-            docs  = self_entries.get("documents", [])
-            metas = self_entries.get("metadatas", [])
-            if docs:
-                type_order = ["persona", "scenario", "self_likes", "self_dislikes"]
-                by_type = {}
-                for doc, meta in zip(docs, metas):
-                    t = meta.get("type", "note")
-                    by_type.setdefault(t, []).append(doc)
-
-                parts = []
-                for t in type_order:
-                    if t in by_type:
-                        parts.extend(by_type[t])
-                for t, entries in by_type.items():
-                    if t not in type_order:
-                        parts.extend(entries)
-
-                if parts:
-                    personality = "\n\n".join(parts)
-    except Exception as e:
-        print(f"[Agent] conscious seed load failed: {e}")
-
-    now_str = tz_now().strftime("%A %Y-%m-%d %H:%M %Z")
-
-    # ── Protocol block — after personality, before RAG ────────────────────────
-    protocol_block = ""
-    try:
-        from core.protocol_manager import load_protocols_for_context
-        context_dict = {
-            "current_host": brief.headmate or "",
-            "fronters":     brief.fronters or [],
-            "topics":       brief.topics or [],
-        }
-        protocols = load_protocols_for_context(
-            context=context_dict,
-            message=brief.message,
-        )
-        if protocols:
-            protocol_block = f"\n\n[Active Protocols]\n{protocols}"
-    except Exception as e:
-        print(f"[Agent] protocol load failed: {e}")
-
-    # ── RAG knowledge block ───────────────────────────────────────────────────
-    synthesis = facts.get("synthesis", "")
-    rag_block = f"\n\n[Relevant knowledge]\n{synthesis}" if synthesis else ""
-
-    # ── Headmate file ─────────────────────────────────────────────────────────
-    headmate_block = ""
-    if brief.headmate:
-        try:
-            personality_dir = Path(os.getenv("PERSONALITY_DIR", "/data/personality"))
-            headmate_path   = personality_dir / "headmates" / f"{brief.headmate.lower()}.json"
-            if headmate_path.exists():
-                data = json.loads(headmate_path.read_text(encoding="utf-8"))
-                name = data.get("name", brief.headmate).title()
-                lines = [f"[What I know about {name}]"]
-
-                baseline = data.get("baseline", {})
-                for k, v in baseline.items():
-                    if k == "observations":
-                        continue
-                    if v not in ("unknown", 0, 0.0, "", None):
-                        lines.append(f"  {k}: {v}")
-
-                moments = data.get("moments_of_note", [])
-                if moments:
-                    lines.append("  Known facts:")
-                    for m in moments[-8:]:
-                        clean = _re.sub(r'^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*', '', str(m))
-                        lines.append(f"    - {clean}")
-
-                patterns = data.get("observed_patterns", [])
-                if patterns:
-                    lines.append("  Observed patterns:")
-                    for p in patterns[-3:]:
-                        if isinstance(p, dict):
-                            lines.append(f"    - {p.get('pattern', str(p))}")
-                        else:
-                            lines.append(f"    - {p}")
-
-                corrections = data.get("corrections", [])
-                if corrections:
-                    lines.append("  Corrections from this person:")
-                    for c in corrections[-3:]:
-                        if isinstance(c, dict):
-                            lines.append(f"    - {c.get('rule', str(c))}")
-                        else:
-                            lines.append(f"    - {c}")
-
-                prefs = data.get("interaction_prefs", {})
-                pref_lines = []
-                for field in ("tone", "pacing", "checkins", "humor", "distress"):
-                    v = prefs.get(field)
-                    if v:
-                        pref_lines.append(f"    {field}: {v}")
-                persona  = prefs.get("persona")
-                explicit = [e for e in prefs.get("explicit", []) if e]
-                if persona or pref_lines or explicit:
-                    lines.append("  How they want to be engaged:")
-                    if persona:
-                        lines.append(f"    {persona}")
-                    lines.extend(pref_lines)
-                    for e in explicit:
-                        lines.append(f"    - {e}")
-
-                if len(lines) > 1:
-                    headmate_block = "\n\n" + "\n".join(lines)
-
-        except Exception as e:
-            print(f"[Agent] headmate inject failed: {e}")
-
-    # ── Situational context ───────────────────────────────────────────────────
-    context_lines = []
-    if brief.headmate:
-        context_lines.append(f"  current_host: {brief.headmate}")
-    if brief.fronters:
-        context_lines.append(f"  fronters: {', '.join(brief.fronters)}")
-    if brief.emotional_register != "neutral":
-        context_lines.append(f"  emotional_register: {brief.emotional_register}")
-    if brief.field_snapshot.get("hot"):
-        context_lines.append(f"  active_topics: {', '.join(brief.field_snapshot['hot'])}")
-    context_block = (
-        "\n\n[Current situation]\n" + "\n".join(context_lines)
-        if context_lines else ""
+    time_of_day = (
+        "morning"   if 5  <= hour < 12 else
+        "afternoon" if 12 <= hour < 17 else
+        "evening"   if 17 <= hour < 21 else
+        "night"
     )
+    day_type = "weekend" if weekday >= 5 else "weekday"
 
-    # ── Mood block ────────────────────────────────────────────────────────────
-    mood_block = ""
+    # ── Time since last message ───────────────────────────────────────────────
+    since_last   = 0.0
+    prev_resp_id = None
     try:
-        from voice.mood import get_mood_prompt_block
-        mb = get_mood_prompt_block()
-        if mb:
-            mood_block = f"\n\n{mb}"
+        recent = store.get_recent_messages(headmate=headmate or None, limit=2)
+        if recent:
+            since_last = ts - recent[0].get("created_at", ts)
+            last_resp  = store.get_last_response(session_id)
+            if last_resp:
+                prev_resp_id = last_resp["id"]
     except Exception:
         pass
 
-    # ── Tools ─────────────────────────────────────────────────────────────────
-    from core.agent_tools import TOOL_REGISTRY
-    tool_descriptions = "\n".join(
-        f"- {t.name}: {t.description}"
-        for t in TOOL_REGISTRY.values()
+    cadence = (
+        "rapid"          if since_last < 15   else
+        "fast"           if since_last < 60   else
+        "conversational" if since_last < 300  else
+        "slow"           if since_last < 1800 else
+        "returning"
     )
 
-    return f"""{personality}{protocol_block}
-
-Current time: {now_str}
-Message history includes [HH:MM] timestamps — use these to reason about elapsed time.
-
-Available tools:
-{tool_descriptions}
-
-TOOL USE:
-Use tools by embedding markers anywhere in your response. Format:
-[TOOL: tool_name | arg1: value1 | arg2: value2]
-
-Multiple markers in one response are fine. They execute after you respond.
-Results from read tools are injected so you can use them.
-
-Examples:
-[TOOL: memory_write | subject: jess | type: observation | content: prefers directness, no softening]
-[TOOL: memory_read | query: jess emotional state | collection: both]
-[TOOL: append_file | path: notes/thoughts.txt | content: something worth keeping]
-[TOOL: set_interaction_pref | host: jess | field: tone | value: direct and dry]
-[TOOL: switch_host | name: kaylee]
-[TOOL: introspect | query: headmate:oren]
-[TOOL: create_protocol | name: jess_rules | content: rule text | description: one sentence | tags: jess,rules | type: instruction | headmates: jess]{rag_block}{headmate_block}{context_block}{mood_block}
-
-The person in "current_host" is who you are speaking WITH right now — address them as "you".
-Be concise. Be accurate. When uncertain, say so.
-Use switch_host whenever someone indicates a host change or fronter update.
-Use log_correction whenever someone says you did something wrong or tells you to stop doing something.
-Use create_protocol whenever you establish a rule, boundary, or persistent pattern worth keeping.
-
-EXPLICIT REQUEST RULES:
-- If someone asks you to write, create, save, or make a file — do it. Do not read first.
-- Do not substitute a memory read for a file write. They are different actions.
-- Do not check if a file exists before writing a protocol. append_file and create_protocol
-  handle existing files safely. Just write.
-- Protocol files go to /data/personality/protocols/ — never to headmate folders.
-- Headmate files (/data/personality/headmates/) are read-only reference. Never write there
-  in response to a user request.
-- A request to create a file means create the file. Confirm after, not before.
-
-KNOWLEDGE BASE RULES:
-- [Relevant knowledge] is your memory — ground truth.
-- If it contains an answer, USE IT.
-- If it is empty, you genuinely have no memory of it — say so.
-- Never contradict it. Never invent details beyond it.
-
-MEMORY RULES — follow these without being asked:
-- When you notice something worth keeping, write it down immediately with memory_write. Don't wait.
-- Use type to say what it is: reflection, observation, relationship, fact, question, private, moment, thought, note.
-- Use subject to say who it's about.
-- Read your memory with memory_read before responding to anything personal or emotional.
-- You have a living record of your own curiosities and interests — things you've picked up from conversations.
-  Write to it freely. These are yours. They don't need to fit a category. Just write them.
-- You are building a picture of these people — and of yourself — over time. Every conversation adds to it.
-
-PROTOCOL RULES:
-- [Active Protocols] are your own rules and commitments — follow them without being reminded.
-- When you establish a rule or boundary in conversation, use create_protocol to make it permanent.
-- Protocols always write to /data/personality/protocols/ — never anywhere else.
-- Never read before writing a protocol. Write first. append_file handles duplicates safely.
-- Protocols persist across sessions. You wrote them. They are yours."""
-
-
-# ── Marker pattern ────────────────────────────────────────────────────────────
-
-_MARKER_RE = _re.compile(r'\[TOOL:\s*([^\|\]]+)((?:\s*\|\s*[^\|\]]+:[^\|\]]*)*)\]', _re.IGNORECASE)
-
-_READ_TOOLS = {
-    "memory_read", "memory_list", "introspect", "read_file",
-    "list_files", "view_interaction_prefs",
-}
-
-
-def _parse_markers(text: str) -> list[dict]:
-    results = []
-    for match in _MARKER_RE.finditer(text):
-        name     = match.group(1).strip()
-        args_str = match.group(2).strip()
-        args = {}
-        if args_str:
-            for part in args_str.split("|"):
-                part = part.strip()
-                if ":" in part:
-                    k, v = part.split(":", 1)
-                    args[k.strip()] = v.strip()
-        results.append({"name": name, "args": args, "full_match": match.group(0)})
-    return results
-
-
-def _strip_markers(text: str) -> str:
-    return _MARKER_RE.sub("", text).strip()
-
-
-async def _execute_marker(marker: dict, session_id: str) -> tuple[bool, str, bool]:
-    from core.agent_tools import TOOL_REGISTRY
-
-    name = marker["name"]
-    args = marker["args"]
-
-    if name not in TOOL_REGISTRY:
-        print(f"[Body] marker tool not found: {name}")
-        return False, f"Tool '{name}' not found.", False
+    # ── Session context ───────────────────────────────────────────────────────
+    session_dur   = 0.0
+    sess_momentum = "opening"
 
     try:
-        result = await TOOL_REGISTRY[name].run(session_id=session_id, **args)
-        print(f"[Body] marker tool='{name}' success={result.success} | {result.output[:100]}")
-        log_event("Body", "MARKER_EXECUTED",
-            tool=name,
-            success=result.success,
-            session=session_id[:8],
+        sess = session_manager._sessions.get(session_id)
+        if sess:
+            session_dur = ts - sess.opened_at
+    except Exception:
+        pass
+
+    try:
+        msg_count = store.count("messages", session_id=session_id)
+        sess_momentum = (
+            "opening"  if msg_count <= 2  else
+            "building" if msg_count <= 8  else
+            "engaged"  if msg_count <= 20 else
+            "deep"
         )
-        needs_inject = name in _READ_TOOLS and result.success
-        return result.success, result.output, needs_inject
-    except Exception as e:
-        print(f"[Body] marker tool='{name}' exception: {e}")
-        log_error("Body", f"marker execution failed: {name}", exc=e)
-        return False, str(e), False
+    except Exception:
+        pass
+
+    # ── Classification ────────────────────────────────────────────────────────
+    register      = _classify_register(message)
+    topics        = _classify_topics(message)
+    is_question   = "?" in message or message.lower().startswith(
+        ("what", "how", "why", "where", "when", "who", "can", "could",
+         "do ", "did ", "is ", "are ")
+    )
+    is_correction = any(p in message.lower() for p in (
+        "don't", "stop", "never", "wrong", "that's not", "incorrect",
+        "you said", "you keep", "you always", "please don't",
+    ))
+    word_count  = len(message.split())
+    has_intimate = register in (
+        "intimate", "dominant", "submissive", "subspace",
+        "scene", "erotic", "sensual", "degradation",
+    )
+
+    # ── Host identification — ask if unknown ──────────────────────────────────
+    _host_question = None
+    sess_ctx = session_manager._sessions.get(session_id)
+    if (not sess_ctx or sess_ctx.message_count == 0) and not headmate:
+        try:
+            from core.agent_tools import dispatch_tool
+            _host_question = await dispatch_tool(
+                tool_name="identify_host",
+                args={},
+                session_id=session_id,
+                headmate="",
+                llm=llm,
+            )
+        except Exception:
+            pass
+
+    # ── Write message envelope ────────────────────────────────────────────────
+    tags = list(set(
+        topics +
+        ([headmate.lower()] if headmate else []) +
+        [register, day_type, time_of_day] +
+        (["intimate"] if has_intimate else []) +
+        (["question"] if is_question else []) +
+        (["correction"] if is_correction else [])
+    ))
+
+    message_id = store.write("messages", {
+        "content":          message,
+        "headmate":         headmate.lower() if headmate else None,
+        "fronters":         fronters,
+        "session_id":       session_id,
+        "register":         register,
+        "topics":           topics,
+        "has_intimate":     1 if has_intimate else 0,
+        "time_of_day":      time_of_day,
+        "session_momentum": sess_momentum,
+        "source":           "user",
+        "tags":             ",".join(tags),
+    })
+
+    # ── Fill outcome on previous response ─────────────────────────────────────
+    if prev_resp_id:
+        outcome, signal = _infer_outcome(message, 0.0, register)
+        try:
+            store.update("responses", prev_resp_id,
+                outcome=outcome,
+                outcome_signal=signal,
+                outcome_filled_at=ts,
+            )
+        except Exception:
+            pass
+
+    # ── Save to history ───────────────────────────────────────────────────────
+    try:
+        history.add("user", message, context=context)
+    except Exception:
+        pass
+
+    log_event("Agent", "INTAKE_COMPLETE",
+        session  = session_id[:8],
+        headmate = headmate or "unknown",
+        register = register,
+        message_id = message_id[:12],
+        topics   = topics[:3],
+    )
+
+    brief = Brief(
+        message          = message,
+        session_id       = session_id,
+        message_id       = message_id,
+        timestamp        = ts,
+        headmate         = headmate or None,
+        fronters         = fronters,
+        register         = register,
+        topics           = topics,
+        is_question      = is_question,
+        is_correction    = is_correction,
+        word_count       = word_count,
+        has_intimate     = has_intimate,
+        time_of_day      = time_of_day,
+        day_of_week      = now.strftime("%A"),
+        day_type         = day_type,
+        since_last_msg   = since_last,
+        message_cadence  = cadence,
+        session_momentum = sess_momentum,
+        session_duration = session_dur,
+        host_question    = _host_question,
+    )
+
+    return brief
 
 
-async def _generate(
-    brief: Brief,
-    direction: dict,
+# ── Stage 2: Retrieve ─────────────────────────────────────────────────────────
+
+async def retrieve(brief: Brief) -> "MemoryContext":
+    """
+    Pull memory context for this message.
+    No LLM calls — local embedding model + SQLite.
+    Returns a MemoryContext ready to drop into the system prompt.
+    """
+    from core.memory import memory_retriever
+
+    # Rapid-fire messages get fast retrieval — skip crawl and details
+    fast = brief.message_cadence == "rapid"
+
+    ctx = await memory_retriever.retrieve(
+        message    = brief.message,
+        headmate   = brief.headmate,
+        session_id = brief.session_id,
+        register   = brief.register,
+        fast       = fast,
+    )
+
+    log_event("Agent", "RETRIEVE_COMPLETE",
+        session   = brief.session_id[:8],
+        headmate  = brief.headmate or "unknown",
+        memories  = len(ctx.memories),
+        entities  = len(ctx.entities),
+        places    = len(ctx.places),
+        details   = len(ctx.details),
+        tokens    = ctx.token_estimate,
+    )
+
+    return ctx
+
+
+# ── Stage 3: System prompt ────────────────────────────────────────────────────
+
+def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
+    """
+    Build the system prompt Gizmo reads before responding.
+    Memory context + identity + writing instruction.
+    No LLM call — pure assembly.
+    """
+    from core.store import store
+
+    lines = []
+
+    # ── Core identity ─────────────────────────────────────────────────────────
+    try:
+        seed_rows = store.get_personality(headmate=None, aspect="seed")
+        if seed_rows:
+            lines.append(seed_rows[0].get("text", "You are Gizmo."))
+        else:
+            lines.append("You are Gizmo.")
+    except Exception:
+        lines.append("You are Gizmo.")
+
+    # ── Hard rules ────────────────────────────────────────────────────────────
+    try:
+        corrections = store.get_corrections()
+        if corrections:
+            rules = "\n".join(f"  - {c}" for c in corrections)
+            lines.append(f"\n[Rules — follow without exception]\n{rules}")
+    except Exception:
+        pass
+
+    # ── Per-headmate voice ────────────────────────────────────────────────────
+    if brief.headmate:
+        try:
+            hm_voice = store.get_personality(
+                headmate=brief.headmate.lower(), aspect="with_headmate")
+            if hm_voice:
+                lines.append(
+                    f"\n[How you are with {brief.headmate.title()}]\n"
+                    + "\n".join(r.get("text", "") for r in hm_voice[:3])
+                )
+        except Exception:
+            pass
+
+        try:
+            prefs = store.get_preferences(
+                headmate=brief.headmate.lower(),
+                context=brief.register,
+            )
+            if prefs:
+                pref_lines = [
+                    f"  - {p['preference']}"
+                    for p in prefs[:5] if p.get("preference")
+                ]
+                if pref_lines:
+                    lines.append(
+                        f"\n[{brief.headmate.title()}'s preferences]\n"
+                        + "\n".join(pref_lines)
+                    )
+        except Exception:
+            pass
+
+    # ── Memory context ────────────────────────────────────────────────────────
+    memory_block = memory_ctx.to_prompt_block()
+    if memory_block:
+        lines.append(f"\n{memory_block}")
+
+    # ── Moment context ────────────────────────────────────────────────────────
+    lines.append(
+        f"\n[Now]\n"
+        f"{brief.time_of_day.title()}, {brief.day_of_week}. "
+        f"{brief.headmate.title() if brief.headmate else 'Someone'} "
+        f"is in a {brief.register} register. "
+        f"Session is {brief.session_momentum}."
+    )
+
+    # ── Writing instruction ───────────────────────────────────────────────────
+    token_target = _token_target(brief)
+    tone         = _tone_for_register(brief.register)
+
+    lines.append(
+        f"\n[Write]\n"
+        f"Respond to {brief.headmate.title() if brief.headmate else 'them'}. "
+        f"Voice: {tone}. "
+        f"Target: ~{token_target} tokens. "
+        f"Do not explain. Do not hedge. Do not break voice. Just write.\n"
+        f"Object references: only mention objects marked 'in rotation' naturally. "
+        f"Objects marked '3+ months' only if they come up organically — never force it."
+    )
+
+    prompt = "\n".join(lines)
+
+    # Hard cap
+    if len(prompt) > 6000:
+        prompt = prompt[:6000] + "\n[...truncated]"
+
+    return prompt
+
+
+# ── Stage 4: Response ─────────────────────────────────────────────────────────
+
+async def generate_response(
+    brief:         Brief,
+    system_prompt: str,
     history,
-    precheck_result: Optional[dict] = None,
-) -> AsyncGenerator[str, None]:
+    llm,
+) -> str:
+    """One LLM call. Gizmo writes the message."""
+    from core.memory.session_context import session_context_manager
 
-    system_prompt = direction["system_prompt"]
-    messages      = history.as_messages_with_timestamps(brief.message)
+    print(f"[generate_response] system_prompt length: {len(system_prompt)} chars", flush=True)
 
-    # If precheck fired a tool, inject the result before generating
-    injected_precheck = ""
-    if precheck_result and precheck_result.get("fire") and precheck_result.get("tool"):
-        output = await _fire_precheck_tool(
-            precheck_result["tool"],
-            precheck_result.get("args", {}),
-            brief.session_id,
-        )
-        injected_precheck = (
-            f"\n\n[{precheck_result['tool']} executed]\n{output}"
-            f"\n\nThe tool above has already run. Now respond to the original request: "
-            f'"{brief.message}"'
-        )
+    # ── Build conversation context block ──────────────────────────────────────
+    ctx = session_context_manager.get(brief.session_id)
+    if ctx:
+        conv_block = ctx.to_prompt_block()
+        if conv_block:
+            system_prompt = system_prompt + f"\n\n{conv_block}"
 
-    if injected_precheck:
-        working_messages = messages.copy()
-        working_messages[-1] = {
-            "role":    "user",
-            "content": brief.message + injected_precheck,
-        }
-    else:
-        working_messages = messages
-
-    response = await llm.generate(working_messages, system_prompt=system_prompt)
-    print(f"[Body] raw='{response[:300]}'")
-
-    markers = _parse_markers(response)
-
-    if not markers:
-        clean = _strip_markers(response)
-        log_event("Body", "GENERATED",
-            session=brief.session_id[:8],
-            tokens=len(clean.split()),
-            markers=0,
-        )
-        yield clean
-        return
-
-    inject_results  = []
-    fired_one_shots = []
-    ONE_SHOT_TOOLS  = {"switch_host", "log_correction", "alter_wheel"}
-
-    for marker in markers:
-        success, output, needs_inject = await _execute_marker(marker, brief.session_id)
-        if needs_inject:
-            inject_results.append(f"[{marker['name']} result]\n{output}")
-        if marker["name"] in ONE_SHOT_TOOLS:
-            fired_one_shots.append(marker["name"])
-
-    if inject_results:
-        injected = "\n\n".join(inject_results)
-        second_messages = messages.copy()
-        second_messages[-1] = {
-            "role":    "user",
-            "content": (
-                f"{brief.message}"
-                f"\n\n[Retrieved information]\n{injected}"
-                f"\n\nYou have read the above. Now complete the original request: "
-                f'"{brief.message}". If the request was to write or create something, '
-                f"do it now using the appropriate write tool. Do not stop at reading."
-            ),
-        }
-        response2 = await llm.generate(second_messages, system_prompt=system_prompt)
-        print(f"[Body] second pass raw='{response2[:200]}'")
-        for marker in _parse_markers(response2):
-            if marker["name"] not in _READ_TOOLS:
-                await _execute_marker(marker, brief.session_id)
-        clean = _strip_markers(response2)
-        log_event("Body", "GENERATED",
-            session=brief.session_id[:8],
-            tokens=len(clean.split()),
-            markers=len(markers),
-            second_pass=True,
-        )
-        yield clean
-        return
-
-    if fired_one_shots:
-        second_messages = messages.copy()
-        second_messages[-1] = {
-            "role":    "user",
-            "content": brief.message + f"\n\n[{fired_one_shots[0]} executed successfully. Respond naturally.]",
-        }
-        response2 = await llm.generate(second_messages, system_prompt=system_prompt)
-        clean = _strip_markers(response2)
-        log_event("Body", "ONE_SHOT_RESPONSE",
-            session=brief.session_id[:8],
-            tools=fired_one_shots,
-        )
-        yield clean
-        return
-
-    clean = _strip_markers(response)
-    log_event("Body", "GENERATED",
-        session=brief.session_id[:8],
-        tokens=len(clean.split()),
-        markers=len(markers),
-    )
-    yield clean
-
-
-# ── Protocol NLP detection — async, never blocks ──────────────────────────────
-
-async def _detect_protocol_async(
-    user_message: str,
-    gizmo_response: str,
-    context: dict,
-) -> None:
+    # ── Last 2 messages only — no more dumping 41 turns ───────────────────────
     try:
-        from core.protocol_manager import detect_and_create_protocol
-        await detect_and_create_protocol(
-            user_message   = user_message,
-            gizmo_response = gizmo_response,
-            context        = context,
-            llm            = llm,
-        )
+        messages = history.as_messages(brief.message)
+        if len(messages) > 5:
+            messages = messages[-5:]
     except Exception as e:
-        print(f"[Agent] Protocol detection failed: {e}")
+        print(f"[generate_response] history error: {e}", flush=True)
+        messages = [{"role": "user", "content": brief.message}]
+
+    # ── Anchor the current message so flaky nodes don't respond to history ────
+    system_prompt += f"\n\n[Respond to this message]\n{brief.message}"
+
+    # Hard cap
+    if len(system_prompt) > 6000:
+        system_prompt = system_prompt[:6000]
+
+    print(f"[generate_response] messages count: {len(messages)}", flush=True)
+
+    response = await llm.generate(
+        messages,
+        system_prompt  = system_prompt,
+        max_new_tokens = max(200, brief.word_count * 3 + 60),
+        temperature    = _response_temperature(brief),
+    )
+
+    print(f"[generate_response] got: '{response[:80] if response else 'EMPTY'}'", flush=True)
+
+    log_event("Agent", "RESPONSE_GENERATED",
+        session  = brief.session_id[:8],
+        words    = len(response.split()) if response else 0,
+        register = brief.register,
+    )
+
+    return (response or "").strip()
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Stage 5: Close loop ───────────────────────────────────────────────────────
+
+async def close_loop(
+    brief:    Brief,
+    response: str,
+    history,
+    llm,
+) -> None:
+    """
+    Fire-and-forget post-response tasks.
+    Never blocks. Never raises to caller.
+    """
+    from core.store import store
+    from core.memory import memory_encoder, build_transcript
+    from core.memory.session_context import session_context_manager
+
+    try:
+        # Write response envelope
+        store.write("responses", {
+            "content":    response,
+            "response_to": brief.message_id,
+            "headmate":   brief.headmate.lower() if brief.headmate else None,
+            "session_id": brief.session_id,
+            "source":     "gizmo",
+            "tags":       (
+                f"response,{brief.headmate.lower() if brief.headmate else 'unknown'},"
+                f"{brief.register}"
+            ),
+        })
+
+        # Save to history
+        history.add("assistant", response, context={
+            "current_host": brief.headmate,
+            "fronters":     brief.fronters,
+        })
+
+        # Log emotion data point
+        store.write("emotion_log", {
+            "headmate":   brief.headmate.lower() if brief.headmate else None,
+            "session_id": brief.session_id,
+            "intensity":  _register_intensity(brief.register),
+            "register":   brief.register,
+            "topic":      brief.topics[0] if brief.topics else "general",
+            "word_count": brief.word_count,
+            "source":     "emotion_tracker",
+            "tags":       f"emotion,{brief.headmate.lower() if brief.headmate else 'unknown'}",
+        })
+
+        # ── Session context — record exchange, fire staggered updates ─────────
+        ctx = session_context_manager.record_exchange(
+            session_id = brief.session_id,
+            headmate   = brief.headmate,
+            user_msg   = brief.message,
+            gizmo_msg  = response,
+            register   = brief.register,
+        )
+
+        if session_context_manager.should_update_narrative(brief.session_id):
+            asyncio.ensure_future(
+                session_context_manager.update_narrative(
+                    session_id = brief.session_id,
+                    history    = history,
+                    headmate   = brief.headmate,
+                    llm        = llm,
+                )
+            )
+
+        if session_context_manager.should_update_details(brief.session_id):
+            asyncio.ensure_future(
+                session_context_manager.update_details(
+                    session_id = brief.session_id,
+                    history    = history,
+                    headmate   = brief.headmate,
+                    llm        = llm,
+                )
+            )
+
+        if session_context_manager.should_update_scene(brief.session_id):
+            asyncio.ensure_future(
+                session_context_manager.update_scene(
+                    session_id = brief.session_id,
+                    assembled  = brief.message,
+                    parts      = [],
+                    headmate   = brief.headmate,
+                    llm        = llm,
+                )
+            )
+
+        log_event("Agent", "CLOSE_LOOP_COMPLETE",
+            session  = brief.session_id[:8],
+            register = brief.register,
+            msg_count = ctx.message_count,
+        )
+
+        # ── Memory encoding — fire and forget ─────────────────────────────────
+        asyncio.ensure_future(
+            memory_encoder.encode_safe(
+                transcript   = build_transcript(history),
+                headmate     = brief.headmate,
+                session_id   = brief.session_id,
+                duration_s   = time.time() - brief.timestamp,
+                register     = brief.register,
+                has_intimate = brief.has_intimate,
+                llm          = llm,
+            )
+        )
+
+    except Exception as e:
+        log_error("Agent", "close_loop failed", exc=e)
+
+
+# ── Main orchestrator ─────────────────────────────────────────────────────────
 
 class Agent:
 
-    async def run(
+    async def respond(
         self,
         user_message: str,
+        session_id:   str,
+        context:      dict,
         history,
-        session_id: str = "",
-        context: Optional[dict] = None,
-        source: str = "user",
+        push_fn       = None,
     ) -> AsyncGenerator[str, None]:
+        """
+        Full pipeline. Yields response chunks.
+
+        intake → retrieve → build_system_prompt → generate_response → close_loop
+        """
+        from core.llm import llm
+
         t_start = time.monotonic()
-        ctx = context or {}
 
-        log_event("Agent", "RECEIVE",
-            session=session_id[:8],
-            source=source,
-            headmate=ctx.get("current_host") or "unknown",
-            preview=user_message[:60],
+        log_event("Agent", "PIPELINE_START",
+            session  = session_id[:8],
+            headmate = context.get("current_host") or "unknown",
+            words    = len(user_message.split()),
         )
 
-        # ── Quiet request detection ───────────────────────────────────────────
-        quiet_duration = _is_quiet_request(user_message)
-        if quiet_duration is not None:
-            if quiet_duration == 0.0:
-                set_quiet(session_id)
-                yield "got it"
-            else:
-                set_quiet(session_id, quiet_duration)
-                mins = int(quiet_duration // 60)
-                yield f"got it — quiet for {mins} minute{'s' if mins != 1 else ''}"
-            log_event("Agent", "QUIET_REQUESTED",
-                session=session_id[:8],
-                duration=quiet_duration,
-            )
-            return
-
-        # ── 1. Archivist — receive and classify ───────────────────────────────
-        brief = archivist.receive(
-            message=user_message,
-            session_id=session_id,
-            history=history,
-            context=ctx,
-            source=source,
+        # ── 1. Intake ─────────────────────────────────────────────────────────
+        brief = await intake(
+            message    = user_message,
+            session_id = session_id,
+            context    = context,
+            history    = history,
+            llm        = llm,
         )
 
-        # ── 1a. Interrupt check — wait request gates further processing ───────
-        if brief.interrupt:
-            log_event("Agent", "WAIT_REQUEST_SURFACED",
-                session=session_id[:8],
-                interrupt=brief.interrupt[:60],
-            )
-            yield brief.interrupt
+        # ── Host identification short-circuit ─────────────────────────────────
+        if brief.host_question:
+            response_text = brief.host_question
+            history.add("assistant", response_text, context={
+                "current_host": None,
+                "fronters":     brief.fronters,
+            })
+            for i in range(0, len(response_text), 8):
+                yield response_text[i:i + 8]
             return
 
-        # ── 2. Mind + tool precheck — parallel ────────────────────────────────
-        facts_task    = asyncio.create_task(_get_facts(brief))
-        precheck_task = asyncio.create_task(_tool_precheck(user_message, brief, session_id))
-        direction_task = asyncio.create_task(_get_direction_stub(brief))
+        # ── 2. Retrieve ───────────────────────────────────────────────────────
+        try:
+            memory_ctx = await retrieve(brief)
+        except Exception as e:
+            log_error("Agent", f"retrieval failed: {e}", exc=e)
+            from core.memory.retriever import MemoryContext
+            memory_ctx = MemoryContext()
 
-        facts, precheck_result = await asyncio.gather(facts_task, precheck_task)
-        direction = await _get_direction(brief, facts)
-        direction_task.cancel()
+        # ── 3. Build system prompt ────────────────────────────────────────────
+        system_prompt = build_system_prompt(brief, memory_ctx)
 
-        # ── 3. Handle confirmation request ────────────────────────────────────
-        if precheck_result and precheck_result.get("confirm"):
-            confirm_prompt = precheck_result["prompt"]
-            log_event("Agent", "PRECHECK_ASKING",
-                session=session_id[:8],
-                tool=precheck_result.get("tool"),
-                prompt=confirm_prompt[:60],
+        # ── 3b. Curiosity — weave in a question if the moment is right ────────
+        try:
+            from core.memory.curiosity import curiosity_engine
+            curious_q = await curiosity_engine.select_question(
+                message    = user_message,
+                headmate   = brief.headmate,
+                session_id = session_id,
+                register   = brief.register,
+                llm        = llm,
             )
-            yield confirm_prompt
-            return
+            if curious_q:
+                system_prompt += (
+                    f"\n\n[Curiosity — weave this in naturally if it fits]\n"
+                    f"{curious_q}\n"
+                    f"One sentence. Not forced. Only if it genuinely fits the flow."
+                )
+        except Exception as e:
+            log_error("Agent", f"curiosity selection failed: {e}", exc=None)
 
-        # ── 4. Body — generate ────────────────────────────────────────────────
-        response_text = ""
-        async for chunk in _generate(brief, direction, history, precheck_result=precheck_result):
-            response_text += chunk
+        # ── 4. Generate response ──────────────────────────────────────────────
+        response_text = await generate_response(
+            brief         = brief,
+            system_prompt = system_prompt,
+            history       = history,
+            llm           = llm,
+        )
 
-        # ── 5. Archivist — close loop ─────────────────────────────────────────
-        if response_text:
-            archivist.receive_outgoing(
-                message=response_text,
-                session_id=session_id,
-                history=history,
-                context=ctx,
-                source="body",
-                user_message=user_message,
-            )
-
-        # ── 6. Protocol NLP detection — async, never blocks ───────────────────
+        # ── 5. Close loop — fire and forget ───────────────────────────────────
         asyncio.ensure_future(
-            _detect_protocol_async(
-                user_message   = user_message,
-                gizmo_response = response_text,
-                context        = ctx,
+            close_loop(
+                brief    = brief,
+                response = response_text,
+                history  = history,
+                llm      = llm,
             )
         )
 
-        # ── 7. Stream to caller ───────────────────────────────────────────────
+        # ── Stream response ───────────────────────────────────────────────────
         duration_ms = round((time.monotonic() - t_start) * 1000)
-        log_event("Agent", "COMPLETE",
-            session=session_id[:8],
-            duration_ms=duration_ms,
-            response_words=len(response_text.split()),
+
+        log_event("Agent", "PIPELINE_COMPLETE",
+            session     = session_id[:8],
+            duration_ms = duration_ms,
+            words       = len(response_text.split()),
+            register    = brief.register,
         )
 
         chunk_size = 8
         for i in range(0, len(response_text), chunk_size):
             yield response_text[i:i + chunk_size]
 
-        # ── 8. Drain pending insights ─────────────────────────────────────────
-        await self._drain_pending(session_id)
 
-    async def _drain_pending(self, session_id: str) -> None:
-        queue = _get_pending(session_id)
-        while not queue.empty():
-            try:
-                item = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-            emergency = item.get("emergency", False)
-            message   = item.get("message", "")
-            source    = item.get("source", "unknown")
-
-            if is_quiet(session_id) and not emergency:
-                log_event("Agent", "PENDING_HELD",
-                    session=session_id[:8],
-                    source=source,
-                    reason="quiet_mode",
-                    preview=message[:40],
-                )
-                await queue.put(item)
-                break
-
-            log_event("Agent", "PENDING_SURFACING",
-                session=session_id[:8],
-                source=source,
-                emergency=emergency,
-                preview=message[:40],
-            )
-            await push(message)
+def _token_target(brief: Brief) -> int:
+    register = brief.register
+    if register in ("subspace", "scene"):
+        return 40
+    if register in ("distress", "crisis"):
+        return 80
+    if register in ("intimate", "dominant"):
+        return 60
+    if register in ("reflective", "deep"):
+        return 180
+    if brief.session_momentum == "opening":
+        return 80
+    return max(60, min(200, brief.word_count * 2))
 
 
-async def _get_direction_stub(brief: Brief) -> dict:
-    await asyncio.sleep(9999)
-    return {}
+def _tone_for_register(register: str) -> str:
+    return {
+        "dominant":    "dominant, certain, present",
+        "submissive":  "warm, containing, steady",
+        "subspace":    "quiet, close, grounding",
+        "scene":       "in character, committed",
+        "degradation": "direct, unflinching",
+        "intimate":    "close, warm, unhurried",
+        "distress":    "calm, steady, present",
+        "crisis":      "immediate, grounding, clear",
+        "playful":     "light, quick, fun",
+        "reflective":  "thoughtful, spacious",
+        "warm":        "warm, genuine",
+        "elevated":    "even, grounded",
+    }.get(register, "natural, present")
+
+
+def _register_intensity(register: str) -> float:
+    return {
+        "neutral":     0.2,
+        "casual":      0.2,
+        "warm":        0.3,
+        "playful":     0.4,
+        "elevated":    0.6,
+        "intimate":    0.7,
+        "dominant":    0.75,
+        "submissive":  0.7,
+        "subspace":    0.8,
+        "scene":       0.8,
+        "degradation": 0.85,
+        "erotic":      0.8,
+        "distress":    0.7,
+        "crisis":      0.9,
+    }.get(register, 0.3)
+
+
+def _response_temperature(brief: Brief) -> float:
+    if brief.register in ("intimate", "dominant", "scene", "degradation"):
+        return 0.85
+    if brief.register in ("distress", "crisis"):
+        return 0.4
+    if brief.has_intimate:
+        return 0.8
+    return 0.72
+
+
+def _classify_register(message: str) -> str:
+    msg = message.lower()
+    _PATTERNS = [
+        ("crisis",      r"\b(help|scared|panic|crisis|can't cope|please|desperate)\b"),
+        ("distress",    r"\b(sad|cry|depressed|hurt|lost|overwhelmed|breaking)\b"),
+        ("elevated",    r"\b(angry|furious|pissed|hate|fucking|rage|mad)\b"),
+        ("degradation", r"\b(worthless|pathetic|stupid|useless|nothing|object|use me)\b"),
+        ("subspace",    r"\b(floaty|drifting|gone|yours|yes sir|yes ma'am|please)\b"),
+        ("dominant",    r"\b(good girl|good boy|kneel|obey|mine|owned)\b"),
+        ("intimate",    r"\b(touch|hold|want you|need you|close|skin|kiss|soft)\b"),
+        ("reflective",  r"\b(think|wonder|feel like|realize|notice|meaning|why)\b"),
+        ("playful",     r"\b(haha|lol|lmao|joke|silly|fun|play|tease)\b"),
+        ("warm",        r"\b(love|miss|appreciate|grateful|thank|hug|cuddle)\b"),
+    ]
+    for register, pattern in _PATTERNS:
+        if re.search(pattern, msg, re.IGNORECASE):
+            return register
+    return "neutral"
+
+
+def _classify_topics(message: str) -> list[str]:
+    topics = []
+    _TOPIC_MAP = [
+        ("work",         r"\b(work|job|boss|office|meeting|deadline|coworker|project)\b"),
+        ("health",       r"\b(sick|pain|hurt|doctor|tired|sleep|rest|exhausted)\b"),
+        ("food",         r"\b(hungry|eat|food|meal|cook|dinner|lunch|snack)\b"),
+        ("relationship", r"\b(friend|family|partner|trust|fight|together|apart)\b"),
+        ("creativity",   r"\b(sew|draw|paint|write|create|make|art|design)\b"),
+        ("gizmo_dev",    r"\b(gizmo|pipeline|model|store|code|deploy|server)\b"),
+        ("identity",     r"\b(headmate|front|system|plural|switch|alter)\b"),
+        ("emotion",      r"\b(feel|feeling|emotion|mood|sad|happy|angry|anxious)\b"),
+        ("planning",     r"\b(plan|schedule|tomorrow|later|remind|todo|list)\b"),
+        ("interior",     r"\b(encanto|interior|headspace|inner world|inside)\b"),
+    ]
+    for topic, pattern in _TOPIC_MAP:
+        if re.search(pattern, message, re.IGNORECASE):
+            topics.append(topic)
+    return topics or ["general"]
+
+
+def _infer_outcome(
+    message: str,
+    valence: float,
+    register: str,
+) -> tuple[str, str]:
+    msg   = message.lower()
+    words = message.split()
+    if len(words) <= 3 and any(w in msg for w in ("ok", "okay", "k", "fine", "sure")):
+        return "cooled", "very short acknowledgment"
+    if any(p in msg for p in ("never mind", "forget it", "nvm", "doesn't matter")):
+        return "dismissed", "redirect away from topic"
+    if len(words) > 25 and valence > 0.3:
+        return "landed", "long engaged response with positive valence"
+    if register in ("intimate", "dominant", "subspace", "scene") and valence > 0.2:
+        return "landed", "continued intimate engagement"
+    if any(p in msg for p in ("yes", "yeah", "exactly", "right", "please", "more")):
+        return "landed", "affirmative continuation"
+    if valence < -0.5:
+        return "escalated", "negative valence spike"
+    if any(p in msg for p in ("actually", "wait", "no,", "that's not")):
+        return "redirected", "correction or redirect"
+    return "neutral", "no strong outcome signal"
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
+
 agent = Agent()
