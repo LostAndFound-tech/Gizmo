@@ -372,3 +372,57 @@ class SessionManager:
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
 session_manager = SessionManager()
+# ── Monkey-patch facade methods onto SessionManager ───────────────────────────
+# These make session_manager the single point of contact for server.py,
+# wrapping host_tracker and memory.history internally.
+
+def _get_history(self, session_id: str):
+    """Return the ConversationHistory for a session."""
+    from memory.history import get_session
+    return get_session(session_id)
+
+def _get_session_context(self, session_id: str) -> dict:
+    """Return current host/fronter context for a session."""
+    try:
+        from core.host_tracker import host_tracker
+        return host_tracker.get_context(session_id)
+    except Exception:
+        return {}
+
+def _set_host(
+    self,
+    session_id: str,
+    headmate:   str,
+    confidence: float = 1.0,
+    fronters:   list  = None,
+) -> None:
+    """Set current host for a session."""
+    try:
+        from core.host_tracker import host_tracker
+        host_tracker.set_host(session_id, headmate, confidence)
+        if fronters:
+            host_tracker.add_fronters(session_id, fronters)
+    except Exception as e:
+        log_error("SessionManager", "set_host failed", exc=e)
+
+def _add_fronters(self, session_id: str, names: list) -> None:
+    """Add fronters to a session."""
+    try:
+        from core.host_tracker import host_tracker
+        host_tracker.add_fronters(session_id, names)
+    except Exception as e:
+        log_error("SessionManager", "add_fronters failed", exc=e)
+
+def _remove_fronter(self, session_id: str, name: str) -> None:
+    """Remove a fronter from a session."""
+    try:
+        from core.host_tracker import host_tracker
+        host_tracker.remove_fronter(session_id, name)
+    except Exception as e:
+        log_error("SessionManager", "remove_fronter failed", exc=e)
+
+SessionManager.get_history        = _get_history
+SessionManager.get_session_context = _get_session_context
+SessionManager.set_host           = _set_host
+SessionManager.add_fronters       = _add_fronters
+SessionManager.remove_fronter     = _remove_fronter
