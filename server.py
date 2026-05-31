@@ -108,7 +108,12 @@ async def run_single_pipeline(message, session_id, headmate, context, history, l
     from core.agent import agent
     try:
         chunks = []
-        async for chunk in agent.respond(user_message=message, session_id=session_id, context=context, history=history):
+        async for chunk in agent.run(
+            user_message=message,
+            history=history,
+            session_id=session_id,
+            context=context,
+        ):
             chunks.append(chunk)
         return "".join(chunks)
     except Exception as e:
@@ -144,6 +149,18 @@ class GizmoServer:
         from core.session_manager import session_manager
 
         await session_manager.start(llm=llm)
+
+        # ── Scheduler — psych batch processor + any future cron jobs ──────────
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from core.psych_processor import psych_processor
+
+            scheduler = AsyncIOScheduler()
+            psych_processor.schedule(scheduler)
+            scheduler.start()
+            log_event("GizmoServer", "SCHEDULER_STARTED")
+        except Exception as e:
+            log_error("GizmoServer", "scheduler failed to start", exc=e)
 
         app = web.Application()
 
