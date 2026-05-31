@@ -350,18 +350,10 @@ class GizmoServer:
         await self._send(websocket, {"type": "done", "session_id": session_id})
 
         session_manager.touch(
-            session_id=session_id, headmate=headmate, fronters=fronters,
+            session_id=session_id,
+            hosts=fronters or ([headmate] if headmate else []),
             topics=_extract_topics_from_parts(parts),
-            register=parts[0].get("register", "neutral") if parts else "neutral",
-            brief_data={
-                "register":    context.get("register", "neutral"),
-                "topics":      _extract_topics_from_parts(parts),
-                "time_of_day": _time_of_day(tz_now().hour),
-                "day_of_week": tz_now().strftime("%A"),
-                "day_type":    "weekend" if tz_now().weekday() >= 5 else "weekday",
-            },
-            llm=llm,
-        )
+)
 
         log_event("GizmoServer", "RESPONSE_SENT",
             session=session_id[:8], words=len(response.split()), multi=multi)
