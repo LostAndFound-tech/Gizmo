@@ -158,10 +158,10 @@ async def intake(
         pass
 
     cadence = (
-        "rapid"          if since_last < 15   else
-        "fast"           if since_last < 60   else
-        "conversational" if since_last < 300  else
-        "slow"           if since_last < 1800 else
+        "rapid"          if since_last < 120   else
+        "fast"           if since_last < 300   else
+        "conversational" if since_last < 1200  else
+        "slow"           if since_last < 3200 else
         "returning"
     )
 
@@ -660,7 +660,7 @@ class Agent:
             from core.memory.curiosity import curiosity_engine
             CURIOUSITY_LIMIT = 5
             curiousities = []
-            for x in CURIOUSITY_LIMIT:
+            for x in range(CURIOUSITY_LIMIT):
                 curious_q = await curiosity_engine.select_question(
                     message    = user_message,
                     headmate   = brief.headmate,

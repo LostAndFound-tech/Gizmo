@@ -430,7 +430,7 @@ class MemoryRetriever:
         ctx.recent_narrative = self._load_recent_narrative(headmate)
         print("Recent narratives?")
         print("------------------")
-        print("yes" if ctx.recent_narrative is not None, else "No")
+        print("yes" if ctx.recent_narrative is not None else "No")
         # ── 10b. Objects — surface in-rotation or meaningfully dormant ────────
         if headmate and intimate_ok:
             try:
