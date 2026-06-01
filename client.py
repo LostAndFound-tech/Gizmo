@@ -18,6 +18,7 @@ import json
 import sys
 import argparse
 import uuid
+from core.timezone import tz_now as thisNow
 
 WS_HOST = "ws://localhost:8765"
 

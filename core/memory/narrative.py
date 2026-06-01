@@ -84,6 +84,7 @@ def _get_trajectory(beats: list, current_idx: int, window: int = 4) -> str:
     else:
         direction = "just starting"
 
+    print(f"Currently, the register is {dominant} register, {direction}")
     return f"{dominant} register, {direction}"
 
 
@@ -103,7 +104,7 @@ def _select_voice_instruction(
     return f"""Write in a voice that fits {headmate.title()} and this moment.
 
 Consider:
-- Who {headmate.title()} is — their psychology, their register, how they move
+- Who {headmate.title()} is as a person, and how they responded during this beat.
 - The emotional texture of this beat: {beat_register}
 - Where the session has been: {overall_register}
 

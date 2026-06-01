@@ -33,6 +33,8 @@ import os
 
 from core.log import log, log_event, log_error
 
+from core.timezone import tz_now as thisNow
+
 # ── Topic keyword map ─────────────────────────────────────────────────────────
 _TOPIC_PATTERNS: list[tuple[str, list[str]]] = [
     ("distress",        [r"\b(help|scared|panic|crisis|can't cope|overwhelmed|hurting)\b"]),
@@ -290,7 +292,7 @@ async def _run_inference(
         import uuid
 
         col = _get_collection(MEMORY_COLLECTION)
-        now = datetime.now().isoformat(timespec="seconds")
+        now = thisNow()
         count = 0
 
         for text in inferences:
@@ -443,15 +445,12 @@ class Archivist:
         source: str = "user",
     ) -> Brief:
         t_start = time.monotonic()
-        now     = time.time()
+        now     = thisNow()
         ctx     = context or {}
 
         # Host tracker — scan for identification signals
         try:
             from core.host_tracker import host_tracker
-            from core.ego import _get_known_headmates
-            known_headmates = _get_known_headmates()
-            host_tracker.process_message(session_id, message, known_headmates)
             updated_ctx = host_tracker.get_context(session_id)
             if not updated_ctx.get("timezone") and ctx.get("timezone"):
                 updated_ctx["timezone"] = ctx["timezone"]

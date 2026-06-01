@@ -270,10 +270,11 @@ class SessionContextManager:
             )
             # Reset register history — previous fronter's register doesn't carry
             ctx.register_history  = []
+            ctx.register_history.append = [f"{prev_headmate} has left. "]
             # Clear scene dynamic — don't carry Jess's scene to Ara
             if ctx.scene:
                 ctx.scene.scene_status = "closed"
-                ctx.scene.active_instructions = []
+                ctx.scene.active_instructions = [f"Your time with {prev_headmate} is over. {headmate} has just arrived, so shake it off."]
                 # Keep location and props but clear character roles/dispositions
                 for char in ctx.scene.characters:
                     char.role        = "neutral"
@@ -419,13 +420,10 @@ class SessionContextManager:
                 system_prompt=(
                     "You are writing a functional session summary for an AI. "
                     "Terse. Present tense. Current state emphasized. "
-                    "Example: 'Loona corrected a misidentification, established dominance. "
-                    "Gizmo is now submissive. Millie just arrived, Loona stepped back. "
-                    "Scene is paused.' "
                     "No fluff. Just what happened and where it is now."
                 ),
                 max_new_tokens=120,
-                temperature=0.2,
+                temperature=0.1,
             )
             if raw and raw.strip():
                 ctx.narrative         = raw.strip()
@@ -437,6 +435,7 @@ class SessionContextManager:
                     headmate = headmate or "unknown",
                     version  = ctx.narrative_version,
                 )
+                print("CURRENT_NARRATIVE", ctx.narrative)
         except Exception as e:
             log_error("SessionContext", f"narrative update failed: {e}", exc=None)
 

@@ -371,6 +371,7 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
                     f"\n[How you are with {brief.headmate.title()}]\n"
                     + "\n".join(r.get("text", "") for r in hm_voice[:3])
                 )
+                print("personality_voice:", hm_voice)
         except Exception:
             pass
 
