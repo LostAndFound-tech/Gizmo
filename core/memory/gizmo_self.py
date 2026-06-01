@@ -120,18 +120,22 @@ def detect_preference_request(message: str) -> list[dict]:
     Returns list of {dimension, delta, flavor_hint, matched_phrase}
     Can return multiple if several requests in one message.
     """
-    results = []
-    msg_lower = message.lower()
-    for pattern, dimension, delta, flavor in _REQUEST_PATTERNS:
-        m = re.search(pattern, msg_lower, re.IGNORECASE)
-        if m:
-            results.append({
-                "dimension":    dimension,
-                "delta":        delta,
-                "flavor_hint":  flavor,
-                "matched":      m.group(0).strip(),
-            })
-    return results
+    try:
+        results = []
+        msg_lower = message.lower()
+        for pattern, dimension, delta, flavor in _REQUEST_PATTERNS:
+            m = re.search(pattern, msg_lower, re.IGNORECASE)
+            if m:
+                results.append({
+                    "dimension":    dimension,
+                    "delta":        delta,
+                    "flavor_hint":  flavor,
+                    "matched":      m.group(0).strip(),
+                })
+        print(results)
+        return results
+    except Exception as E:
+        print(f"Preference request detection failed: {E}")
 
 
 # ── Orientation detection ────────────────────────────────────────────────────
