@@ -405,11 +405,6 @@ class MemoryRetriever:
                 headmate = headmate,
                 limit    = 6,
             )
-            print("Details I remember")
-            print("------------------")
-            for d in detail_hits:
-                print(d)
-            print("------------------")
 
             # Also vector search details if embedder available
             if query_emb:
@@ -425,6 +420,10 @@ class MemoryRetriever:
                     deduped.append(d)
 
             ctx.details = deduped[:6]
+            print("Details I remember")
+            for d in deduped[:6]:
+                print(d["content"], d["headmate"], d["keywords"], d["tags"], d["context"])
+            print("------------------")
 
         # ── 10. Recent narrative ──────────────────────────────────────────────
         ctx.recent_narrative = self._load_recent_narrative(headmate)
@@ -432,7 +431,7 @@ class MemoryRetriever:
         print("------------------")
         print("yes" if ctx.recent_narrative is not None else "No")
         # ── 10b. Objects — surface in-rotation or meaningfully dormant ────────
-        if headmate and intimate_ok:
+        if headmate:
             try:
                 from core.memory.psychology import _load_object_memories
                 now     = time.time()
