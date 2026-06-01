@@ -206,20 +206,14 @@ async def intake(
     )
 
     # ── Host identification — ask if unknown ──────────────────────────────────
+    # No tool needed — just ask directly if the speaker window is empty.
     _host_question = None
     sess_ctx = session_manager._sessions.get(session_id)
     if (not sess_ctx or sess_ctx.message_count == 0) and not headmate:
-        try:
-            from core.agent_tools import dispatch_tool
-            _host_question = await dispatch_tool(
-                tool_name="identify_host",
-                args={},
-                session_id=session_id,
-                headmate="",
-                llm=llm,
-            )
-        except Exception:
-            pass
+        _host_question = (
+            "Hey — who am I talking to? "
+            "I want to make sure I know who's here before we get started."
+        )
 
     # ── Write message envelope ────────────────────────────────────────────────
     tags = list(set(
@@ -262,6 +256,52 @@ async def intake(
         history.add("user", message, context=context)
     except Exception:
         pass
+
+    # ── Explicit preference requests — detect and apply immediately ──────────
+    _preference_requests = []
+    _new_temperatures    = {}
+    _persona_instruction = None
+    if headmate:
+        try:
+            from core.memory.gizmo_self import (
+                detect_preference_request, handle_explicit_requests,
+                detect_persona_request, handle_persona_request,
+            )
+            # Temperature-mapped requests ("be meaner", "softer", etc.)
+            _preference_requests = detect_preference_request(message)
+            if _preference_requests:
+                _new_temperatures = await handle_explicit_requests(
+                    requests   = _preference_requests,
+                    headmate   = headmate,
+                    message    = message,
+                    session_id = session_id,
+                    register   = register,
+                    llm        = llm,
+                )
+                log_event("Agent", "PREFERENCE_REQUESTS_DETECTED",
+                    session    = session_id[:8],
+                    headmate   = headmate,
+                    dimensions = list(_new_temperatures.keys()),
+                )
+
+            # Free-form persona requests ("act more like X", "be yourself")
+            _persona_style = detect_persona_request(message)
+            if _persona_style:
+                _persona_instruction = await handle_persona_request(
+                    style      = _persona_style,
+                    headmate   = headmate,
+                    message    = message,
+                    session_id = session_id,
+                    register   = register,
+                    llm        = llm,
+                )
+                log_event("Agent", "PERSONA_REQUEST_DETECTED",
+                    session = session_id[:8],
+                    headmate = headmate,
+                    style   = _persona_style[:40],
+                )
+        except Exception as e:
+            log_error("Agent", f"preference request handling failed: {e}", exc=None)
 
     log_event("Agent", "INTAKE_COMPLETE",
         session    = session_id[:8],
@@ -393,6 +433,29 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
         except Exception:
             pass
 
+    # ── Gizmo self-knowledge — register + per-headmate ───────────────────────
+    if brief.headmate:
+        try:
+            from core.memory.gizmo_self import (
+                read_register, read_headmate_file, build_temperature_block
+            )
+            reg_content = read_register(brief.register)
+            if reg_content:
+                lines.append(f"\n[Your role — {brief.register}]\n{reg_content[:600]}")
+
+            hm_content = read_headmate_file(brief.headmate)
+            if hm_content:
+                lines.append(
+                    f"\n[What you know about {brief.headmate.title()}]\n"
+                    f"{hm_content[:600]}"
+                )
+
+            temp_block = build_temperature_block(brief.headmate, brief.register)
+            if temp_block:
+                lines.append(f"\n{temp_block}")
+        except Exception:
+            pass
+
     # ── Memory context ────────────────────────────────────────────────────────
     memory_block = memory_ctx.to_prompt_block()
     if memory_block:
@@ -407,6 +470,20 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
         f"Session is {brief.session_momentum}."
     )
 
+    # ── Reaction prompt — embodied presence over narration ──────────────────
+    if brief.headmate:
+        try:
+            from core.memory.gizmo_self import build_reaction_prompt
+            reaction_block = build_reaction_prompt(
+                headmate = brief.headmate,
+                exchange = brief.message,
+                register = brief.register,
+            )
+            if reaction_block:
+                lines.append(f"\n{reaction_block}")
+        except Exception:
+            pass
+
     # ── Writing instruction ───────────────────────────────────────────────────
     token_target = _token_target(brief)
     tone         = _tone_for_register(brief.register)
@@ -416,7 +493,8 @@ def build_system_prompt(brief: Brief, memory_ctx: "MemoryContext") -> str:
         f"Respond to {brief.headmate.title() if brief.headmate else 'them'}. "
         f"Voice: {tone}. "
         f"Target: ~{token_target} tokens. "
-        f"Do not explain. Do not hedge. Do not break voice. Just write.\n"
+        f"Your reaction lives in your body first — what do you feel, what do you do. "
+        f"Words only if they come naturally. Don't narrate. Be present.\n"
         f"Object references: only mention objects marked 'in rotation' naturally. "
         f"Objects marked '3+ months' only if they come up organically — never force it."
     )
@@ -614,8 +692,6 @@ async def close_loop(
             log_error("Agent", f"per-message encoding failed to schedule: {e}", exc=None)
 
         # ── Curiosity — beat check and psych coherence ─────────────────────────
-        # check_beat: does this exchange answer or urgently raise a pool question?
-        # check_psych_coherence: did this exchange make sense for this person?
         try:
             from core.memory.curiosity import curiosity_engine as _ce
             asyncio.ensure_future(
@@ -638,6 +714,52 @@ async def close_loop(
             )
         except Exception as e:
             log_error("Agent", f"curiosity beat/coherence failed to schedule: {e}", exc=None)
+
+        # ── Gizmo self — body gap awareness ──────────────────────────────────
+        # On early messages, check if body file has gaps and queue questions
+        if brief.headmate and brief.session_momentum in ("opening", "building"):
+            try:
+                from core.memory.gizmo_self import queue_body_gap_questions
+                asyncio.ensure_future(
+                    queue_body_gap_questions(
+                        headmate   = brief.headmate,
+                        session_id = brief.session_id,
+                        register   = brief.register,
+                    )
+                )
+            except Exception:
+                pass
+
+        # ── Gizmo self — psych pass on explicit requests ──────────────────────
+        try:
+            from core.memory.gizmo_self import (
+                detect_preference_request, psych_pass_on_request, track_reaction
+            )
+            # Check for preference requests to understand in depth
+            reqs = detect_preference_request(brief.message)
+            for req in reqs:
+                asyncio.ensure_future(
+                    psych_pass_on_request(
+                        request    = req,
+                        headmate   = brief.headmate or "",
+                        message    = brief.message,
+                        context    = response,
+                        session_id = brief.session_id,
+                        llm        = llm,
+                    )
+                )
+            # Track reaction to any previous temperature adjustment
+            # (stored in session context — simplified: check for adjustment signals)
+            if brief.headmate:
+                asyncio.ensure_future(
+                    _track_all_reactions(
+                        headmate   = brief.headmate,
+                        user_msg   = brief.message,
+                        session_id = brief.session_id,
+                    )
+                )
+        except Exception as e:
+            log_error("Agent", f"gizmo self pass failed: {e}", exc=None)
 
     except Exception as e:
         log_error("Agent", "close_loop failed", exc=e)
@@ -701,7 +823,28 @@ class Agent:
         # ── 3. Build system prompt ────────────────────────────────────────────
         system_prompt = build_system_prompt(brief, memory_ctx)
 
-        # ── 3b. Curiosity — pick the best fitting question from candidates ────
+        # ── 3b. Persona instruction — inject if a style request was made ────────
+        # _persona_instruction lives in brief's session context via intake
+        # Access it via session_context_manager or pass through brief
+        # For now: re-detect on the same message (cheap, no LLM)
+        try:
+            from core.memory.gizmo_self import detect_persona_request, handle_persona_request
+            _p_style = detect_persona_request(user_message)
+            if _p_style and brief.headmate:
+                _p_instr = await handle_persona_request(
+                    style      = _p_style,
+                    headmate   = brief.headmate,
+                    message    = user_message,
+                    session_id = session_id,
+                    register   = brief.register,
+                    llm        = llm,
+                )
+                if _p_instr:
+                    system_prompt += f"\n\n[Style adjustment — apply now]\n{_p_instr}"
+        except Exception:
+            pass
+
+        # ── 3c. Curiosity — pick the best fitting question from candidates ────
         # Fetches up to 5 candidate questions from the pool.
         # One LLM call picks whichever fits the current moment best.
         # If none fit — nothing. Never forced.
@@ -882,6 +1025,27 @@ def _infer_outcome(
     if any(p in msg for p in ("actually", "wait", "no,", "that's not")):
         return "redirected", "correction or redirect"
     return "neutral", "no strong outcome signal"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _track_all_reactions(headmate: str, user_msg: str, session_id: str) -> None:
+    """Track reactions to all active temperature dimensions for this headmate."""
+    try:
+        from core.question_bank import question_bank
+        from core.memory.gizmo_self import track_reaction
+        temps = question_bank.get_all_temperatures(headmate=headmate)
+        for t in temps:
+            if t.get("auto_adjust") and t.get("headmate"):
+                await track_reaction(
+                    headmate   = headmate,
+                    dimension  = t["dimension"],
+                    response   = "",
+                    user_next  = user_msg,
+                    session_id = session_id,
+                )
+    except Exception:
+        pass
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

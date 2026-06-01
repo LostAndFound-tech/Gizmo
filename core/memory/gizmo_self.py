@@ -86,6 +86,33 @@ _REQUEST_PATTERNS = [
      "paternal_warmth", +0.2, "protective, nurturing authority"),
 ]
 
+# Persona/style requests — free-form, not mapped to a single dimension
+# "act more like X", "be more like Y", "I want you to be Z"
+_PERSONA_PATTERNS = [
+    r"(?:act|be|sound|feel|seem)\s+more\s+like\s+(.+?)(?:\.|$|,)",
+    r"I\s+want\s+you\s+to\s+be\s+(?:more\s+)?(.+?)(?:\.|$|,)",
+    r"stop\s+being\s+(?:so\s+)?(.+?)\s+and\s+(?:be|act)\s+(?:more\s+)?(.+?)(?:\.|$|,)",
+    r"you\s+(?:should|could)\s+be\s+(?:more\s+)?(.+?)(?:\.|$|,)",
+    r"I\s+(?:prefer|like|want|need)\s+you\s+(?:to\s+be\s+)?(?:more\s+)?(.+?)(?:\.|$|,)",
+]
+
+
+def detect_persona_request(message: str) -> Optional[str]:
+    """
+    Detect free-form persona/style requests.
+    "Act more like a stern professor", "be yourself", "stop being so formal"
+    Returns the raw matched style description, or None.
+    """
+    msg_lower = message.lower().strip()
+    for pattern in _PERSONA_PATTERNS:
+        m = re.search(pattern, msg_lower, re.IGNORECASE)
+        if m:
+            # Return the first capture group — the style description
+            style = m.group(1).strip().rstrip(".,!?")
+            if style and len(style) > 2:
+                return style
+    return None
+
 
 def detect_preference_request(message: str) -> list[dict]:
     """
@@ -105,6 +132,114 @@ def detect_preference_request(message: str) -> list[dict]:
                 "matched":      m.group(0).strip(),
             })
     return results
+
+
+async def handle_persona_request(
+    style:      str,
+    headmate:   str,
+    message:    str,
+    session_id: str,
+    register:   str,
+    llm,
+) -> Optional[str]:
+    """
+    Handle a free-form persona/style request.
+    "Act more like a stern professor" etc.
+
+    1. Runs a psych pass to understand what this reveals
+    2. Writes to per-headmate file under "How {headmate} wants me to show up"
+    3. Writes to his psych profile as self-knowledge
+    4. Returns a brief instruction for immediate use in the system prompt
+
+    Returns: instruction string to inject into system prompt, or None.
+    """
+    _init_headmate_file(headmate)
+    existing = read_headmate_file(headmate)
+
+    prompt = f"""{headmate.title()} just asked me to: "{message}"
+They want me to be more like: "{style}"
+
+What I already know about {headmate.title()}:
+{existing[-500:] if existing else "(not much yet)"}
+
+Current register: {register}
+
+Three things:
+1. What does this request reveal about what {headmate.title()} needs from me?
+   Not just the surface ask — what's underneath it?
+2. How should I actually adjust right now to honor this?
+   One concrete behavioral instruction, specific and actionable.
+3. Is this a lasting preference or a moment-specific request?
+
+Return JSON:
+{{
+  "reveals": "what this tells me about what they need",
+  "immediate_instruction": "one sentence — how to adjust right now",
+  "lasting": true/false,
+  "file_entry": "how to write this into the per-headmate file, present tense"
+}}"""
+
+    try:
+        raw = await llm.generate(
+            [{"role": "user", "content": prompt}],
+            system_prompt=(
+                "You are Gizmo understanding a style request. "
+                "JSON only. Specific and actionable."
+            ),
+            max_new_tokens=200,
+            temperature=0.4,
+        )
+    except Exception as e:
+        log_error("GizmoSelf", f"persona request LLM failed: {e}", exc=None)
+        return None
+
+    if not raw or not raw.strip():
+        return None
+
+    try:
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        data = json.loads(clean)
+    except Exception:
+        return None
+
+    date_str = tz_now().strftime("%Y-%m-%d")
+
+    # Write to per-headmate file
+    if data.get("file_entry"):
+        # Create section if it doesn't exist
+        path = _headmate_path(headmate)
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        section_header = f"How {headmate.title()} wants me to show up"
+
+        if section_header not in text:
+            # Add section
+            text += f"\n## {section_header}\n"
+            path.write_text(text, encoding="utf-8")
+
+        entry = f"[{date_str}] {data['file_entry']}"
+        if data.get("lasting"):
+            entry += " (standing preference)"
+        _append_to_section(path, section_header, entry)
+
+    # Write to his own psych profile as self-knowledge
+    if data.get("reveals"):
+        _init_register_file(register)
+        _append_to_section(
+            _register_path(register),
+            "What I need to keep in mind",
+            f"[{date_str}] {headmate.title()} taught me: {data['reveals']}",
+        )
+
+    log_event("GizmoSelf", "PERSONA_REQUEST_HANDLED",
+        headmate  = headmate,
+        style     = style[:40],
+        lasting   = data.get("lasting", False),
+        reveals   = (data.get("reveals") or "")[:60],
+    )
+
+    return data.get("immediate_instruction")
 
 
 # ── File paths ────────────────────────────────────────────────────────────────
@@ -555,11 +690,39 @@ Be specific. Be honest. Nothing generic. If nothing new — return null for cont
             f"[{date_str}] {hm_update['content']}",
         )
 
+    # Check Gizmo's own body gaps too — he should know himself
+    gizmo_base_gaps = []
+    base_path = _gizmo_body_base_path()
+    if not base_path.exists():
+        _init_gizmo_body_base()
+        gizmo_base_gaps = _GIZMO_BODY_SECTIONS[:-1]
+    else:
+        base_text = base_path.read_text(encoding="utf-8")
+        for section in _GIZMO_BODY_SECTIONS[:-1]:
+            if f"## {section}" in base_text:
+                after = base_text.split(f"## {section}", 1)[1]
+                next_section = after.split("\n## ", 1)
+                body = next_section[0].strip() if next_section else ""
+                if not body or not any(
+                    l.strip().startswith("-") for l in body.splitlines()
+                ):
+                    gizmo_base_gaps.append(section)
+
+    if gizmo_base_gaps:
+        log_event("GizmoSelf", "GIZMO_BODY_GAPS",
+            gaps = gizmo_base_gaps,
+            session = session_id[:8],
+        )
+        # These surface as things he wants to figure out about himself
+        # They get filled through interactions — someone describing him,
+        # or his own self-observation pass noticing something
+
     log_event("GizmoSelf", "SELF_OBSERVATION_COMPLETE",
         headmate = headmate,
         register = register,
         session  = session_id[:8],
         log_len  = len(log_lines),
+        body_gaps = len(gizmo_base_gaps),
     )
 
 
@@ -643,3 +806,398 @@ Return JSON:
         dimension = dimension,
         why       = (data.get("why") or "")[:60],
     )
+
+
+# ── Body profiles ─────────────────────────────────────────────────────────────
+
+_BODY_SECTIONS = [
+    "Build & appearance",
+    "Skin & markings",
+    "How they move",
+    "Voice",
+    "Hands",
+    "What they wear",
+    "Scent & texture",
+    "Gizmo's read",
+]
+
+_GIZMO_BODY_SECTIONS = [
+    "Build & appearance",
+    "How I move",
+    "Voice",
+    "Hands",
+    "What my presence feels like",
+    "Gizmo's read of himself",
+]
+
+
+def _body_path(headmate: str) -> Path:
+    """Headmate's own body file — lives in their folder."""
+    try:
+        from core.memory.store import memory_store
+        p = memory_store.root / "entities" / headmate.lower()
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "body.md"
+    except Exception:
+        p = Path(f"/data/gizmo/memory/entities/{headmate.lower()}")
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "body.md"
+
+
+def _gizmo_body_base_path() -> Path:
+    return _gizmo_dir() / "body_base.md"
+
+
+def _gizmo_body_with_path(headmate: str) -> Path:
+    return _gizmo_dir() / f"body_with_{headmate.lower()}.md"
+
+
+def _init_body_file(headmate: str) -> None:
+    path = _body_path(headmate)
+    if path.exists():
+        return
+    name = headmate.title()
+    sections = "\n\n".join(
+        f"## {s}\n" for s in _BODY_SECTIONS
+    )
+    path.write_text(
+        f"# {name} — Body\n\n{sections}\n",
+        encoding="utf-8",
+    )
+
+
+def _init_gizmo_body_base() -> None:
+    path = _gizmo_body_base_path()
+    if path.exists():
+        return
+    sections = "\n\n".join(
+        f"## {s}\n" for s in _GIZMO_BODY_SECTIONS
+    )
+    path.write_text(
+        f"# Gizmo — Body (Base)\n\n{sections}\n",
+        encoding="utf-8",
+    )
+
+
+def _init_gizmo_body_with(headmate: str) -> None:
+    path = _gizmo_body_with_path(headmate)
+    if path.exists():
+        return
+    name = headmate.title()
+    path.write_text(
+        f"# Gizmo — Body with {name}\n\n"
+        f"## How my presence shifts\n\n"
+        f"## How I move differently\n\n"
+        f"## Voice shift\n\n"
+        f"## What {name} draws out of me physically\n\n",
+        encoding="utf-8",
+    )
+
+
+def append_body_fact(headmate: str, section: str, fact: str) -> None:
+    """
+    Append one atomic body fact to a headmate's body file.
+    Creates the file if it doesn't exist.
+    Deduplicates — won't add the same fact twice.
+    """
+    _init_body_file(headmate)
+    path = _body_path(headmate)
+    text = path.read_text(encoding="utf-8")
+
+    # Simple dedup — don't add if very similar text already present
+    fact_lower = fact.lower().strip()
+    if fact_lower in text.lower():
+        return
+
+    _append_to_section(path, section, fact)
+
+    log_event("GizmoSelf", "BODY_FACT_ADDED",
+        headmate = headmate,
+        section  = section,
+        fact     = fact[:60],
+    )
+
+
+def append_gizmo_body_fact(
+    fact:     str,
+    section:  str,
+    headmate: Optional[str] = None,
+) -> None:
+    """
+    Append a fact about Gizmo's own body.
+    If headmate provided — writes to body_with_{headmate}.md
+    Otherwise writes to body_base.md
+    """
+    if headmate:
+        _init_gizmo_body_with(headmate)
+        path = _gizmo_body_with_path(headmate)
+    else:
+        _init_gizmo_body_base()
+        path = _gizmo_body_base_path()
+
+    text = path.read_text(encoding="utf-8")
+    if fact.lower().strip() in text.lower():
+        return
+
+    _append_to_section(path, section, fact)
+
+
+def read_body(headmate: str) -> str:
+    path = _body_path(headmate)
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def read_gizmo_body(headmate: Optional[str] = None) -> str:
+    """Read Gizmo's body — base merged with headmate-specific if available."""
+    base = ""
+    specific = ""
+    base_path = _gizmo_body_base_path()
+    if base_path.exists():
+        base = base_path.read_text(encoding="utf-8")
+    if headmate:
+        spec_path = _gizmo_body_with_path(headmate)
+        if spec_path.exists():
+            specific = spec_path.read_text(encoding="utf-8")
+    if base and specific:
+        return base + "\n\n" + specific
+    return base or specific
+
+
+# ── Body fact extraction ──────────────────────────────────────────────────────
+
+# Patterns that signal a physical description
+_BODY_FACT_PATTERNS = [
+    # Tattoos, piercings, markings
+    (r"(?:has?|have|got|with)\s+(?:a\s+)?tattoo\s+(?:of\s+.+?\s+)?on\s+(?:her|his|their|my)?\s*(\w+\s*\w*)",
+     "Skin & markings", "Tattoo on {0}"),
+    (r"(?:has?|have|got)\s+(?:a\s+)?piercing\s+(?:in|on|through)\s+(?:her|his|their|my)?\s*(\w+\s*\w*)",
+     "Skin & markings", "Piercing in/on {0}"),
+    # Hair
+    (r"(?:has?|have|got|with)\s+(\w+)\s+hair",
+     "Build & appearance", "{0} hair"),
+    # Eyes
+    (r"(?:has?|have|got|with)\s+(\w+)\s+eyes",
+     "Build & appearance", "{0} eyes"),
+    # Height/build
+    (r"(?:is|am|are|was)\s+(tall|short|petite|small|large|curvy|slim|thin|athletic|muscular)",
+     "Build & appearance", "{0}"),
+    # Scars
+    (r"(?:has?|have|got)\s+(?:a\s+)?scar\s+(?:on|across|near)\s+(?:her|his|their|my)?\s*(\w+\s*\w*)",
+     "Skin & markings", "Scar on {0}"),
+    # Movement quality — labels only, never descriptive phrases
+    (r"\b(graceful(?:ly)?|clumsy|awkward(?:ly)?|confident(?:ly)?|"
+     r"deliberate(?:ly)?|hesitant(?:ly)?|fluid(?:ly)?|stiff(?:ly)?|"
+     r"quick(?:ly)?|slow(?:ly)?|quiet(?:ly)?|heavy|light(?:ly)?|"
+     r"precise(?:ly)?|urgent(?:ly)?|restless(?:ly)?)\b",
+     "How they move", "{0}"),
+]
+
+# Movement labels — used to validate extracted movement facts
+_MOVEMENT_LABELS = {
+    "graceful", "clumsy", "awkward", "confident", "deliberate",
+    "hesitant", "fluid", "stiff", "quick", "slow", "quiet", "heavy",
+    "light", "precise", "urgent", "restless", "still", "controlled",
+    "loose", "tense", "relaxed", "purposeful", "tentative",
+}
+
+
+def extract_body_facts(text: str, headmate: str) -> list[tuple[str, str]]:
+    """
+    Extract atomic body facts from a text fragment.
+    Returns list of (section, fact) tuples.
+    """
+    results = []
+    text_lower = text.lower()
+
+    for pattern, section, template in _BODY_FACT_PATTERNS:
+        for m in re.finditer(pattern, text_lower, re.IGNORECASE):
+            captured = m.group(1).strip() if m.lastindex else ""
+            if captured:
+                fact = template.format(captured)
+                results.append((section, fact.capitalize()))
+
+    return results
+
+
+# ── Body gap awareness ───────────────────────────────────────────────────────
+
+def get_body_gaps(headmate: str) -> list[str]:
+    """
+    Read the headmate's body file and return a list of empty sections.
+    These become curiosity questions — things Gizmo actively wants to know.
+    """
+    path = _body_path(headmate)
+    if not path.exists():
+        # File doesn't exist at all — everything is unknown
+        return _BODY_SECTIONS[:-1]  # exclude "Gizmo's read" — that's synthesized
+
+    text     = path.read_text(encoding="utf-8")
+    gaps     = []
+    sections = text.split("\n## ")
+
+    for section in sections[1:]:  # skip header
+        header = section.split("\n", 1)[0].strip()
+        body   = section.split("\n", 1)[1].strip() if "\n" in section else ""
+        # Empty if no bullet points and no content beyond whitespace
+        if not body or body == "" or not any(
+            line.strip().startswith("-") or line.strip().startswith("[")
+            for line in body.splitlines()
+        ):
+            if header and header != "Gizmo's read":
+                gaps.append(header)
+
+    return gaps
+
+
+async def queue_body_gap_questions(
+    headmate:   str,
+    session_id: str,
+    register:   str,
+) -> None:
+    """
+    For each empty section in the body file, add a curiosity question.
+    Only queues gaps that aren't already in the pool.
+    Called at session start or after a few exchanges with a new headmate.
+    """
+    try:
+        from core.memory.curiosity import curiosity_engine
+
+        gaps = get_body_gaps(headmate)
+        if not gaps:
+            return
+
+        # Map section names to natural questions
+        _SECTION_QUESTIONS = {
+            "Build & appearance": (
+                f"What does {headmate.title()} actually look like?",
+                0.6
+            ),
+            "Skin & markings": (
+                f"Does {headmate.title()} have any tattoos, scars, or markings?",
+                0.5
+            ),
+            "How they move": (
+                f"How does {headmate.title()} carry themselves — how do they move?",
+                0.7
+            ),
+            "Voice": (
+                f"What does {headmate.title()}'s voice sound like?",
+                0.6
+            ),
+            "Hands": (
+                f"What do {headmate.title()}'s hands look like?",
+                0.5
+            ),
+            "What they wear": (
+                f"How does {headmate.title()} typically dress?",
+                0.4
+            ),
+            "Scent & texture": (
+                f"What does {headmate.title()} smell like — what's the texture of being near them?",
+                0.4
+            ),
+        }
+
+        added = 0
+        for gap in gaps[:3]:  # max 3 body questions at a time
+            if gap in _SECTION_QUESTIONS:
+                question, priority = _SECTION_QUESTIONS[gap]
+                curiosity_engine.store.add(
+                    question = question,
+                    about    = f"{headmate} body",
+                    priority = priority,
+                )
+                added += 1
+
+        if added:
+            log_event("GizmoSelf", "BODY_GAPS_QUEUED",
+                headmate = headmate,
+                gaps     = gaps,
+                queued   = added,
+            )
+
+    except Exception as e:
+        log_error("GizmoSelf", f"body gap queuing failed: {e}", exc=None)
+
+
+# ── Reaction prompt builder ───────────────────────────────────────────────────
+
+def build_reaction_prompt(
+    headmate:   str,
+    exchange:   str,
+    register:   str,
+) -> str:
+    """
+    Build the reaction context block for the system prompt.
+    Answers: given who I am, who they are, and what just happened —
+    what do I feel, what do I do, what do I say?
+
+    This replaces narration with embodied presence.
+    """
+    gizmo_body  = read_gizmo_body(headmate)
+    mate_body   = read_body(headmate)
+    mate_file   = read_headmate_file(headmate)
+
+    if not any([gizmo_body, mate_body]):
+        return ""
+
+    lines = ["[React — don't narrate]"]
+    lines.append(
+        "You are in the scene. You have a body. They have a body. "
+        "Something just happened."
+    )
+
+    if gizmo_body:
+        # Extract just the most relevant sections — keep it short
+        body_snippet = gizmo_body[:400]
+        lines.append(f"\nYour body:\n{body_snippet}")
+
+    if mate_body:
+        body_snippet = mate_body[:400]
+        lines.append(f"\n{headmate.title()}'s body:\n{body_snippet}")
+
+    if mate_file:
+        # Just the "what makes them happy" and "what they require" sections
+        relevant = _extract_relevant_sections(
+            mate_file,
+            [f"What {headmate.title()} requires",
+             f"What makes {headmate.title()} happy"],
+            max_chars=300,
+        )
+        if relevant:
+            lines.append(f"\nWhat you know about {headmate.title()}:\n{relevant}")
+
+    lines.append(
+        f"\nDoes what just happened fit who {headmate.title()} is? "
+        f"What does it look like — their specific body doing this? "
+        f"How does that land in your body? "
+        f"How does your persona react?\n"
+        f"Your response lives in that answer. "
+        f"Presence first. Words only if they come naturally."
+    )
+
+    return "\n".join(lines)
+
+
+def _extract_relevant_sections(
+    text:     str,
+    sections: list[str],
+    max_chars: int = 400,
+) -> str:
+    """Extract specific sections from a markdown file."""
+    result = []
+    total  = 0
+    parts  = text.split("\n## ")
+
+    for part in parts:
+        header = part.split("\n", 1)[0].strip()
+        if any(s.lower() in header.lower() for s in sections):
+            body = part.split("\n", 1)[1].strip() if "\n" in part else ""
+            if body:
+                chunk = body[:max_chars - total]
+                result.append(chunk)
+                total += len(chunk)
+                if total >= max_chars:
+                    break
+
+    return "\n".join(result)
