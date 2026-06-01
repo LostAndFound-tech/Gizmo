@@ -49,6 +49,7 @@ class MemoryStore:
     def __init__(self, root: Optional[Path] = None):
         self.root = Path(root) if root else _default_root()
         self._db_path = self.root / "index.db"
+        self.entity_path = self.root / "entities"
         self._init_dirs()
         self._init_db()
 

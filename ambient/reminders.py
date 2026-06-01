@@ -30,6 +30,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
+from core.timezone import tz_now as thisNow
 
 REMINDERS_COLLECTION = "reminders"
 CHECK_INTERVAL = 30  # seconds between checks
@@ -121,7 +122,7 @@ async def parse_reminder(
       - "remind me Friday at 3" → next Friday at 15:00
       - "remind me tomorrow morning" → tomorrow at 09:00
     """
-    now = now or datetime.now()
+    now = thisNow()
     now_str = now.strftime("%Y-%m-%d %H:%M")
     weekday = now.strftime("%A")
 
@@ -216,7 +217,6 @@ def store_reminder(
     At delivery time, the current host is read from context separately —
     if they differ, the delivery message attributes the reminder to set_by.
     """
-    from core.rag import RAGStore
 
     reminder_id = f"reminder_{uuid.uuid4().hex[:12]}"
     now_iso = datetime.now().isoformat(timespec="seconds")

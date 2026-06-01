@@ -28,6 +28,7 @@ from ambient.listener import listen
 from ambient.transcriber import transcribe
 from ambient.tagger import tag
 from ambient.reminders import store_reminder, start_reminder_checker, set_llm
+from core.timezone import tz_now as thisNow
 
 AMBIENT_COLLECTION = "ambient_log"
 
@@ -50,7 +51,7 @@ async def _ingest_ambient_chunk(
     """Ingest a tagged ambient chunk into the ambient_log collection."""
     from core.rag import RAGStore
 
-    now = datetime.now()
+    now = thisNow()
     metadata = {
         "source": "ambient_mic",
         "type": "ambient_transcript",

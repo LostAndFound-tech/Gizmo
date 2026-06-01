@@ -366,13 +366,6 @@ JSON only, one per line."""
 
         # Don't ask too many times per session
         asked_this_session = self._session_asked.get(session_id, 0)
-        if asked_this_session >= self.MAX_PER_SESSION:
-            log_event("CuriosityEngine", "SELECTION_SKIPPED",
-                reason   = f"session limit reached ({asked_this_session})",
-                headmate = headmate or "unknown",
-                session  = session_id[:8],
-            )
-            return None
 
         pool = self.store.get_pool(unanswered_only=True)
         if not pool:

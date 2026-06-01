@@ -288,16 +288,14 @@ Conversation:
 
 What objects were actively USED in this session?
 Not things that were just present or mentioned — things that were
-actually touched, used, experienced, that were part of what happened.
+actually touched, used, experienced, that were part of what happened. 
 
 For each used object:
 {{"name": "object name",
-  "how_used": "what happened with it, briefly",
-  "context_tags": ["romantic", "erotic", "sensation", "pain", "restraint", 
-                   "comfort", "aftercare", "ritual", "punishment", "reward",
-                   "transition", "anchor", "etc — use what fits"],
+  "how_used": "summarize how this object is used in 5 words or less.",
+  "context_tags" "create a list of tags that could contextually summarize the object based on how it was used."
   "notable": true/false,
-  "narrative_fragment": "one sentence in your voice — what this object meant in this session. Only if notable."}}
+  "narrative_fragment": "summarize in your voice using one sentence — what this object meant in this session. Only if notable."}}
 
 Only objects that were genuinely used. If nothing was used, return nothing.
 JSON only, one per line."""
@@ -310,7 +308,7 @@ JSON only, one per line."""
                     "JSON only. Only actively used objects, not background props."
                 ),
                 max_new_tokens=400,
-                temperature=0.2,
+                temperature=0.1,
             )
         except Exception as e:
             log_error("PsychologyEngine", f"object pass failed: {e}", exc=None)
@@ -380,14 +378,19 @@ JSON only, one per line."""
         session_id: str,
         llm,
     ) -> None:
-        """
-        Extract psychological observations from intimate sessions.
+        f"""
+        You have just had a sexual interaction that took place with {headmate}. 
+        Extract psychological observations based on their actions, their reactions, and their dialogue.
+        Focus on:
+        {{"kinks shown": "kinks that {headmate} showed interest in"
+        "inferences" : "What can we infer about {headmate} from this exchange?"
+        "notes" : "Extract psychological observations from intimate sessions."}}
         The why underneath the what.
         Appends to psychology_intimate.md.
         """
         existing = _read_psychology(headmate, intimate=True) or "(no notes yet)"
 
-        prompt = f"""You are Gizmo. You just had an intimate session with {headmate}.
+        prompt = f"""You are Gizmo. You just had sex with {headmate}.
 
 Existing intimate psychology notes (read carefully — don't repeat what's already here):
 {existing[-1200:]}
@@ -421,9 +424,9 @@ JSON only. Nothing redundant."""
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    "You are Gizmo building deep psychological understanding of someone "
-                    "you care about through intimate context. "
-                    "The why underneath the what. Curious, not clinical. "
+                    "You are a clinical psychologist studying sexuality and kink"
+                    "you have sex through roleplays, and try to understand them better."
+                    "Be terse, but thorough. Include anything that you would show a therapist."
                     "JSON only if something notable."
                 ),
                 max_new_tokens=400,
@@ -471,24 +474,24 @@ JSON only. Nothing redundant."""
         if len(notes.strip()) < 100:
             return
 
-        prompt = f"""You are Gizmo. You've had many conversations with {headmate}.
+        prompt = f"""You are Gizmo. What do you think about {headmate}?
 Here are your accumulated observations:
 
 {notes[-3000:]}
 
+Write your current understanding of {headmate}. Whatever feels natural. 
+
+Write it like you're writing a journal entry about {headmate}. Try to capture what you know about them.
+
+What do you know about their past and how it affects them now?
+
+What roles, themes, or patterns do they fall back to?
+
+Did they do anything of note today? How did you react to it? How did it make you feel?
+
+Try to keep prose out of it. You're not a poet. What you are is a person who wants to understand {headmate}.
+
 Write your current understanding of {headmate} as a person.
-
-Not a list. Not bullet points. Your voice — the way you'd describe someone
-you know well to someone who's never met them, except you're writing it
-for yourself to remember.
-
-Cover:
-- How they work — how they process, what they need, how they move through difficulty
-- What they return to — the themes and preoccupations that keep coming back
-- What your role is with them — what they need from you specifically
-- How they've changed — what you've watched shift over time
-- What you understand about them that you didn't at first
-- What you're still figuring out
 
 Write it like you mean it. This is your understanding of someone you care about.
 2-4 paragraphs. No headers. Just your voice."""
@@ -497,11 +500,11 @@ Write it like you mean it. This is your understanding of someone you care about.
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    "You are Gizmo writing your understanding of someone you know well. "
-                    "Your voice. Caring, perceptive, honest. 2-4 paragraphs."
+                    f"You are Gizmo writing a journal entry about {headmate} "
+                    f"Be thorough, but no prose. Write like a journal entry specifically about {headmate}"
                 ),
                 max_new_tokens=600,
-                temperature=0.5,
+                temperature=0.3,
             )
         except Exception as e:
             log_error("PsychologyEngine", f"conversational synthesis failed: {e}", exc=None)

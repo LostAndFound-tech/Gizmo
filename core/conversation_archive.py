@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.log import log, log_event, log_error
+from core.timezone import tz_now as thisNow
 
 _CONVERSATIONS_DIR = Path(os.getenv("CONVERSATIONS_DIR", "/data/conversations"))
 
@@ -70,7 +71,7 @@ def _date_dir(date_str: str) -> Path:
 
 
 def _today_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return str(thisNow())
 
 
 def _index_path(date_str: str) -> Path:

@@ -657,18 +657,21 @@ class Agent:
         # ── 3b. Curiosity — weave in a question if the moment is right ────────
         try:
             from core.memory.curiosity import curiosity_engine
-            curious_q = await curiosity_engine.select_question(
-                message    = user_message,
-                headmate   = brief.headmate,
-                session_id = session_id,
-                register   = brief.register,
-                llm        = llm,
-            )
-            if curious_q:
+            CURIOUSITY_LIMIT = 5
+            curiousities = []
+            for x in CURIOUSITY_LIMIT:
+                curious_q = await curiosity_engine.select_question(
+                    message    = user_message,
+                    headmate   = brief.headmate,
+                    session_id = session_id,
+                    register   = brief.register,
+                    llm        = llm,
+                )
+                curiousities.append(curious_q)
+            if len(curiousities) > 0:
                 system_prompt += (
-                    f"\n\n[Curiosity — weave this in naturally if it fits]\n"
-                    f"{curious_q}\n"
-                    f"One sentence. Not forced. Only if it genuinely fits the flow."
+                    f"\n\n[You're really curious about this stuff... Make it feel like a natural thought. Relate it to the rest of the message.]\n"
+                    f"{curiousities}\n"
                 )
         except Exception as e:
             log_error("Agent", f"curiosity selection failed: {e}", exc=None)
