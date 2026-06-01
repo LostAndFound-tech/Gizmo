@@ -1415,7 +1415,7 @@ def build_reaction_prompt(
 
     if gizmo_body:
         # Extract just the most relevant sections — keep it short
-        body_snippet = gizmo_body[]
+        body_snippet = gizmo_body
         lines.append(f"\nYour body:\n{body_snippet}")
 
     if mate_body:
