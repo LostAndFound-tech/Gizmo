@@ -204,6 +204,39 @@ class SessionManager:
         except Exception as e:
             log("SessionManager", f"psych_processor.run_for failed to schedule: {e}")
 
+        # ── Memory encoding — full encode_safe at session close ───────────────
+        # Heavy passes: encode, pattern, kink, psychology, narrative, curiosity
+        # These run ONCE per session, not per message.
+        try:
+            from core.memory.encoder import memory_encoder, build_transcript
+            from core.memory import build_transcript as _bt
+            import asyncio as _asyncio2
+
+            # Get history for transcript
+            _history = None
+            try:
+                from memory.history import get_session as _get_session
+                _history = _get_session(session_id)
+            except Exception:
+                pass
+
+            if _history:
+                _transcript = build_transcript(_history)
+                _primary_host = state.hosts[0] if state.hosts else None
+                _asyncio2.ensure_future(
+                    memory_encoder.encode_safe(
+                        transcript   = _transcript,
+                        headmate     = _primary_host,
+                        session_id   = session_id,
+                        duration_s   = time.time() - state.opened_at,
+                        register     = "neutral",
+                        has_intimate = False,
+                        llm          = self._llm,
+                    )
+                )
+        except Exception as e:
+            log("SessionManager", f"encode_safe at session close failed: {e}")
+
         del self._sessions[session_id]
 
     # ── Rumination ────────────────────────────────────────────────────────────

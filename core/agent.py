@@ -22,7 +22,8 @@ Pipeline per message:
 
   4. CLOSE LOOP (fire and forget)
      Encoding pass — Gizmo writes what he learned, in his voice.
-     Detail catch — catches asides and throwaway mentions.
+     Beat check — does this exchange answer or raise a pool question?
+     Psych coherence — did this make sense for this person?
      Store bookkeeping — response envelope, emotion log.
      Never blocks. Never raises.
 
@@ -161,7 +162,7 @@ async def intake(
         "rapid"          if since_last < 120   else
         "fast"           if since_last < 300   else
         "conversational" if since_last < 1200  else
-        "slow"           if since_last < 3200 else
+        "slow"           if since_last < 3200  else
         "returning"
     )
 
@@ -263,11 +264,11 @@ async def intake(
         pass
 
     log_event("Agent", "INTAKE_COMPLETE",
-        session  = session_id[:8],
-        headmate = headmate or "unknown",
-        register = register,
+        session    = session_id[:8],
+        headmate   = headmate or "unknown",
+        register   = register,
         message_id = message_id[:12],
-        topics   = topics[:3],
+        topics     = topics[:3],
     )
 
     brief = Brief(
@@ -306,7 +307,6 @@ async def retrieve(brief: Brief) -> "MemoryContext":
     """
     from core.memory import memory_retriever
 
-    # Rapid-fire messages get fast retrieval — skip crawl and details
     fast = brief.message_cadence == "rapid"
 
     ctx = await memory_retriever.retrieve(
@@ -318,13 +318,13 @@ async def retrieve(brief: Brief) -> "MemoryContext":
     )
 
     log_event("Agent", "RETRIEVE_COMPLETE",
-        session   = brief.session_id[:8],
-        headmate  = brief.headmate or "unknown",
-        memories  = len(ctx.memories),
-        entities  = len(ctx.entities),
-        places    = len(ctx.places),
-        details   = len(ctx.details),
-        tokens    = ctx.token_estimate,
+        session  = brief.session_id[:8],
+        headmate = brief.headmate or "unknown",
+        memories = len(ctx.memories),
+        entities = len(ctx.entities),
+        places   = len(ctx.places),
+        details  = len(ctx.details),
+        tokens   = ctx.token_estimate,
     )
 
     return ctx
@@ -450,7 +450,7 @@ async def generate_response(
         if conv_block:
             system_prompt = system_prompt + f"\n\n{conv_block}"
 
-    # ── Last 2 messages only — no more dumping 41 turns ───────────────────────
+    # ── Last 5 messages only ──────────────────────────────────────────────────
     try:
         messages = history.as_messages(brief.message)
         if len(messages) > 5:
@@ -459,7 +459,7 @@ async def generate_response(
         print(f"[generate_response] history error: {e}", flush=True)
         messages = [{"role": "user", "content": brief.message}]
 
-    # ── Anchor the current message so flaky nodes don't respond to history ────
+    # ── Anchor the current message ────────────────────────────────────────────
     system_prompt += f"\n\n[Respond to this message]\n{brief.message}"
 
     # Hard cap
@@ -503,26 +503,26 @@ async def close_loop(
     from core.memory.session_context import session_context_manager
 
     try:
-        # Write response envelope
+        # ── Write response envelope ───────────────────────────────────────────
         store.write("responses", {
-            "content":    response,
+            "content":     response,
             "response_to": brief.message_id,
-            "headmate":   brief.headmate.lower() if brief.headmate else None,
-            "session_id": brief.session_id,
-            "source":     "gizmo",
-            "tags":       (
+            "headmate":    brief.headmate.lower() if brief.headmate else None,
+            "session_id":  brief.session_id,
+            "source":      "gizmo",
+            "tags":        (
                 f"response,{brief.headmate.lower() if brief.headmate else 'unknown'},"
                 f"{brief.register}"
             ),
         })
 
-        # Save to history
+        # ── Save to history ───────────────────────────────────────────────────
         history.add("assistant", response, context={
             "current_host": brief.headmate,
             "fronters":     brief.fronters,
         })
 
-        # Log emotion data point
+        # ── Emotion log ───────────────────────────────────────────────────────
         store.write("emotion_log", {
             "headmate":   brief.headmate.lower() if brief.headmate else None,
             "session_id": brief.session_id,
@@ -534,7 +534,7 @@ async def close_loop(
             "tags":       f"emotion,{brief.headmate.lower() if brief.headmate else 'unknown'}",
         })
 
-        # ── Session context — record exchange, fire staggered updates ─────────
+        # ── Session context — staggered updates ───────────────────────────────
         ctx = session_context_manager.record_exchange(
             session_id = brief.session_id,
             headmate   = brief.headmate,
@@ -575,23 +575,69 @@ async def close_loop(
             )
 
         log_event("Agent", "CLOSE_LOOP_COMPLETE",
-            session  = brief.session_id[:8],
-            register = brief.register,
+            session   = brief.session_id[:8],
+            register  = brief.register,
             msg_count = ctx.message_count,
         )
 
-        # ── Memory encoding — fire and forget ─────────────────────────────────
-        asyncio.ensure_future(
-            memory_encoder.encode_safe(
-                transcript   = build_transcript(history),
-                headmate     = brief.headmate,
-                session_id   = brief.session_id,
-                duration_s   = time.time() - brief.timestamp,
-                register     = brief.register,
-                has_intimate = brief.has_intimate,
-                llm          = llm,
+        # ── Per-message encoding — lightweight passes only ──────────────────────
+        # Heavy passes (encode, pattern, kink, psychology, narrative, curiosity
+        # gap detection) run at session close via session_manager, NOT here.
+        # Running them per-message was the source of the token burn.
+        try:
+            transcript = build_transcript(history)
+            msg_count  = ctx.message_count
+
+            # catch_details — every message, cheap
+            asyncio.ensure_future(
+                memory_encoder.catch_details(
+                    transcript = transcript,
+                    headmate   = brief.headmate,
+                    session_id = brief.session_id,
+                    register   = brief.register,
+                    llm        = llm,
+                )
             )
-        )
+
+            # wellness_pass — every 3rd message
+            if msg_count % 3 == 0:
+                asyncio.ensure_future(
+                    memory_encoder.wellness_pass(
+                        transcript = transcript,
+                        headmate   = brief.headmate,
+                        session_id = brief.session_id,
+                        register   = brief.register,
+                        llm        = llm,
+                    )
+                )
+        except Exception as e:
+            log_error("Agent", f"per-message encoding failed to schedule: {e}", exc=None)
+
+        # ── Curiosity — beat check and psych coherence ─────────────────────────
+        # check_beat: does this exchange answer or urgently raise a pool question?
+        # check_psych_coherence: did this exchange make sense for this person?
+        try:
+            from core.memory.curiosity import curiosity_engine as _ce
+            asyncio.ensure_future(
+                _ce.check_beat(
+                    user_message   = brief.message,
+                    gizmo_response = response,
+                    headmate       = brief.headmate,
+                    session_id     = brief.session_id,
+                    llm            = llm,
+                )
+            )
+            asyncio.ensure_future(
+                _ce.check_psych_coherence(
+                    user_message   = brief.message,
+                    gizmo_response = response,
+                    headmate       = brief.headmate,
+                    session_id     = brief.session_id,
+                    llm            = llm,
+                )
+            )
+        except Exception as e:
+            log_error("Agent", f"curiosity beat/coherence failed to schedule: {e}", exc=None)
 
     except Exception as e:
         log_error("Agent", "close_loop failed", exc=e)
@@ -612,7 +658,7 @@ class Agent:
         """
         Full pipeline. Yields response chunks.
 
-        intake → retrieve → build_system_prompt → generate_response → close_loop
+        intake → retrieve → build_system_prompt → curiosity → generate → close_loop
         """
         from core.llm import llm
 
@@ -655,24 +701,25 @@ class Agent:
         # ── 3. Build system prompt ────────────────────────────────────────────
         system_prompt = build_system_prompt(brief, memory_ctx)
 
-        # ── 3b. Curiosity — weave in a question if the moment is right ────────
+        # ── 3b. Curiosity — pick the best fitting question from candidates ────
+        # Fetches up to 5 candidate questions from the pool.
+        # One LLM call picks whichever fits the current moment best.
+        # If none fit — nothing. Never forced.
         try:
             from core.memory.curiosity import curiosity_engine
-            CURIOUSITY_LIMIT = 5
-            curiousities = []
-            for x in range(CURIOUSITY_LIMIT):
-                curious_q = await curiosity_engine.select_question(
-                    message    = user_message,
-                    headmate   = brief.headmate,
-                    session_id = session_id,
-                    register   = brief.register,
-                    llm        = llm,
-                )
-                curiousities.append(curious_q)
-            if len(curiousities) > 0:
+            curious_q = await curiosity_engine.select_question(
+                message      = user_message,
+                headmate     = brief.headmate,
+                session_id   = session_id,
+                register     = brief.register,
+                llm          = llm,
+                num_candidates = 5,
+            )
+            if curious_q:
                 system_prompt += (
-                    f"\n\n[You're really curious about this stuff... Make it feel like a natural thought. Relate it to the rest of the message.]\n"
-                    f"{curiousities}\n"
+                    f"\n\n[You're curious — weave this in naturally if it fits the flow. "
+                    f"One sentence. Don't force it if the moment isn't right.]\n"
+                    f"{curious_q}"
                 )
         except Exception as e:
             log_error("Agent", f"curiosity selection failed: {e}", exc=None)

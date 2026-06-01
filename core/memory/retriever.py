@@ -314,18 +314,20 @@ class MemoryRetriever:
             # Load the memory content
             content = _load_anchor(file_path, anchor)
             if content:
-                loaded_memories.append({
-                    "content":        content,
-                    "memory_type":    memory_type,
-                    "memory_subtype": hit.get("memory_subtype"),
-                    "headmate":       hit.get("headmate"),
-                    "file_path":      file_path,
-                    "id":             hit.get("id"),
-                    "_score":         hit.get("_score", 0),
-                })
-
+                if hit.get("_score" < .4):
+                    loaded_memories.append({
+                        "content":        content,
+                        "memory_type":    memory_type,
+                        "memory_subtype": hit.get("memory_subtype"),
+                        "headmate":       hit.get("headmate"),
+                        "file_path":      file_path,
+                        "id":             hit.get("id"),
+                        "_score":         hit.get("_score", 0),
+                    })
+        
         ctx.memories = loaded_memories
         print("Memories I loaded")
+        print(f"Anchor: {anchor}")
         print("-----------------")
         for l in loaded_memories:
             print(l)
@@ -484,18 +486,20 @@ class MemoryRetriever:
         )
         print("FULL PROMPT")
         print("------------------")
-        print("------------------")
-        print("------------------")
-        print(f"""headmate: {headmate}:
-                hits: {ctx.total_hits}
-                memories: {ctx.memories}
-                entities: {ctx.entities}
-                places: {ctx.places}
-                details: {ctx.details},
-                duration(ms): {duration_ms}
-              """)
-        print("------------------")
-        print("------------------")
+        print("headmate:", {headmate}:)
+        print("Memories")
+        for m in ctx.memories: 
+            print(m)
+        print("Entities")
+        for e in ctx.entities:
+            print(e)
+        print("Places")
+        for p in ctx.places:
+            print(p)
+        print("Details")
+        for d in ctx.details:
+            print(d)
+        print(f"Duration: {duration_ms}")
         print("------------------")
         return ctx
 
@@ -721,7 +725,8 @@ def _trim_to_budget(ctx: MemoryContext, budget_tokens: int) -> MemoryContext:
         if used + len(content) > char_budget:
             break
         trimmed_memories.append(m)
-        used += len(content)
+        if content not in used:
+            used += len(content)
     ctx.memories = trimmed_memories
 
     # Details — lowest priority

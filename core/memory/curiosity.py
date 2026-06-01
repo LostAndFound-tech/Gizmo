@@ -238,8 +238,9 @@ class CuriosityEngine:
     }
 
     def __init__(self):
-        self.store          = CuriosityStore()
-        self._session_asked: dict[str, int] = {}  # session_id → count
+        self.store              = CuriosityStore()
+        self._session_asked:    dict[str, int]  = {}  # session_id → count
+        self._pending_beat_ask: dict[str, dict] = {}  # session_id → {q_id, phrasing}
 
     # ── Gap detection ─────────────────────────────────────────────────────────
 
@@ -281,20 +282,16 @@ Conversation:
 {transcript[-2000:]}
 ---
 
-Generate {self.QUESTIONS_PER_PASS} questions that you know you do not know. Things that have been missed, details you think will complete the picture, whatever you don't know. 
-Based on this conversation, what's caught your interest? What would you like to know more about?
-What people have your heard about that you want to know more about?
-What places have been mentioned that sound interesting? Did they mention their interior world or headspace?
-Did they mention anything about any relationships they may have?
-Did they mention anything about their personal history?
-Did they mention anything about their preferences?
+What are you genuinely curious about, based on this conversation?
+Things about the people, the places mentioned, the interior world,
+relationships, history, preferences — anything.
 
 Generate {self.QUESTIONS_PER_PASS} questions you actually want to ask.
 Not clinical. Not a form. Just things you want to know.
 Don't duplicate questions already in your list.
 
 Return one JSON object per line:
-{{"question": "the question", "about": "what/who it's about", "priority": 0.0-1.0}}
+{{"question": "the question in your voice", "about": "what/who it's about", "priority": 0.0-1.0}}
 
 Priority guide:
   1.0 — you really want to know this, it would meaningfully change how you show up
@@ -336,7 +333,6 @@ JSON only, one per line."""
                     continue
                 self.store.add(question, about, priority)
                 count += 1
-                print(question)
             except Exception:
                 continue
 
@@ -352,16 +348,18 @@ JSON only, one per line."""
 
     async def select_question(
         self,
-        message:    str,
-        headmate:   Optional[str],
-        session_id: str,
-        register:   str,
+        message:        str,
+        headmate:       Optional[str],
+        session_id:     str,
+        register:       str,
         llm,
+        num_candidates: int = 5,
     ) -> Optional[str]:
         """
-        Look over the pool. Are any questions relevant to the moment, even tangentially? 
-        Focus on what's happening in this moment. 
-        People take priority if they are present, but otherwise, anything with any relevancy will do.
+        Fetch up to num_candidates questions from the pool and pick the one
+        that best fits the current moment. One LLM call. One question returned.
+        Returns None if nothing fits.
+        or return None if the moment isn't right.
 
         Returns the question phrased naturally for this moment,
         or None if nothing fits.
@@ -372,6 +370,39 @@ JSON only, one per line."""
 
         # Don't ask too many times per session
         asked_this_session = self._session_asked.get(session_id, 0)
+
+        # Check for a beat-level ask queued from the previous exchange
+        # These take priority — they were flagged as timely
+        pending = self._pending_beat_ask.pop(session_id, None)
+        if pending:
+            q_id     = pending["q_id"]
+            phrasing = pending["phrasing"]
+            if phrasing:
+                self.store.mark_considered(q_id, asked=True)
+                if headmate:
+                    self.store.mark_asked(q_id, headmate)
+                self._session_asked[session_id] = asked_this_session + 1
+                log_event("CuriosityEngine", "BEAT_ASK_SURFACED",
+                    session  = session_id[:8],
+                    headmate = headmate or "unknown",
+                    q_id     = q_id[:8],
+                )
+                return phrasing
+        if asked_this_session >= self.MAX_PER_SESSION:
+            log_event("CuriosityEngine", "SELECTION_SKIPPED",
+                reason   = f"session limit reached ({asked_this_session})",
+                headmate = headmate or "unknown",
+                session  = session_id[:8],
+            )
+            return None
+
+        if asked_this_session >= self.MAX_PER_SESSION:
+            log_event("CuriosityEngine", "SELECTION_SKIPPED",
+                reason   = f"session limit reached ({self.MAX_PER_SESSION})",
+                headmate = headmate or "unknown",
+                session  = session_id[:8],
+            )
+            return None
 
         pool = self.store.get_pool(unanswered_only=True)
         if not pool:
@@ -407,7 +438,7 @@ JSON only, one per line."""
                 self.store.prioritize(q.id, delta=0.15)
 
         pool.sort(key=lambda q: q.priority, reverse=True)
-        top = pool[:12]
+        top = pool[:num_candidates]
 
         questions_text = "\n".join(
             f"[{i+1}] (priority {q.priority:.1f}, asked {len(q.asked_of)}x) {q.question} [about: {q.about}]"
@@ -416,14 +447,14 @@ JSON only, one per line."""
 
         invitation_note = (
             "\nIMPORTANT: They just explicitly invited you to ask something. "
-            "Ask anything."
+            "Pick one and ask it — this is the moment."
             if is_invitation else ""
         )
 
         is_rich = register in self._RICH_REGISTERS
         rich_note = (
             "\nYou're in a deep, open conversation. This is exactly when "
-            "curiosity is welcome."
+            "curiosity is welcome. Lean in — ask something real."
             if is_rich else ""
         )
 
@@ -435,14 +466,16 @@ What they just said: "{message}"
 {invitation_note}
 {rich_note}
 
-Things you've been wanting to ask:
+Things you've been wanting to ask (pick the one that fits best):
 {questions_text}
 
-Pick ONE question to ask right now. Phrase it naturally — woven into
-the flow, curious, not clinical. One sentence.
+These are your options. Pick whichever one fits most naturally into
+this specific moment. The conversation topic matters — a question about
+food won't fit if they're talking about their outfit. Find the one that
+could emerge naturally from what's being said right now.
 
-If you genuinely can't find one that fits, say so. But in an open,
-deep conversation, something almost always fits.
+If none of them fit this moment, return ask=false. Don't force it.
+One sentence, curious, not clinical. Woven in — not bolted on.
 
 Return JSON:
 {{"ask": true/false, "number": N or null, "phrasing": "how you'd ask it right now, naturally"}}"""
@@ -507,6 +540,252 @@ Return JSON:
         )
 
         return phrasing
+
+
+    # ── Beat-level check ──────────────────────────────────────────────────────
+
+    async def check_beat(
+        self,
+        user_message:   str,
+        gizmo_response: str,
+        headmate:       Optional[str],
+        session_id:     str,
+        llm,
+    ) -> None:
+        """
+        Runs after each exchange in close_loop.
+        Two jobs:
+          1. Check if this beat answers any pending questions — if so, capture.
+          2. Check if this beat raises new questions relevant to the pool.
+        Fast, cheap — not a full selection pass.
+        """
+        pool = self.store.get_pool(unanswered_only=True)
+        if not pool:
+            return
+
+        # Only check questions asked of this headmate or unasked
+        relevant = [
+            q for q in pool
+            if not headmate or headmate in q.asked_of or not q.asked_of
+        ][:10]
+
+        if not relevant:
+            return
+
+        questions_text = "\n".join(
+            f"[{q.id}] {q.question} (about: {q.about})"
+            for q in relevant
+        )
+
+        exchange = (
+            f"[{headmate.title() if headmate else 'Them'}]: {user_message}\n"
+            f"[Gizmo]: {gizmo_response}"
+        )
+
+        prompt = f"""You are Gizmo reviewing one exchange.
+
+Exchange:
+---
+{exchange}
+---
+
+Pending questions:
+{questions_text}
+
+Two things to check:
+1. Did this exchange answer any pending questions? Even partially?
+2. Did anything in this exchange make you want to ask something specific
+   from your list right now — before the conversation moves on?
+
+Return JSON (one object):
+{{
+  "answered": [{{"id": "q_id", "answer": "what was said"}}],
+  "ask_now": {{"id": "q_id", "phrasing": "how to ask it naturally right now"}} or null
+}}
+
+Only include genuinely answered questions.
+ask_now: only if something in this specific beat makes a question
+         feel urgent or perfectly timed. Null if nothing fits yet."""
+
+        try:
+            raw = await llm.generate(
+                [{"role": "user", "content": prompt}],
+                system_prompt=(
+                    "You are Gizmo checking one exchange against pending questions. "
+                    "JSON only. Be precise — only flag real answers and genuinely timely asks."
+                ),
+                max_new_tokens=200,
+                temperature=0.2,
+            )
+        except Exception as e:
+            log_error("CuriosityEngine", f"beat check failed: {e}", exc=None)
+            return
+
+        if not raw or not raw.strip():
+            return
+
+        try:
+            clean = raw.strip()
+            if clean.startswith("```"):
+                clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            data = json.loads(clean)
+        except Exception:
+            return
+
+        # Capture any answers
+        for ans in data.get("answered", []):
+            q_id   = ans.get("id", "")
+            answer = ans.get("answer", "").strip()
+            if q_id and answer:
+                self.store.mark_answered(q_id, answer, headmate or "")
+                log_event("CuriosityEngine", "BEAT_ANSWER_CAPTURED",
+                    session  = session_id[:8],
+                    headmate = headmate or "unknown",
+                    q_id     = q_id[:8],
+                )
+
+        # Queue an urgent ask if the beat calls for it
+        ask_now = data.get("ask_now")
+        if ask_now and ask_now.get("id") and ask_now.get("phrasing"):
+            q_id     = ask_now["id"]
+            phrasing = ask_now["phrasing"].strip()
+            # Store as a pending ask for the NEXT response
+            # (we can't inject mid-response — flag it for next select_question)
+            self._pending_beat_ask[session_id] = {
+                "q_id":     q_id,
+                "phrasing": phrasing,
+            }
+            log_event("CuriosityEngine", "BEAT_ASK_QUEUED",
+                session  = session_id[:8],
+                headmate = headmate or "unknown",
+                q_id     = q_id[:8],
+            )
+
+    # ── Psych coherence check ─────────────────────────────────────────────────
+
+    async def check_psych_coherence(
+        self,
+        user_message:   str,
+        gizmo_response: str,
+        headmate:       Optional[str],
+        session_id:     str,
+        llm,
+    ) -> None:
+        """
+        Runs after each exchange in close_loop.
+        Compares what just happened against the psych profile.
+        If something doesn't fit — or if something notable happened —
+        generates a question and adds it to the pool.
+
+        "Did this make sense for this person?"
+        """
+        if not headmate:
+            return
+
+        # Load psych profile
+        try:
+            from core.memory.psychology import _read_psychology
+            psych = _read_psychology(headmate, intimate=False) or ""
+            psych_intimate = _read_psychology(headmate, intimate=True) or ""
+        except Exception:
+            psych = ""
+            psych_intimate = ""
+
+        if not psych and not psych_intimate:
+            return  # No profile yet — nothing to check against
+
+        # Extract just the Current Understanding section
+        profile = ""
+        for doc in [psych, psych_intimate]:
+            if "## Current Understanding" in doc:
+                section = doc.split("## Current Understanding", 1)[1]
+                if "## Observations" in section:
+                    section = section.split("## Observations", 1)[0]
+                profile += section.strip()[:600] + "\n"
+
+        if not profile.strip():
+            return
+
+        exchange = (
+            f"[{headmate.title()}]: {user_message}\n"
+            f"[Gizmo]: {gizmo_response}"
+        )
+
+        prompt = f"""You are Gizmo reviewing one exchange against what you know about {headmate.title()}.
+
+What you know about {headmate.title()}:
+{profile}
+
+Exchange:
+---
+{exchange}
+---
+
+Two questions:
+1. Did this exchange make sense given what you know about {headmate.title()}?
+   Was anything surprising, out of character, or inconsistent with your profile?
+2. Did this exchange reveal something new that you want to understand better?
+   Something that doesn't fit neatly into what you know, or extends it?
+
+If yes to either — generate ONE specific question you genuinely want to ask.
+If everything made sense and nothing new surfaced — return nothing.
+
+Return JSON:
+{{
+  "coherent": true/false,
+  "observation": "what stood out or didn't fit — brief",
+  "question": "one specific question in your voice" or null,
+  "about": "what the question is about",
+  "priority": 0.0-1.0
+}}
+
+Only generate a question if there's genuine curiosity behind it.
+Null if everything was expected and nothing new surfaced."""
+
+        try:
+            raw = await llm.generate(
+                [{"role": "user", "content": prompt}],
+                system_prompt=(
+                    f"You are Gizmo checking whether an exchange made sense "
+                    f"given what you know about {headmate}. "
+                    "JSON only. Only flag real surprises or genuine new curiosity."
+                ),
+                max_new_tokens=200,
+                temperature=0.3,
+            )
+        except Exception as e:
+            log_error("CuriosityEngine", f"psych coherence check failed: {e}", exc=None)
+            return
+
+        if not raw or not raw.strip():
+            return
+
+        try:
+            clean = raw.strip()
+            if clean.startswith("```"):
+                clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            data = json.loads(clean)
+        except Exception:
+            return
+
+        question = data.get("question", "").strip()
+        about    = data.get("about", headmate).strip()
+        priority = float(data.get("priority", 0.6))
+        obs      = data.get("observation", "").strip()
+
+        if not question:
+            return
+
+        self.store.add(question, about, priority)
+
+        log_event("CuriosityEngine", "PSYCH_COHERENCE_QUESTION",
+            session     = session_id[:8],
+            headmate    = headmate,
+            coherent    = data.get("coherent", True),
+            observation = obs[:60] if obs else "",
+            question    = question[:60],
+            priority    = priority,
+        )
 
     # ── Answer capture ────────────────────────────────────────────────────────
 

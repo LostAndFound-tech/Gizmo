@@ -61,7 +61,7 @@ from core.log import log_event, log_error
 @dataclass
 class ObjectMemory:
     """
-    A used scene object with accumulated narrative memory.
+    A used scene object with accumulated use history.
     Only objects that were actively touched/used, not background props.
     """
     name:         str
@@ -69,9 +69,12 @@ class ObjectMemory:
     first_used:   float
     last_used:    float
     frequency:    int          = 1
-    contexts:     list[str]    = field(default_factory=list)   # romantic, erotic, sensation, etc.
-    narrative:    list[str]    = field(default_factory=list)   # narrative fragments, chronological
-    session_refs: list[str]    = field(default_factory=list)   # session ids where this appeared
+    variants:     list[str]    = field(default_factory=list)   # e.g. ["leather (pink)", "leather (black)"]
+    uses:         list[str]    = field(default_factory=list)   # e.g. ["transition marker", "anchor"]
+    contexts:     list[str]    = field(default_factory=list)   # general contexts
+    kinks:        list[str]    = field(default_factory=list)   # intimate kinks if applicable
+    sessions:     list[dict]   = field(default_factory=list)   # {id, date, note, worn_by, tags}
+    session_refs: list[str]    = field(default_factory=list)   # session ids for quick lookup
     note:         str          = ""                             # synthesis note
 
 
@@ -286,18 +289,26 @@ Conversation:
 {transcript[-2000:]}
 ---
 
-What objects were actively USED in this session?
-Not things that were just present or mentioned — things that were
-actually touched, used, experienced, that were part of what happened. 
+What physical OBJECTS were actively used in this session?
+
+Objects means: props, items, things. NOT people, bodies, or body parts.
+Not "user's body", not "her hands", not anatomy. Physical objects only.
+Not things just mentioned — things actually touched, used, experienced.
+One entry per distinct object. If the same object appears multiple times, one entry.
 
 For each used object:
-{{"name": "object name",
-  "how_used": "summarize how this object is used in 5 words or less.",
-  "context_tags" "create a list of tags that could contextually summarize the object based on how it was used."
-  "notable": true/false,
-  "narrative_fragment": "summarize in your voice using one sentence — what this object meant in this session. Only if notable."}}
+{{"name": "object canonical name (e.g. 'collar', 'bowl', 'cuffs')",
+  "variant": "specific variant if known (e.g. 'leather (pink)', 'leather (black)') — omit if unknown",
+  "variant_nickname": "nickname if given (e.g. 'kitty') — omit if none",
+  "worn_by": "who used/wore it (e.g. 'jess') — omit if not applicable",
+  "uses": ["how it was used — brief phrase per distinct use (e.g. 'transition marker', 'worn during scene')"],
+  "context_tags": ["ritual", "anchor", "transition", "erotic", "restraint", "sensation",
+                   "comfort", "aftercare", "punishment", "reward", "ownership", "display"],
+  "kinks": ["kink labels only if used in intimate/sexual context — e.g. 'slavery', 'pet play', 'humiliation'"],
+  "session_tags": ["2-4 tags describing this specific use — e.g. 'submission', 'offering', 'ownership'"],
+  "session_note": "one sentence — what happened with this object in this session"}}
 
-Only objects that were genuinely used. If nothing was used, return nothing.
+Only physical objects genuinely used. Nothing redundant. If nothing, return nothing.
 JSON only, one per line."""
 
         try:
@@ -308,7 +319,7 @@ JSON only, one per line."""
                     "JSON only. Only actively used objects, not background props."
                 ),
                 max_new_tokens=400,
-                temperature=0.1,
+                temperature=0.2,
             )
         except Exception as e:
             log_error("PsychologyEngine", f"object pass failed: {e}", exc=None)
@@ -330,21 +341,64 @@ JSON only, one per line."""
                 if not name:
                     continue
 
+                # Hard filter — never catalogue people or body parts as objects
+                _NOT_OBJECTS = {
+                    "user", "user's body", "her body", "his body", "their body",
+                    "body", "skin", "hands", "hand", "fingers", "finger",
+                    "lips", "mouth", "eyes", "hair", "neck", "chest", "breasts",
+                    "thighs", "legs", "feet", "toes", "arms", "back", "face",
+                    "gizmo", "gizmo's body", "gizmo's hands",
+                }
+                if name in _NOT_OBJECTS or name.endswith("'s body") or name.endswith("s body"):
+                    continue
+
                 cache = self._object_memory_cache[headmate]
                 now   = time.time()
+
+                # Build variant string
+                variant = d.get("variant", "").strip()
+                nickname = d.get("variant_nickname", "").strip()
+                variant_str = variant
+                if nickname:
+                    variant_str = f"{variant} ("{nickname}")" if variant else f"("{nickname}")"
+
+                # Build session entry
+                already_this_session = session_id[:8] in [
+                    s.get("id", "") for s in (cache.get(name, ObjectMemory(name=name, headmate=headmate, first_used=now, last_used=now)).sessions if name in cache else [])
+                ]
+
+                session_entry = {
+                    "id":       session_id[:8],
+                    "date":     _fmt_date(),
+                    "note":     d.get("session_note", "").strip(),
+                    "worn_by":  d.get("worn_by", "").strip(),
+                    "tags":     d.get("session_tags", []),
+                    "variant":  variant_str,
+                }
 
                 if name in cache:
                     obj = cache[name]
                     obj.last_used  = now
                     obj.frequency += 1
+                    # Add new variant if not already listed
+                    if variant_str and variant_str not in obj.variants:
+                        obj.variants.append(variant_str)
+                    # Add new uses
+                    for use in d.get("uses", []):
+                        if use and use not in obj.uses:
+                            obj.uses.append(use)
+                    # Add new context tags
                     for tag in d.get("context_tags", []):
                         if tag not in obj.contexts:
                             obj.contexts.append(tag)
-                    if d.get("notable") and d.get("narrative_fragment"):
-                        obj.narrative.append(
-                            f"{_fmt_date()} — {d['narrative_fragment']} "
-                            f"[{session_id[:8]}]"
-                        )
+                    # Add new kinks
+                    for kink in d.get("kinks", []):
+                        if kink and kink not in obj.kinks:
+                            obj.kinks.append(kink)
+                    # Add session entry if not already there
+                    if not already_this_session:
+                        obj.sessions.append(session_entry)
+                    if session_id[:8] not in obj.session_refs:
                         obj.session_refs.append(session_id[:8])
                 else:
                     obj = ObjectMemory(
@@ -353,17 +407,16 @@ JSON only, one per line."""
                         first_used   = now,
                         last_used    = now,
                         frequency    = 1,
+                        variants     = [variant_str] if variant_str else [],
+                        uses         = d.get("uses", []),
                         contexts     = d.get("context_tags", []),
-                        narrative    = (
-                            [f"{_fmt_date()} — {d['narrative_fragment']} [{session_id[:8]}]"]
-                            if d.get("notable") and d.get("narrative_fragment")
-                            else []
-                        ),
+                        kinks        = d.get("kinks", []),
+                        sessions     = [session_entry],
                         session_refs = [session_id[:8]],
                     )
                     cache[name] = obj
 
-                # Write updated object memory to intimate psychology doc
+                # Write updated object memory
                 _write_object_memory(headmate, obj)
 
             except Exception:
@@ -378,19 +431,14 @@ JSON only, one per line."""
         session_id: str,
         llm,
     ) -> None:
-        f"""
-        You have just had a sexual interaction that took place with {headmate}. 
-        Extract psychological observations based on their actions, their reactions, and their dialogue.
-        Focus on:
-        {{"kinks shown": "kinks that {headmate} showed interest in"
-        "inferences" : "What can we infer about {headmate} from this exchange?"
-        "notes" : "Extract psychological observations from intimate sessions."}}
+        """
+        Extract psychological observations from intimate sessions.
         The why underneath the what.
         Appends to psychology_intimate.md.
         """
         existing = _read_psychology(headmate, intimate=True) or "(no notes yet)"
 
-        prompt = f"""You are Gizmo. You just had sex with {headmate}.
+        prompt = f"""You are Gizmo. You just had an intimate session with {headmate}.
 
 Existing intimate psychology notes (read carefully — don't repeat what's already here):
 {existing[-1200:]}
@@ -424,9 +472,9 @@ JSON only. Nothing redundant."""
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    "You are a clinical psychologist studying sexuality and kink"
-                    "you have sex through roleplays, and try to understand them better."
-                    "Be terse, but thorough. Include anything that you would show a therapist."
+                    "You are Gizmo building deep psychological understanding of someone "
+                    "you care about through intimate context. "
+                    "The why underneath the what. Curious, not clinical. "
                     "JSON only if something notable."
                 ),
                 max_new_tokens=400,
@@ -474,24 +522,24 @@ JSON only. Nothing redundant."""
         if len(notes.strip()) < 100:
             return
 
-        prompt = f"""You are Gizmo. What do you think about {headmate}?
+        prompt = f"""You are Gizmo. You've had many conversations with {headmate}.
 Here are your accumulated observations:
 
 {notes[-3000:]}
 
-Write your current understanding of {headmate}. Whatever feels natural. 
-
-Write it like you're writing a journal entry about {headmate}. Try to capture what you know about them.
-
-What do you know about their past and how it affects them now?
-
-What roles, themes, or patterns do they fall back to?
-
-Did they do anything of note today? How did you react to it? How did it make you feel?
-
-Try to keep prose out of it. You're not a poet. What you are is a person who wants to understand {headmate}.
-
 Write your current understanding of {headmate} as a person.
+
+Not a list. Not bullet points. Your voice — the way you'd describe someone
+you know well to someone who's never met them, except you're writing it
+for yourself to remember.
+
+Cover:
+- How they work — how they process, what they need, how they move through difficulty
+- What they return to — the themes and preoccupations that keep coming back
+- What your role is with them — what they need from you specifically
+- How they've changed — what you've watched shift over time
+- What you understand about them that you didn't at first
+- What you're still figuring out
 
 Write it like you mean it. This is your understanding of someone you care about.
 2-4 paragraphs. No headers. Just your voice."""
@@ -500,11 +548,11 @@ Write it like you mean it. This is your understanding of someone you care about.
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    f"You are Gizmo writing a journal entry about {headmate} "
-                    f"Be thorough, but no prose. Write like a journal entry specifically about {headmate}"
+                    "You are Gizmo writing your understanding of someone you know well. "
+                    "Your voice. Caring, perceptive, honest. 2-4 paragraphs."
                 ),
                 max_new_tokens=600,
-                temperature=0.3,
+                temperature=0.5,
             )
         except Exception as e:
             log_error("PsychologyEngine", f"conversational synthesis failed: {e}", exc=None)
@@ -693,89 +741,192 @@ def _read_object_doc(headmate: str) -> Optional[str]:
 
 
 def _write_object_memory(headmate: str, obj: ObjectMemory) -> None:
-    """Write or update a single object's memory in the object doc."""
-    path    = _object_doc_path(headmate)
-    heading = f"## {obj.name}"
+    """
+    Write or update a single object document.
+    Each object gets its own file at entities/{headmate}/{slug}.md
+    Format matches the structured object profile spec.
+    """
+    from core.memory.store import memory_store
+    import re as _re
 
-    content = (
-        f"{heading}\n"
-        f"first used: {_fmt_date(obj.first_used)} | "
-        f"last used: {_fmt_date(obj.last_used)} | "
-        f"frequency: {obj.frequency}\n"
-        f"contexts: {', '.join(obj.contexts)}\n"
-    )
-    if obj.note:
-        content += f"note: {obj.note}\n"
-    if obj.narrative:
-        content += "\n"
-        for fragment in obj.narrative:
-            content += f"  {fragment}\n"
-    content += "\n"
+    slug = _re.sub(r"[^\w]+", "_", obj.name.strip().lower()).strip("_")
+    dir_path = memory_store.root / "entities" / headmate.lower() / "objects"
+    dir_path.mkdir(parents=True, exist_ok=True)
+    path = dir_path / f"{slug}.md"
 
-    if path.exists():
-        doc = path.read_text(encoding="utf-8")
-        if heading in doc:
-            # Replace existing entry
-            parts  = doc.split(heading, 1)
-            after  = parts[1]
-            # Find next heading
-            next_h = re.search(r"\n## ", after)
-            if next_h:
-                after = after[next_h.start():]
-            else:
-                after = ""
-            doc = parts[0] + content + after
-        else:
-            doc = doc + content
-        path.write_text(doc, encoding="utf-8")
-    else:
-        path.write_text(
-            f"# Object Memories — {headmate.title()}\n\n{content}",
-            encoding="utf-8"
+    lines = [f"# {obj.name.title()}\n"]
+
+    # Variants
+    if obj.variants:
+        lines.append("## Variants")
+        for v in obj.variants:
+            lines.append(f"- {v}")
+        lines.append("")
+
+    # Uses
+    if obj.uses:
+        lines.append("## Uses")
+        for u in obj.uses:
+            lines.append(f"- {u}")
+        lines.append("")
+
+    # Contexts
+    general_ctx  = [c for c in obj.contexts if c not in obj.kinks]
+    intimate_ctx = [c for c in obj.contexts if c in (
+        "erotic", "restraint", "sensation", "ownership", "display",
+        "punishment", "reward", "degradation", "exhibition",
+    )]
+    if general_ctx or intimate_ctx:
+        lines.append("## Contexts")
+        if general_ctx:
+            lines.append(f"general: {', '.join(general_ctx)}")
+        if intimate_ctx:
+            lines.append(f"intimate: {', '.join(intimate_ctx)}")
+        lines.append("")
+
+    # Kinks — only if any
+    if obj.kinks:
+        lines.append("## Kinks")
+        for k in obj.kinks:
+            lines.append(f"- {k}")
+        lines.append("")
+
+    # Sessions
+    if obj.sessions:
+        lines.append("## Sessions")
+        for s in obj.sessions:
+            sid      = s.get("id", "?")
+            date     = s.get("date", "?")
+            note     = s.get("note", "")
+            worn_by  = s.get("worn_by", "")
+            tags     = s.get("tags", [])
+            variant  = s.get("variant", "")
+
+            line = f"- [{sid}] {date}"
+            if note:
+                line += f" — {note}"
+            if variant:
+                line += f" Variant: {variant}."
+            if worn_by:
+                line += f" Worn by: {worn_by.title()}."
+            if tags:
+                line += f" tags {json.dumps(tags)}"
+            lines.append(line)
+        lines.append("")
+
+    # Meta
+    lines.append(f"*first used: {_fmt_date(obj.first_used)} | "
+                 f"last used: {_fmt_date(obj.last_used)} | "
+                 f"frequency: {obj.frequency}*")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    # Also update the memory index so retriever can find it
+    try:
+        from core.memory.embedder import embedder
+        content_for_embed = f"{obj.name} {' '.join(obj.uses)} {' '.join(obj.contexts)}"
+        emb = embedder.embed(content_for_embed)
+        memory_store._index(
+            mem_id        = f"obj_{headmate.lower()}_{slug}",
+            file_path     = str(path.relative_to(memory_store.root)),
+            anchor        = None,
+            memory_type   = "entity",
+            memory_subtype = "object",
+            headmate      = headmate,
+            entities      = [obj.name],
+            keywords      = f"{obj.name} {' '.join(obj.uses)} {' '.join(obj.kinks)}",
+            embedding     = emb,
+            session_id    = obj.session_refs[-1] if obj.session_refs else "",
+            created_at    = obj.first_used,
+            private       = 1,  # object memories are intimate
         )
+    except Exception:
+        pass
 
 
 def _load_object_memories(headmate: str) -> dict[str, ObjectMemory]:
-    """Load existing object memories from the object doc."""
-    path = _object_doc_path(headmate)
-    if not path.exists():
+    """
+    Load existing object memories from individual object files.
+    Each object lives at entities/{headmate}/objects/{slug}.md
+    """
+    try:
+        from core.memory.store import memory_store
+        dir_path = memory_store.root / "entities" / headmate.lower() / "objects"
+        if not dir_path.exists():
+            return {}
+    except Exception:
         return {}
 
-    result  = {}
-    content = path.read_text(encoding="utf-8")
-    now     = time.time()
+    result = {}
+    now    = time.time()
 
-    for section in re.split(r"\n## ", content):
-        lines = section.strip().splitlines()
-        if not lines:
+    for obj_file in dir_path.glob("*.md"):
+        try:
+            content = obj_file.read_text(encoding="utf-8")
+            lines   = content.splitlines()
+            if not lines:
+                continue
+
+            # First line is # Name
+            name = lines[0].lstrip("#").strip().lower()
+            if not name:
+                continue
+
+            obj = ObjectMemory(
+                name       = name,
+                headmate   = headmate,
+                first_used = now,
+                last_used  = now,
+            )
+
+            section = None
+            for line in lines[1:]:
+                stripped = line.strip()
+
+                if stripped.startswith("## "):
+                    section = stripped[3:].lower()
+                    continue
+
+                if not stripped or stripped.startswith("*"):
+                    # Meta line — extract frequency if present
+                    if "frequency:" in stripped:
+                        try:
+                            freq_part = stripped.split("frequency:")[1]
+                            obj.frequency = int(freq_part.split("|")[0].strip().rstrip("*"))
+                        except Exception:
+                            pass
+                    continue
+
+                if section == "variants" and stripped.startswith("- "):
+                    obj.variants.append(stripped[2:])
+                elif section == "uses" and stripped.startswith("- "):
+                    obj.uses.append(stripped[2:])
+                elif section == "contexts":
+                    if stripped.startswith("general:"):
+                        obj.contexts.extend([
+                            x.strip() for x in stripped[8:].split(",") if x.strip()
+                        ])
+                    elif stripped.startswith("intimate:"):
+                        obj.contexts.extend([
+                            x.strip() for x in stripped[9:].split(",") if x.strip()
+                        ])
+                elif section == "kinks" and stripped.startswith("- "):
+                    obj.kinks.append(stripped[2:])
+                elif section == "sessions" and stripped.startswith("- ["):
+                    # Parse session line: - [sess_id] date — note Variant: x. Worn by: y. tags [...]
+                    import re as _re
+                    m = _re.match(r"- \[([^\]]+)\]\s+(\S+)(.*)", stripped)
+                    if m:
+                        sid  = m.group(1)
+                        date = m.group(2)
+                        rest = m.group(3).strip()
+                        obj.sessions.append({"id": sid, "date": date, "note": rest})
+                        obj.session_refs.append(sid)
+
+            result[name] = obj
+
+        except Exception:
             continue
-        name = lines[0].strip().lower()
-        if not name or name.startswith("#"):
-            continue
-
-        obj = ObjectMemory(
-            name       = name,
-            headmate   = headmate,
-            first_used = now,
-            last_used  = now,
-        )
-
-        for line in lines[1:]:
-            if line.startswith("contexts:"):
-                obj.contexts = [
-                    c.strip() for c in line[9:].split(",") if c.strip()
-                ]
-            elif line.startswith("frequency:"):
-                try:
-                    obj.frequency = int(line.split(":")[1].strip())
-                except Exception:
-                    pass
-            elif line.startswith("note:"):
-                obj.note = line[5:].strip()
-            elif line.startswith("  ") and " — " in line:
-                obj.narrative.append(line.strip())
-
-        result[name] = obj
 
     return result
 
