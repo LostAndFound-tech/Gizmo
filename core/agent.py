@@ -661,10 +661,22 @@ async def close_loop(
         # ── Per-message encoding — lightweight passes only ──────────────────────
         # Heavy passes (encode, pattern, kink, psychology, narrative, curiosity
         # gap detection) run at session close via session_manager, NOT here.
-        # Running them per-message was the source of the token burn.
         try:
-            transcript = build_transcript(history)
+            # Build transcript from current exchange + recent history
+            # Don't rely solely on build_transcript(history) —
+            # the current message+response must be in there
+            _history_transcript = build_transcript(history)
+            _exchange = (
+                f"{brief.headmate.title() if brief.headmate else 'User'}: "
+                f"{brief.message}\n\n"
+                f"Gizmo: {response}"
+            )
+            # Use full transcript if available, otherwise just the exchange
+            transcript = _history_transcript if len(_history_transcript) > 50 else _exchange
             msg_count  = ctx.message_count
+
+            print(f"[catch_details] scheduling, transcript len={len(transcript)}, "
+                  f"headmate={brief.headmate}, msg={msg_count}", flush=True)
 
             # catch_details — every message, cheap
             asyncio.ensure_future(
@@ -688,8 +700,26 @@ async def close_loop(
                         llm        = llm,
                     )
                 )
+
+            # curiosity gap detection — every 5th message
+            # Pool needs to build during session, not just at close
+            if msg_count % 5 == 0 or msg_count == 2:
+                try:
+                    from core.memory.curiosity import curiosity_engine as _ce_enc
+                    asyncio.ensure_future(
+                        _ce_enc.detect_gaps(
+                            transcript = transcript,
+                            headmate   = brief.headmate,
+                            session_id = brief.session_id,
+                            llm        = llm,
+                        )
+                    )
+                except Exception:
+                    pass
+
         except Exception as e:
-            log_error("Agent", f"per-message encoding failed to schedule: {e}", exc=None)
+            log_error("Agent", f"per-message encoding failed to schedule: {e}", exc=e)
+            print(f"[catch_details] FAILED TO SCHEDULE: {e}", flush=True)
 
         # ── Curiosity — beat check and psych coherence ─────────────────────────
         try:

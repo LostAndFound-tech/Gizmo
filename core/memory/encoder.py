@@ -165,11 +165,55 @@ class EncodingTools:
     ) -> str:
         """
         Write a new entity document.
-        Check entity_exists first — use update_entity if it already exists.
+        Checks exact name first, then semantic similarity —
+        routes to update_entity if the entity already exists under
+        any name. Prevents duplicate docs for the same person/thing.
         Returns the memory id.
         """
         self._ops += 1
-        emb = embedder.embed(content)
+
+        # ── Exact name match (case-insensitive via slugify) ───────────────────
+        if memory_store.entity_exists(name):
+            ok = memory_store.update_entity(
+                name      = name,
+                additions = content,
+                keywords  = keywords or name.lower(),
+            )
+            if ok:
+                return f"updated existing: {name}"
+
+        emb = embedder.embed(f"{name} {content[:200]}")
+
+        # ── Semantic dedup ────────────────────────────────────────────────────
+        if emb:
+            try:
+                similar = embedder.search(
+                    query_embedding = emb,
+                    limit           = 3,
+                    min_similarity  = 0.88,
+                    memory_type     = "entity",
+                )
+                if similar:
+                    existing_path = similar[0].get("file_path", "")
+                    existing_name = (
+                        existing_path.split("/")[-1]
+                        .replace(".md", "")
+                        .replace("_", " ")
+                        .title()
+                    )
+                    ok = memory_store.update_entity(
+                        existing_name,
+                        f"\n[Also known as: {name}]\n{content.strip()}",
+                        keywords = keywords or name.lower(),
+                    )
+                    if ok:
+                        mem_id = similar[0].get("id", "")
+                        self._written.append(mem_id)
+                        return f"merged into existing: {existing_name}"
+            except Exception:
+                pass
+
+        # Genuinely new entity
         mem_id = memory_store.write_entity(
             name           = name,
             content        = content,
@@ -218,14 +262,79 @@ class EncodingTools:
     ) -> str:
         """
         Write a place document.
-        interior=True for places in the internal world.
+        Dedup priority:
+          1. Exact slug match — free
+          2. Normalized name match — strip articles, lowercase
+          3. Embedding similarity — fallback for alias names
+        Places are shared (system-wide) but provenance is noted.
         Returns the memory id.
         """
         self._ops += 1
-        emb = embedder.embed(content)
+
+        # ── 1. Exact slug match ───────────────────────────────────────────────
+        if memory_store.place_exists(name, interior=interior):
+            additions = content.strip()
+            if self.headmate:
+                additions = f"[{self.headmate}] {additions}"
+            ok = memory_store.update_place(name, additions, interior=interior)
+            if ok:
+                _note_contributor(name, self.headmate, interior)
+                return f"updated existing: {name}"
+
+        # ── 2. Normalized name match ──────────────────────────────────────────
+        normalized = _normalize_place_name(name)
+        canonical  = _find_by_normalized_name(normalized, interior)
+        if canonical:
+            additions = content.strip()
+            if self.headmate:
+                additions = f"[{self.headmate}] {additions}"
+            ok = memory_store.update_place(canonical, additions, interior=interior)
+            if ok:
+                _note_contributor(canonical, self.headmate, interior)
+                return f"merged into existing: {canonical}"
+
+        # ── 3. Embedding similarity fallback ─────────────────────────────────
+        emb = embedder.embed(f"{name} {content[:200]}")
+        if emb:
+            try:
+                similar = embedder.search(
+                    query_embedding = emb,
+                    limit           = 3,
+                    min_similarity  = 0.82,
+                    memory_type     = "place",
+                )
+                if similar:
+                    existing_path = similar[0].get("file_path", "")
+                    existing_name = (
+                        existing_path.split("/")[-1]
+                        .replace(".md", "")
+                        .replace("_", " ")
+                        .title()
+                    )
+                    additions = f"[Also known as: {name}] {content.strip()}"
+                    if self.headmate:
+                        additions = f"[{self.headmate}] {additions}"
+                    ok = memory_store.update_place(
+                        existing_name, additions, interior=interior
+                    )
+                    if ok:
+                        _note_contributor(existing_name, self.headmate, interior)
+                        mem_id = similar[0].get("id", "")
+                        self._written.append(mem_id)
+                        return f"merged into existing: {existing_name}"
+            except Exception:
+                pass
+        else:
+            emb = None
+
+        # ── New place — write with provenance header ──────────────────────────
+        provenance = ""
+        if self.headmate:
+            provenance = f"introduced by: {self.headmate}\n\n"
+
         mem_id = memory_store.write_place(
             name           = name,
-            content        = content,
+            content        = provenance + content,
             interior       = interior,
             headmate       = self.headmate,
             memory_subtype = memory_subtype,
@@ -609,6 +718,98 @@ Start by searching for the most important entity in this conversation.
 """
 
 
+# ── Place dedup helpers ───────────────────────────────────────────────────────
+
+_ARTICLES = {"the", "a", "an", "some", "our", "my", "her", "his", "their"}
+
+def _normalize_place_name(name: str) -> str:
+    """
+    Normalize a place name for comparison.
+    Strips articles, lowercases, strips punctuation.
+    "The Fronting Room" → "fronting room"
+    "A Mauve Waiting Space" → "mauve waiting space"
+    """
+    import re as _re
+    words = name.lower().strip().split()
+    words = [w for w in words if w not in _ARTICLES]
+    words = [_re.sub(r"[^\w\s]", "", w) for w in words]
+    return " ".join(words).strip()
+
+
+def _find_by_normalized_name(normalized: str, interior: bool) -> str | None:
+    """
+    Scan existing place files for one whose normalized name matches.
+    Returns the canonical name (as stored) or None.
+    """
+    try:
+        subdir = "interior" if interior else "external"
+        places_dir = memory_store.root / "places" / subdir
+        if not places_dir.exists():
+            return None
+        for path in places_dir.glob("*.md"):
+            # Reconstruct name from slug
+            candidate = path.stem.replace("_", " ")
+            if _normalize_place_name(candidate) == normalized:
+                return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _note_contributor(
+    place_name: str,
+    headmate:   str | None,
+    interior:   bool,
+) -> None:
+    """
+    Update the contributors line in a place doc.
+    Non-blocking — if it fails, nothing breaks.
+    """
+    if not headmate:
+        return
+    try:
+        path = memory_store.place_path(place_name, interior=interior)
+        if not path.exists():
+            return
+        text = path.read_text(encoding="utf-8")
+
+        if f"contributors:" in text:
+            # Add headmate to existing contributors list if not already there
+            if headmate not in text.split("contributors:", 1)[1].split("\n", 1)[0]:
+                text = text.replace(
+                    "contributors:",
+                    f"contributors:",
+                    1
+                )
+                # Append to the contributors line
+                lines = text.splitlines()
+                for i, line in enumerate(lines):
+                    if line.startswith("contributors:"):
+                        if headmate not in line:
+                            lines[i] = line.rstrip() + f", {headmate}"
+                        break
+                text = "\n".join(lines)
+                path.write_text(text, encoding="utf-8")
+        elif "introduced by:" in text:
+            # Add contributors line after introduced by
+            text = text.replace(
+                f"introduced by: {headmate}",
+                f"introduced by: {headmate}\ncontributors: {headmate}",
+                1
+            )
+            # If introduced by someone else, just add contributors
+            if "contributors:" not in text:
+                lines = text.splitlines()
+                for i, line in enumerate(lines):
+                    if line.startswith("introduced by:"):
+                        lines.insert(i + 1, f"contributors: {headmate}")
+                        break
+                text = "\n".join(lines)
+            path.write_text(text, encoding="utf-8")
+    except Exception:
+        pass
+
+
 # ── Main encoder ──────────────────────────────────────────────────────────────
 
 class MemoryEncoder:
@@ -636,6 +837,32 @@ class MemoryEncoder:
         t_start = time.monotonic()
 
         tools  = EncodingTools(session_id=session_id, headmate=headmate)
+
+        # ── Recurring details — things mentioned multiple times ───────────────
+        # These should graduate to proper entity/place docs, not stay as
+        # scattered detail fragments. Surface them to the encode pass.
+        recurring_block = ""
+        try:
+            recurring = memory_store.get_recurring_details(
+                headmate     = headmate,
+                min_mentions = 2,
+                limit        = 5,
+            )
+            if recurring:
+                lines = []
+                for r in recurring:
+                    lines.append(
+                        f"  [{r['mention_count']}x] {r['content']} "
+                        f"(tags: {r.get('tags','')}, context: {r.get('context','')})"
+                    )
+                recurring_block = (
+                    "\n\nRECURRING DETAILS (mentioned multiple times — "
+                    "consider promoting to entity/place doc):\n"
+                    + "\n".join(lines)
+                )
+        except Exception:
+            pass
+
         prompt = _build_encoding_prompt(
             transcript  = transcript,
             headmate    = headmate,
@@ -644,6 +871,9 @@ class MemoryEncoder:
             register    = register,
             budget      = self.BUDGET,
         )
+
+        if recurring_block:
+            prompt += recurring_block
 
         messages = [{"role": "user", "content": prompt}]
         ops      = 0
@@ -741,36 +971,47 @@ class MemoryEncoder:
         Runs concurrently with encode(). Returns count of details caught.
         """
         if not transcript or len(transcript.strip()) < 50:
+            print(f"[catch_details] skipping — transcript too short ({len(transcript.strip()) if transcript else 0} chars)", flush=True)
             return 0
 
-        prompt = f"""Read this conversation and catch every detail mentioned in passing.
+        print(f"[catch_details] running — transcript {len(transcript)} chars, headmate={headmate}", flush=True)
+
+        prompt = f"""Read this conversation and extract every fact worth remembering.
 
 Headmate: {headmate or "unknown"}
 Register: {register}
 
 ---
 
-{transcript}
+{transcript[-2000:]}
 
 ---
 
-Catch the asides. The throwaway mentions. The things said once and moved on from.
-A place name. A band dropped in passing. A preference revealed without fanfare.
-A person mentioned briefly. A thing they own or want. An event referenced.
-Something that felt like context but might matter later.
+Catch everything — both the main events AND the passing details.
 
-For each detail, return a JSON object on its own line:
-{{"content": "the detail, verbatim or near-verbatim",
-  "keywords": "space separated words to find this later",
-  "tags": ["tag1", "tag2"],
-  "context": "one phrase describing what was happening around this detail"}}
+EVENTS & FACTS (things that happened or were stated as true):
+- Powers, abilities, magic demonstrated or mentioned
+- Physical descriptions of people, places, objects
+- Things that exist in this world / this person's world
+- Actions taken — what they did, what Gizmo did
+- Relationships revealed
+- Rules of the space they're in
 
-Tags should be specific and useful: band, place, person, preference, event,
-interior, food, media, memory, reference, relationship, habit, want, etc.
+PASSING DETAILS (asides, throwaway mentions):
+- Names dropped in passing
+- Preferences revealed
+- Things owned, wanted, remembered
+- Places mentioned
+- Media, music, food referenced
 
-Only catch genuine details — not the main topic of conversation.
-If the whole conversation was about one thing, catch the edges of it.
-If nothing was said in passing, return nothing.
+For each item, return a JSON object on its own line:
+{{"content": "the fact or detail, stated plainly",
+  "keywords": "space separated search words",
+  "tags": ["event|fact|ability|place|person|preference|object|world_rule|relationship"],
+  "context": "one phrase — what was happening when this came up"}}
+
+Catch everything worth knowing. Don't filter by whether it's "main topic."
+If it's true in this world, write it down.
 JSON only, one object per line."""
 
         try:
@@ -796,22 +1037,62 @@ JSON only, one object per line."""
             if not line or not line.startswith("{"):
                 continue
             try:
-                det = json.loads(line)
+                det     = json.loads(line)
                 content = det.get("content", "").strip()
                 if not content or len(content) < 5:
                     continue
 
                 emb = embedder.embed(content)
-                memory_store.write_detail(
-                    content    = content,
-                    headmate   = headmate,
-                    session_id = session_id,
-                    keywords   = det.get("keywords", ""),
-                    tags       = det.get("tags", []),
-                    context    = det.get("context", ""),
-                    embedding  = emb,
-                )
-                count += 1
+
+                # ── Similarity dedup ──────────────────────────────────────────
+                # Before writing, check if a very similar detail already exists.
+                # If yes — don't create a duplicate. Let the encode pass
+                # accumulate it into the existing entity/place doc instead.
+                is_duplicate = False
+                if emb:
+                    similar = embedder.search(
+                        query_embedding = emb,
+                        limit           = 3,
+                        min_similarity  = 0.88,   # high threshold — must be very similar
+                        headmate        = headmate,
+                    )
+                    if similar:
+                        is_duplicate = True
+                        # Promote the existing detail — mark it seen again
+                        # so the encode pass knows to deepen it
+                        existing_id = similar[0].get("id")
+                        if existing_id:
+                            try:
+                                memory_store.touch_detail(existing_id)
+                            except Exception:
+                                pass
+
+                if not is_duplicate:
+                    memory_store.write_detail(
+                        content    = content,
+                        headmate   = headmate,
+                        session_id = session_id,
+                        keywords   = det.get("keywords", ""),
+                        tags       = det.get("tags", []),
+                        context    = det.get("context", ""),
+                        embedding  = emb,
+                    )
+                    count += 1
+
+                    # ── Body fact extraction ──────────────────────────────
+                    # If this detail describes a physical attribute,
+                    # append it to the headmate's body file immediately.
+                    if headmate:
+                        try:
+                            from core.memory.gizmo_self import (
+                                extract_body_facts, append_body_fact
+                            )
+                            body_facts = extract_body_facts(content, headmate)
+                            for section, fact in body_facts:
+                                append_body_fact(headmate, section, fact)
+                        except Exception:
+                            pass
+
             except (json.JSONDecodeError, Exception):
                 continue
 
