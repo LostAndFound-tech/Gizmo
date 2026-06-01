@@ -486,7 +486,14 @@ class MemoryRetriever:
         print("------------------")
         print("------------------")
         print("------------------")
-        print(log_event)
+        print(f"""headmate: {headmate}:
+                hits: {ctx.total_hits}
+                memories: {ctx.memories}
+                entities: {ctx.entities}
+                places: {ctx.places}
+                details: {ctx.details},
+                duration(ms): {duration_ms}
+              """)
         print("------------------")
         print("------------------")
         print("------------------")
