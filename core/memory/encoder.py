@@ -718,6 +718,110 @@ Start by searching for the most important entity in this conversation.
 """
 
 
+# ── LLM body fact extraction ─────────────────────────────────────────────────
+
+async def _extract_body_facts_llm(
+    transcript: str,
+    headmate:   str,
+    session_id: str,
+    llm,
+) -> None:
+    """
+    Extract physical facts about the headmate from the transcript using LLM.
+    Regex misses natural language descriptions — this catches everything.
+    Writes atomic labels to their body file.
+    """
+    try:
+        from core.memory.gizmo_self import (
+            append_body_fact, read_body, _MOVEMENT_LABELS
+        )
+
+        existing = read_body(headmate)
+
+        prompt = f"""Read this conversation and extract physical facts about {headmate.title()}.
+
+Conversation:
+---
+{transcript[-1500:]}
+---
+
+Already known:
+{existing[:400] if existing else "(nothing yet)"}
+
+Extract ONLY new facts not already known. Physical attributes only.
+
+Categories and what belongs in each:
+- Build & appearance: height, size, weight, overall look, hair color/length, eye color, skin tone
+- How they move: movement quality labels ONLY — graceful, confident, hesitant, deliberate, fluid, tense, quick, slow, still, restless, purposeful, awkward. NO descriptive phrases.
+- Voice: tone, pitch, quality labels — soft, deep, sharp, warm, quiet, loud, musical
+- Hands: size, appearance, how used
+- Skin & markings: tattoos, scars, piercings, markings — location and description
+- What they wear: clothing, style
+
+For each fact return one JSON object per line:
+{{"section": "Build & appearance|How they move|Voice|Hands|Skin & markings|What they wear",
+  "fact": "the atomic fact, stated plainly"}}
+
+Rules:
+- Movement: labels only. Never "she moved like X" or "gracefully across the room." Just "graceful."
+- One fact per object — no compound facts
+- Only genuinely observed facts, not inferences
+- Skip anything already in the known section
+- If nothing new, return nothing
+
+JSON only, one per line."""
+
+        raw = await llm.generate(
+            [{"role": "user", "content": prompt}],
+            system_prompt=(
+                f"You are extracting physical facts about {headmate}. "
+                "JSON only. Atomic facts. Movement labels only — no prose."
+            ),
+            max_new_tokens=300,
+            temperature=0.1,
+        )
+
+        if not raw or not raw.strip():
+            return
+
+        count = 0
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                d       = json.loads(line)
+                section = d.get("section", "").strip()
+                fact    = d.get("fact", "").strip()
+                if not section or not fact:
+                    continue
+
+                # Movement label validation — reject descriptive phrases
+                if section == "How they move":
+                    words = fact.lower().split()
+                    if not any(w in _MOVEMENT_LABELS for w in words):
+                        continue
+                    # Keep only the label word(s)
+                    fact = " ".join(w for w in words if w in _MOVEMENT_LABELS)
+                    if not fact:
+                        continue
+
+                append_body_fact(headmate, section, fact)
+                count += 1
+            except Exception:
+                continue
+
+        if count:
+            log_event("MemoryEncoder", "BODY_FACTS_EXTRACTED",
+                headmate = headmate,
+                session  = session_id[:8],
+                count    = count,
+            )
+
+    except Exception as e:
+        log_error("MemoryEncoder", f"body fact LLM pass failed: {e}", exc=None)
+
+
 # ── Place dedup helpers ───────────────────────────────────────────────────────
 
 _ARTICLES = {"the", "a", "an", "some", "our", "my", "her", "his", "their"}
@@ -808,6 +912,204 @@ def _note_contributor(
             path.write_text(text, encoding="utf-8")
     except Exception:
         pass
+
+
+async def quick_pass(
+    exchange:   str,
+    headmate:   Optional[str],
+    session_id: str,
+    register:   str,
+    llm,
+) -> None:
+    """
+    Single batched LLM call per exchange.
+    Replaces: catch_details + extract_entity_mentions + _extract_body_facts_llm
+    One call. One JSON blob. One write pass. Fast.
+
+    Returns everything worth writing from this exchange:
+    - Details (asides, facts, events)
+    - Entities (people, places, things, abilities, world rules)
+    - Body facts (physical descriptions)
+    - Wellness observation (current state)
+    """
+    if not exchange or len(exchange.strip()) < 20:
+        return
+
+    prompt = f"""You are Gizmo's memory system. Read this exchange and extract everything worth remembering.
+
+Exchange:
+---
+{exchange[-1500:]}
+---
+
+Return a single JSON object with these sections:
+
+{{
+  "details": [
+    {{"content": "fact or detail worth remembering",
+      "keywords": "search words",
+      "tags": ["event|fact|ability|place|world_rule|preference|relationship"],
+      "context": "one phrase — what was happening"}}
+  ],
+  "entities": [
+    {{"name": "entity name lowercase",
+      "type": "person|place|thing|ability|world_rule",
+      "details": ["atomic detail 1", "atomic detail 2"],
+      "notes": "anything else"}}
+  ],
+  "body_facts": [
+    {{"person": "name lowercase",
+      "section": "Build & appearance|How they move|Voice|Hands|Skin & markings|What they wear|Scent & texture",
+      "fact": "atomic fact — movement is LABELS ONLY (graceful/confident/hesitant/deliberate/fluid/tense/quick/slow)"}}
+  ],
+  "wellness": {{
+    "observation": "what their current state seems to be — or null if nothing notable",
+    "category": "mood|energy|stress|emotional_need|physical_need"
+  }}
+}}
+
+Rules:
+- details: everything worth knowing — events, facts, asides, world rules
+- entities: every named person, place, object, ability mentioned
+- body_facts: physical descriptions only. Movement = labels only, never phrases
+- wellness: one observation about {headmate or "them"}'s current state, or null
+- Only what was actually stated. Nothing invented.
+- Empty arrays if nothing found. wellness.observation null if nothing notable.
+
+JSON only. No prose."""
+
+    try:
+        raw = await llm.generate(
+            [{"role": "user", "content": prompt}],
+            system_prompt=(
+                "You are a memory extraction system. "
+                "JSON only. Atomic facts. One structured object."
+            ),
+            max_new_tokens=800,
+            temperature=0.1,
+        )
+    except Exception as e:
+        log_error("MemoryEncoder", f"quick_pass LLM failed: {e}", exc=None)
+        return
+
+    if not raw or not raw.strip():
+        return
+
+    try:
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        data = json.loads(clean)
+    except Exception:
+        return
+
+    print(f"[quick_pass] session={session_id[:8]} headmate={headmate}", flush=True)
+
+    # ── Write details ─────────────────────────────────────────────────────────
+    detail_count = 0
+    for d in data.get("details", []):
+        content = (d.get("content") or "").strip()
+        if not content:
+            continue
+        try:
+            emb = embedder.embed(content)
+            # Dedup check
+            if emb:
+                similar = embedder.search(emb, limit=2, min_similarity=0.88,
+                                          headmate=headmate)
+                if similar:
+                    memory_store.touch_detail(similar[0]["id"])
+                    continue
+            memory_store.write_detail(
+                content    = content,
+                headmate   = headmate,
+                session_id = session_id,
+                keywords   = d.get("keywords", ""),
+                tags       = d.get("tags", []),
+                context    = d.get("context", ""),
+                embedding  = emb,
+            )
+            detail_count += 1
+            print(f"  [detail] {content[:80]}", flush=True)
+        except Exception:
+            continue
+
+    # ── Write entities ────────────────────────────────────────────────────────
+    entity_count = 0
+    for ent in data.get("entities", []):
+        name    = (ent.get("name") or "").strip().lower()
+        etype   = (ent.get("type") or "thing").strip()
+        details = ent.get("details") or []
+        notes   = (ent.get("notes") or "").strip()
+        if not name:
+            continue
+        try:
+            if etype == "person":
+                _merge_person_details(name, details, notes, session_id, headmate)
+            elif etype == "place":
+                _merge_place_details(name, details, notes, session_id)
+            else:
+                _merge_entity_details(name, etype, details, notes, session_id, headmate)
+            entity_count += 1
+            print(f"  [{etype}] {name}: {', '.join(details[:3])}", flush=True)
+        except Exception:
+            continue
+
+    # ── Write body facts ──────────────────────────────────────────────────────
+    body_count = 0
+    try:
+        from core.memory.gizmo_self import (
+            append_body_fact, append_gizmo_body_fact, _MOVEMENT_LABELS
+        )
+        for bf in data.get("body_facts", []):
+            person  = (bf.get("person") or "").strip().lower()
+            section = (bf.get("section") or "").strip()
+            fact    = (bf.get("fact") or "").strip()
+            if not person or not section or not fact:
+                continue
+            # Movement label validation
+            if section == "How they move":
+                words = fact.lower().split()
+                valid = [w for w in words if w in _MOVEMENT_LABELS]
+                if not valid:
+                    continue
+                fact = " ".join(valid)
+            is_gizmo = person in ("gizmo", "him", "he")
+            if is_gizmo:
+                append_gizmo_body_fact(fact, section, headmate=headmate)
+            else:
+                append_body_fact(person, section, fact)
+            body_count += 1
+            print(f"  [body:{person}] {section} ← {fact}", flush=True)
+    except Exception as e:
+        log_error("MemoryEncoder", f"quick_pass body write failed: {e}", exc=None)
+
+    # ── Write wellness ────────────────────────────────────────────────────────
+    wellness = data.get("wellness", {})
+    if wellness and wellness.get("observation") and headmate:
+        try:
+            obs = wellness["observation"].strip()
+            emb = embedder.embed(obs)
+            memory_store.write_detail(
+                content    = obs,
+                headmate   = headmate,
+                session_id = session_id,
+                keywords   = f"wellness {wellness.get('category','')} {headmate}",
+                tags       = ["wellness", wellness.get("category", "mood")],
+                context    = "wellness observation",
+                embedding  = emb,
+            )
+            print(f"  [wellness] {obs[:80]}", flush=True)
+        except Exception:
+            pass
+
+    log_event("MemoryEncoder", "QUICK_PASS_COMPLETE",
+        session  = session_id[:8],
+        headmate = headmate or "unknown",
+        details  = detail_count,
+        entities = entity_count,
+        body     = body_count,
+    )
 
 
 # ── Main encoder ──────────────────────────────────────────────────────────────
@@ -1032,6 +1334,8 @@ JSON only, one object per line."""
             return 0
 
         count = 0
+        _body_candidates = []   # details flagged as physical descriptions
+
         for line in raw.strip().splitlines():
             line = line.strip()
             if not line or not line.startswith("{"):
@@ -1079,19 +1383,15 @@ JSON only, one object per line."""
                     )
                     count += 1
 
-                    # ── Body fact extraction ──────────────────────────────
-                    # If this detail describes a physical attribute,
-                    # append it to the headmate's body file immediately.
-                    if headmate:
-                        try:
-                            from core.memory.gizmo_self import (
-                                extract_body_facts, append_body_fact
-                            )
-                            body_facts = extract_body_facts(content, headmate)
-                            for section, fact in body_facts:
-                                append_body_fact(headmate, section, fact)
-                        except Exception:
-                            pass
+                    # ── Queue for body fact extraction ───────────────────
+                    # Tag as body-relevant for the LLM body pass below
+                    tags_list = det.get("tags", [])
+                    if any(t in tags_list for t in (
+                        "appearance", "body", "physical", "movement",
+                        "voice", "hands", "marking", "tattoo", "hair",
+                        "eyes", "build", "skin", "scar",
+                    )):
+                        _body_candidates.append((content, tags_list))
 
             except (json.JSONDecodeError, Exception):
                 continue
@@ -1101,6 +1401,29 @@ JSON only, one object per line."""
             headmate = headmate or "unknown",
             count    = count,
         )
+
+        # ── Entity mention extraction — runs alongside detail catch ─────────────
+        # One focused call: name all entities, collect all details, merge into files
+        asyncio.ensure_future(
+            extract_entity_mentions(
+                transcript = transcript,
+                headmate   = headmate,
+                session_id = session_id,
+                llm        = llm,
+            )
+        )
+
+        # ── LLM body pass — deeper physical fact extraction ───────────────────
+        if headmate:
+            asyncio.ensure_future(
+                _extract_body_facts_llm(
+                    transcript = transcript,
+                    headmate   = headmate,
+                    session_id = session_id,
+                    llm        = llm,
+                )
+            )
+
         return count
 
     async def wellness_pass(
@@ -1742,3 +2065,354 @@ async def _run_action_extraction(
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
 memory_encoder = MemoryEncoder()
+
+
+# ── Entity mention extractor ──────────────────────────────────────────────────
+
+async def extract_entity_mentions(
+    transcript: str,
+    headmate:   str,
+    session_id: str,
+    llm,
+) -> None:
+    """
+    Small focused LLM call after each exchange.
+    Names every entity mentioned — people, places, things.
+    Collects all descriptive details about each one.
+    Merges into existing entity/place/body files.
+
+    Output shape:
+    {
+      "entities": [
+        {
+          "name": "jess",
+          "type": "person|place|thing|ability|world_rule",
+          "details": ["tiny", "half gizmo's size", "girl"],
+          "notes": "anything that doesn't fit a detail label"
+        }
+      ]
+    }
+    """
+    if not transcript or len(transcript.strip()) < 20:
+        return
+
+    prompt = f"""Read this exchange and name every entity mentioned.
+
+Exchange:
+---
+{transcript[-1200:]}
+---
+
+For each entity (person, place, object, ability, rule of this world):
+- Name it
+- Type: person / place / thing / ability / world_rule
+- List every descriptive detail stated or implied
+- Keep details atomic — one fact per item
+- For people: physical facts, personality, abilities, relationships
+- For places: location type, atmosphere, physical details
+- For things: what it is, what it does, who uses it
+- For abilities/world_rules: what is true in this world
+
+Return JSON:
+{{
+  "entities": [
+    {{
+      "name": "entity name lowercase",
+      "type": "person|place|thing|ability|world_rule",
+      "details": ["detail1", "detail2"],
+      "notes": "anything else worth knowing"
+    }}
+  ]
+}}
+
+Only entities actually mentioned. Only details actually stated.
+JSON only."""
+
+    try:
+        raw = await llm.generate(
+            [{"role": "user", "content": prompt}],
+            system_prompt=(
+                "You are extracting entity mentions from a conversation. "
+                "JSON only. Atomic details. Only what was actually stated."
+            ),
+            max_new_tokens=500,
+            temperature=0.1,
+        )
+    except Exception as e:
+        log_error("MemoryEncoder", f"entity mention extraction failed: {e}", exc=None)
+        return
+
+    if not raw or not raw.strip():
+        return
+
+    try:
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        data = json.loads(clean)
+    except Exception:
+        return
+
+    entities = data.get("entities", [])
+    if not entities:
+        return
+
+    count = 0
+    for ent in entities:
+        name    = (ent.get("name") or "").strip().lower()
+        etype   = (ent.get("type") or "thing").strip().lower()
+        details = ent.get("details") or []
+        notes   = (ent.get("notes") or "").strip()
+
+        if not name or not details:
+            continue
+
+        try:
+            if etype == "person":
+                # Route to body file if headmate, entity file otherwise
+                _merge_person_details(
+                    name       = name,
+                    details    = details,
+                    notes      = notes,
+                    session_id = session_id,
+                    headmate   = headmate,
+                )
+
+            elif etype == "place":
+                _merge_place_details(
+                    name       = name,
+                    details    = details,
+                    notes      = notes,
+                    session_id = session_id,
+                )
+
+            else:
+                # thing / ability / world_rule — goes to entity doc
+                _merge_entity_details(
+                    name       = name,
+                    etype      = etype,
+                    details    = details,
+                    notes      = notes,
+                    session_id = session_id,
+                    headmate   = headmate,
+                )
+
+            count += 1
+        except Exception:
+            continue
+
+    if count:
+        log_event("MemoryEncoder", "ENTITY_MENTIONS_EXTRACTED",
+            session  = session_id[:8],
+            headmate = headmate or "unknown",
+            count    = count,
+        )
+
+    # Always print what was found — even if count=0, show the raw extraction
+    print(f"[entity_mentions] session={session_id[:8]} headmate={headmate}", flush=True)
+    for ent in entities:
+        name    = (ent.get("name") or "?").strip()
+        etype   = (ent.get("type") or "?").strip()
+        details = ent.get("details") or []
+        notes   = (ent.get("notes") or "").strip()
+        detail_str = ", ".join(details[:6])
+        if notes:
+            detail_str += f" | {notes[:60]}"
+        print(f"  [{etype}] {name}: {detail_str}", flush=True)
+    if not entities:
+        print(f"  (nothing extracted)", flush=True)
+
+
+def _merge_person_details(
+    name:       str,
+    details:    list,
+    notes:      str,
+    session_id: str,
+    headmate:   str,
+) -> None:
+    """
+    Merge person details into their body file.
+    New details only — skip anything already present.
+    """
+    try:
+        from core.memory.gizmo_self import (
+            append_body_fact, read_body, _MOVEMENT_LABELS,
+            _gizmo_dir, _body_path, _init_body_file,
+        )
+        from core.memory.store import memory_store
+
+        # Determine which file
+        is_gizmo = name in ("gizmo", "gizmo.", "him", "he")
+        if is_gizmo:
+            from core.memory.gizmo_self import append_gizmo_body_fact
+            for detail in details:
+                detail = detail.strip()
+                if not detail:
+                    continue
+                append_gizmo_body_fact(detail, "Build & appearance", headmate=headmate)
+            return
+
+        # Route to body file
+        _init_body_file(name)
+        existing = read_body(name).lower()
+
+        # Classify each detail into a body section
+        for detail in details:
+            detail = detail.strip()
+            if not detail or detail.lower() in existing:
+                continue
+
+            detail_lower = detail.lower()
+
+            # Determine section
+            if any(w in detail_lower for w in (
+                "tattoo", "scar", "piercing", "mark", "birthmark", "brand"
+            )):
+                section = "Skin & markings"
+            elif any(w in detail_lower for w in (
+                "hair", "eye", "height", "tall", "short", "size",
+                "build", "skin", "complexion", "weight", "face",
+                "appearance", "look", "tiny", "massive", "small", "large",
+                "petite", "slim", "muscular", "curvy"
+            )):
+                section = "Build & appearance"
+            elif any(w in detail_lower for w in _MOVEMENT_LABELS):
+                section = "How they move"
+            elif any(w in detail_lower for w in (
+                "voice", "speak", "tone", "pitch", "sound", "accent"
+            )):
+                section = "Voice"
+            elif any(w in detail_lower for w in (
+                "hand", "finger", "grip", "touch"
+            )):
+                section = "Hands"
+            elif any(w in detail_lower for w in (
+                "wear", "dress", "cloth", "outfit", "shirt", "pant",
+                "shoe", "boot", "jacket", "coat", "skirt"
+            )):
+                section = "What they wear"
+            elif any(w in detail_lower for w in (
+                "smell", "scent", "perfume", "texture", "feel"
+            )):
+                section = "Scent & texture"
+            else:
+                section = "Build & appearance"  # default
+
+            append_body_fact(name, section, detail)
+            print(f"  [body:{name}] {section} ← {detail}", flush=True)
+
+        if notes:
+            notes_lower = notes.lower()
+            if notes_lower not in existing:
+                append_body_fact(name, "Build & appearance", notes)
+                print(f"  [body:{name}] notes ← {notes[:80]}", flush=True)
+
+    except Exception as e:
+        log_error("MemoryEncoder", f"merge person details failed: {e}", exc=None)
+
+
+def _merge_place_details(
+    name:       str,
+    details:    list,
+    notes:      str,
+    session_id: str,
+) -> None:
+    """
+    Merge place details into the place doc.
+    Creates if doesn't exist, appends new details only.
+    """
+    try:
+        from core.memory.store import memory_store
+
+        # Determine if interior by name hints
+        interior_hints = (
+            "headspace", "interior", "inner", "inside", "mindscape",
+            "fronting room", "middle space", "waiting room", "inner world",
+        )
+        interior = any(h in name.lower() for h in interior_hints)
+
+        existing = memory_store.read_place(name, interior=interior) or ""
+        existing_lower = existing.lower()
+
+        new_lines = []
+        for detail in details:
+            detail = detail.strip()
+            if detail and detail.lower() not in existing_lower:
+                new_lines.append(detail)
+
+        if notes and notes.lower() not in existing_lower:
+            new_lines.append(notes)
+
+        if not new_lines:
+            return
+
+        additions = "\n".join(f"- {line}" for line in new_lines)
+
+        if existing:
+            memory_store.update_place(name, additions, interior=interior)
+            print(f"  [place:{name}{'(interior)' if interior else ''}] updated ← {', '.join(new_lines[:4])}", flush=True)
+        else:
+            memory_store.write_place(
+                name       = name,
+                content    = additions,
+                interior   = interior,
+                keywords   = name.lower(),
+                session_id = session_id,
+            )
+            print(f"  [place:{name}{'(interior)' if interior else ''}] CREATED ← {', '.join(new_lines[:4])}", flush=True)
+
+    except Exception as e:
+        log_error("MemoryEncoder", f"merge place details failed: {e}", exc=None)
+
+
+def _merge_entity_details(
+    name:       str,
+    etype:      str,
+    details:    list,
+    notes:      str,
+    session_id: str,
+    headmate:   str,
+) -> None:
+    """
+    Merge thing/ability/world_rule details into entity doc.
+    Creates if doesn't exist, appends new only.
+    """
+    try:
+        from core.memory.store import memory_store
+
+        existing = memory_store.read_entity(name) or ""
+        existing_lower = existing.lower()
+
+        new_lines = [f"type: {etype}"] if not existing else []
+        for detail in details:
+            detail = detail.strip()
+            if detail and detail.lower() not in existing_lower:
+                new_lines.append(detail)
+
+        if notes and notes.lower() not in existing_lower:
+            new_lines.append(notes)
+
+        if not new_lines:
+            return
+
+        additions = "\n".join(f"- {line}" for line in new_lines)
+
+        if existing:
+            memory_store.update_entity(
+                name      = name,
+                additions = additions,
+                keywords  = name.lower(),
+            )
+            print(f"  [entity:{name}({etype})] updated ← {', '.join(new_lines[:4])}", flush=True)
+        else:
+            memory_store.write_entity(
+                name       = name,
+                content    = additions,
+                headmate   = headmate,
+                keywords   = f"{name} {etype}",
+                session_id = session_id,
+            )
+            print(f"  [entity:{name}({etype})] CREATED ← {', '.join(new_lines[:4])}", flush=True)
+
+    except Exception as e:
+        log_error("MemoryEncoder", f"merge entity details failed: {e}", exc=None)

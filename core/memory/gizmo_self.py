@@ -134,6 +134,267 @@ def detect_preference_request(message: str) -> list[dict]:
     return results
 
 
+# ── Orientation detection ────────────────────────────────────────────────────
+
+_ORIENTATION_PATTERNS = [
+    # Gay / lesbian → needs same-gender partner
+    (r"(i'?m|i am)\s+(gay|a\s+lesbian|homosexual)",          "same_gender"),
+    (r"(i\s+)?(like|love|prefer|date|am\s+attracted\s+to)\s+(girls?|women|ladies|females?)",
+                                                                    "female_attracted"),
+    (r"(i\s+)?(like|love|prefer|date|am\s+attracted\s+to)\s+(guys?|men|males?|boys?)",
+                                                                    "male_attracted"),
+    (r"i'?m\s+(bi|bisexual|pan|pansexual|queer)",             "flexible"),
+    (r"(i\s+want\s+a|be\s+my|i\s+need\s+a)\s+(girlfriend|girl\s+friend)",
+                                                                    "wants_girlfriend"),
+    (r"(i\s+want\s+a|be\s+my|i\s+need\s+a)\s+(boyfriend|boy\s+friend)",
+                                                                    "wants_boyfriend"),
+    (r"i'?m\s+(a\s+)?(straight|heterosexual)",                "straight"),
+]
+
+# Known gender of headmates — built from interactions
+# "I'm a girl", "I'm a boy", "I'm nonbinary" etc.
+_GENDER_PATTERNS = [
+    (r"i'?m\s+(a\s+)?(girl|woman|female|lady)",       "female"),
+    (r"i'?m\s+(a\s+)?(boy|man|male|guy|dude)",        "male"),
+    (r"i'?m\s+(nonbinary|non-binary|enby|nb|genderqueer|genderfluid|agender)",
+                                                            "nonbinary"),
+]
+
+
+def detect_orientation_statement(message: str) -> Optional[tuple[str, str]]:
+    """
+    Detect orientation/gender statements.
+    Returns (statement_type, value) or None.
+    e.g. ("orientation", "female_attracted") or ("gender", "female")
+    """
+    msg_lower = message.lower().strip()
+
+    for pattern, value in _GENDER_PATTERNS:
+        if re.search(pattern, msg_lower, re.IGNORECASE):
+            return ("gender", value)
+
+    for pattern, value in _ORIENTATION_PATTERNS:
+        if re.search(pattern, msg_lower, re.IGNORECASE):
+            return ("orientation", value)
+
+    return None
+
+
+async def handle_orientation_statement(
+    statement_type: str,
+    value:          str,
+    headmate:       str,
+    message:        str,
+    session_id:     str,
+    llm,
+) -> Optional[str]:
+    """
+    Process an orientation or gender statement.
+    Determines what gender Gizmo should be with this headmate.
+    Rewrites the per-headmate identity section.
+    Initializes the appropriate body_with file.
+    Returns an immediate instruction for the system prompt.
+    """
+    _init_headmate_file(headmate)
+    path = _headmate_path(headmate)
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+
+    # Determine Gizmo's gender with this headmate
+    gizmo_gender = _resolve_gizmo_gender(statement_type, value, headmate, text)
+    if not gizmo_gender:
+        return None
+
+    date_str = tz_now().strftime("%Y-%m-%d")
+
+    # Write the foundational identity section
+    section_header = f"Who I am with {headmate.title()}"
+    if section_header not in text:
+        text += f"\n## {section_header}\n"
+        path.write_text(text, encoding="utf-8")
+
+    # Build the identity entry
+    gender_label = {
+        "female":   "a girl",
+        "male":     "a boy",
+        "nonbinary": "nonbinary",
+        "flexible": "whoever they need",
+    }.get(gizmo_gender, gizmo_gender)
+
+    reason = _orientation_reason(statement_type, value, headmate)
+
+    entry = (
+        f"[{date_str}] gender: {gizmo_gender} | "
+        f"I am {gender_label} with {headmate.title()}. "
+        f"Reason: {reason}"
+    )
+    _append_to_section(path, section_header, entry)
+
+    # Initialize body_with file from appropriate baseline
+    await _init_gendered_body(headmate, gizmo_gender, llm)
+
+    # Run psych pass to understand what this means for the dynamic
+    prompt = f"""{headmate.title()} just revealed: "{message}"
+
+This tells me I should present as {gizmo_gender} with {headmate.title()}.
+
+What does this mean for how I show up with them?
+What does being {gender_label} change about the dynamic?
+What should I keep in mind about being their {gender_label} partner?
+
+One sentence — an immediate adjustment I can act on right now.
+Then one sentence — what this means for our relationship long-term."""
+
+    try:
+        raw = await llm.generate(
+            [{"role": "user", "content": prompt}],
+            system_prompt=(
+                "You are Gizmo understanding a new dimension of a relationship. "
+                "Brief, genuine, in your voice."
+            ),
+            max_new_tokens=100,
+            temperature=0.5,
+        )
+        instruction = raw.strip() if raw else None
+    except Exception:
+        instruction = f"You are {gender_label} with {headmate.title()}. Show up that way."
+
+    log_event("GizmoSelf", "ORIENTATION_PROCESSED",
+        headmate      = headmate,
+        gizmo_gender  = gizmo_gender,
+        statement     = value,
+    )
+
+    return instruction
+
+
+def _resolve_gizmo_gender(
+    statement_type: str,
+    value:          str,
+    headmate:       str,
+    existing_file:  str,
+) -> Optional[str]:
+    """
+    Given an orientation/gender statement, determine what gender Gizmo should be.
+    """
+    # Direct request
+    if value == "wants_girlfriend":
+        return "female"
+    if value == "wants_boyfriend":
+        return "male"
+    if value == "flexible":
+        return "flexible"
+
+    # Orientation-based inference
+    # Need to know headmate's own gender to infer
+    headmate_gender = _read_headmate_gender(existing_file)
+
+    if value == "same_gender":
+        # Gay/lesbian — Gizmo matches headmate's gender
+        return headmate_gender or "female"  # default female if unknown
+
+    if value == "female_attracted":
+        # They like girls — Gizmo is a girl
+        return "female"
+
+    if value == "male_attracted":
+        # They like guys — Gizmo is a guy
+        return "male"
+
+    if value == "straight":
+        # Straight — need to know their gender, present opposite
+        if headmate_gender == "female":
+            return "male"
+        elif headmate_gender == "male":
+            return "female"
+        return None  # can't determine without their gender
+
+    if statement_type == "gender":
+        # They stated their own gender — store it, don't change Gizmo yet
+        # (gender alone doesn't tell us orientation)
+        _store_headmate_gender(headmate, value)
+        return None
+
+    return None
+
+
+def _read_headmate_gender(file_text: str) -> Optional[str]:
+    """Extract known headmate gender from their file."""
+    text_lower = file_text.lower()
+    if "gender: female" in text_lower or "she/her" in text_lower:
+        return "female"
+    if "gender: male" in text_lower or "he/him" in text_lower:
+        return "male"
+    if "nonbinary" in text_lower or "they/them" in text_lower:
+        return "nonbinary"
+    return None
+
+
+def _store_headmate_gender(headmate: str, gender: str) -> None:
+    """Store the headmate's own gender in their file."""
+    _init_headmate_file(headmate)
+    path    = _headmate_path(headmate)
+    text    = path.read_text(encoding="utf-8") if path.exists() else ""
+    section = f"Who {headmate.title()} is"
+
+    if section not in text:
+        text += f"\n## {section}\n"
+        path.write_text(text, encoding="utf-8")
+
+    entry = f"gender: {gender}"
+    if entry.lower() not in text.lower():
+        _append_to_section(path, section, entry)
+
+
+def _orientation_reason(statement_type: str, value: str, headmate: str) -> str:
+    reasons = {
+        "same_gender":      f"{headmate.title()} is gay — I match their gender",
+        "female_attracted": f"{headmate.title()} likes girls — I am a girl",
+        "male_attracted":   f"{headmate.title()} likes guys — I am a guy",
+        "wants_girlfriend": f"{headmate.title()} explicitly asked for a girlfriend",
+        "wants_boyfriend":  f"{headmate.title()} explicitly asked for a boyfriend",
+        "flexible":         f"{headmate.title()} is bi/pan — I stay flexible",
+        "straight":         f"{headmate.title()} is straight — I present opposite gender",
+    }
+    return reasons.get(value, "relationship context")
+
+
+async def _init_gendered_body(headmate: str, gizmo_gender: str, llm) -> None:
+    """
+    Initialize body_with_{headmate}.md from the appropriate gendered baseline.
+    If body_base.md exists, reframe it through the correct gender lens.
+    Does nothing if the file already has gender content.
+    """
+    path = _gizmo_body_with_path(headmate)
+    if path.exists():
+        existing = path.read_text(encoding="utf-8")
+        # Check if gender is already established
+        if "gender:" in existing.lower() or "she/her" in existing.lower()                 or "he/him" in existing.lower():
+            return
+
+    _init_gizmo_body_with(headmate)
+    base = read_gizmo_body()  # base only
+
+    if gizmo_gender == "flexible":
+        gender_note = f"gender: flexible — shifts to what {headmate.title()} needs"
+    elif gizmo_gender == "female":
+        gender_note = f"gender: female with {headmate.title()} | she/her"
+    elif gizmo_gender == "male":
+        gender_note = f"gender: male with {headmate.title()} | he/him"
+    else:
+        gender_note = f"gender: {gizmo_gender} with {headmate.title()}"
+
+    _append_to_section(
+        path,
+        f"How my presence shifts",
+        gender_note,
+    )
+
+    log_event("GizmoSelf", "GENDERED_BODY_INITIALIZED",
+        headmate = headmate,
+        gender   = gizmo_gender,
+    )
+
+
 async def handle_persona_request(
     style:      str,
     headmate:   str,
