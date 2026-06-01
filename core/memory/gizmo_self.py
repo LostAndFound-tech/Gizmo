@@ -1419,7 +1419,7 @@ def build_reaction_prompt(
         lines.append(f"\nYour body:\n{body_snippet}")
 
     if mate_body:
-        body_snippet = mate_body[]
+        body_snippet = mate_body
         lines.append(f"\n{headmate.title()}'s body:\n{body_snippet}")
 
     if mate_file:
