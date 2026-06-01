@@ -185,7 +185,7 @@ class MemoryRetriever:
         """
         t_start = time.monotonic()
         ctx     = MemoryContext(query=message, headmate=headmate or "")
-
+        fast == False
         if not message or not message.strip():
             return ctx
 
@@ -239,6 +239,7 @@ class MemoryRetriever:
             headmate    = headmate,
             limit       = 8,
         )
+        print("Keywords I caught!")
 
         # ── 4. Merge and deduplicate ──────────────────────────────────────────
         seen     = set()
@@ -281,6 +282,9 @@ class MemoryRetriever:
             return False
 
         all_hits = [h for h in all_hits if _allowed(h)]
+        print("All the stuff I actually caught:")
+        for a in all_hits:
+            print(a)
 
         # ── 5. Load content for top hits ──────────────────────────────────────
         loaded_memories = []
@@ -321,6 +325,10 @@ class MemoryRetriever:
                 })
 
         ctx.memories = loaded_memories
+        print("Memories I loaded")
+        print("-----------------")
+        for l in loaded_memories:
+            print(l)
 
         # ── 6. Crawl refs from top hits ───────────────────────────────────────
         if not fast and all_hits:
@@ -339,6 +347,9 @@ class MemoryRetriever:
             content = memory_store.read_entity(name)
             if content:
                 ctx.entities[name] = content
+                print("What I'm loading")
+                print("----------------")
+                print(name, content)
 
         # ── 8. Load place docs ────────────────────────────────────────────────
         for name in list(place_names)[:3]:
@@ -349,6 +360,9 @@ class MemoryRetriever:
             )
             if content:
                 ctx.places[name] = content
+                print("places I loaded")
+                print("---------------")
+                print(name, content)
 
         # ── 8b. Load psychology docs ──────────────────────────────────────────
         if headmate:
@@ -391,6 +405,11 @@ class MemoryRetriever:
                 headmate = headmate,
                 limit    = 6,
             )
+            print("Details I remember")
+            print("------------------")
+            for d in detail_hits:
+                print(d)
+            print("------------------")
 
             # Also vector search details if embedder available
             if query_emb:
@@ -409,7 +428,9 @@ class MemoryRetriever:
 
         # ── 10. Recent narrative ──────────────────────────────────────────────
         ctx.recent_narrative = self._load_recent_narrative(headmate)
-
+        print("Recent narratives?")
+        print("------------------")
+        print("yes" if ctx.recent_narrative is not None, else "No")
         # ── 10b. Objects — surface in-rotation or meaningfully dormant ────────
         if headmate and intimate_ok:
             try:
@@ -450,6 +471,8 @@ class MemoryRetriever:
 
         duration_ms = round((time.monotonic() - t_start) * 1000)
 
+        
+
         log_event("MemoryRetriever", "RETRIEVED",
             session     = session_id[:8],
             headmate    = headmate or "unknown",
@@ -460,7 +483,14 @@ class MemoryRetriever:
             details     = len(ctx.details),
             duration_ms = duration_ms,
         )
-
+        print("FULL PROMPT")
+        print("------------------")
+        print("------------------")
+        print("------------------")
+        print(log_event)
+        print("------------------")
+        print("------------------")
+        print("------------------")
         return ctx
 
     async def _crawl_refs(
