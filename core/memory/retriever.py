@@ -185,7 +185,7 @@ class MemoryRetriever:
         """
         t_start = time.monotonic()
         ctx     = MemoryContext(query=message, headmate=headmate or "")
-        fast == False
+
         if not message or not message.strip():
             return ctx
 
@@ -239,7 +239,6 @@ class MemoryRetriever:
             headmate    = headmate,
             limit       = 8,
         )
-        print("Keywords I caught!")
 
         # ── 4. Merge and deduplicate ──────────────────────────────────────────
         seen     = set()
@@ -249,7 +248,7 @@ class MemoryRetriever:
             mid = h.get("id")
             if mid and mid not in seen:
                 seen.add(mid)
-                h["_score"] = h.get("similarity", 0.5)
+                h["_score"] = float(h.get("similarity") or 0.5)
                 all_hits.append(h)
 
         for h in keyword_hits:
@@ -259,8 +258,8 @@ class MemoryRetriever:
                 h["_score"] = 0.4  # keyword hits score slightly lower
                 all_hits.append(h)
 
-        # Sort by score
-        all_hits.sort(key=lambda x: x.get("_score", 0), reverse=True)
+        # Sort by score — cast to float to guard against str/float mix
+        all_hits.sort(key=lambda x: float(x.get("_score") or 0), reverse=True)
         ctx.total_hits = len(all_hits)
 
         # ── 4b. Filter private memories by consent ────────────────────────────
@@ -282,9 +281,6 @@ class MemoryRetriever:
             return False
 
         all_hits = [h for h in all_hits if _allowed(h)]
-        print("All the stuff I actually caught:")
-        for a in all_hits:
-            print(a)
 
         # ── 5. Load content for top hits ──────────────────────────────────────
         loaded_memories = []
@@ -314,23 +310,17 @@ class MemoryRetriever:
             # Load the memory content
             content = _load_anchor(file_path, anchor)
             if content:
-                if hit.get("_score" < .4):
-                    loaded_memories.append({
-                        "content":        content,
-                        "memory_type":    memory_type,
-                        "memory_subtype": hit.get("memory_subtype"),
-                        "headmate":       hit.get("headmate"),
-                        "file_path":      file_path,
-                        "id":             hit.get("id"),
-                        "_score":         hit.get("_score", 0),
-                    })
-        
+                loaded_memories.append({
+                    "content":        content,
+                    "memory_type":    memory_type,
+                    "memory_subtype": hit.get("memory_subtype"),
+                    "headmate":       hit.get("headmate"),
+                    "file_path":      file_path,
+                    "id":             hit.get("id"),
+                    "_score":         hit.get("_score", 0),
+                })
+
         ctx.memories = loaded_memories
-        print("Memories I loaded")
-        print(f"Anchor: {anchor}")
-        print("-----------------")
-        for l in loaded_memories:
-            print(l)
 
         # ── 6. Crawl refs from top hits ───────────────────────────────────────
         if not fast and all_hits:
@@ -349,9 +339,6 @@ class MemoryRetriever:
             content = memory_store.read_entity(name)
             if content:
                 ctx.entities[name] = content
-                print("What I'm loading")
-                print("----------------")
-                print(name, content)
 
         # ── 8. Load place docs ────────────────────────────────────────────────
         for name in list(place_names)[:3]:
@@ -362,9 +349,6 @@ class MemoryRetriever:
             )
             if content:
                 ctx.places[name] = content
-                print("places I loaded")
-                print("---------------")
-                print(name, content)
 
         # ── 8b. Load psychology docs ──────────────────────────────────────────
         if headmate:
@@ -422,18 +406,12 @@ class MemoryRetriever:
                     deduped.append(d)
 
             ctx.details = deduped[:6]
-            print("Details I remember")
-            for d in deduped[:6]:
-                print(d["content"], d["headmate"], d["keywords"], d["tags"], d["context"])
-            print("------------------")
 
         # ── 10. Recent narrative ──────────────────────────────────────────────
         ctx.recent_narrative = self._load_recent_narrative(headmate)
-        print("Recent narratives?")
-        print("------------------")
-        print("yes" if ctx.recent_narrative is not None else "No")
+
         # ── 10b. Objects — surface in-rotation or meaningfully dormant ────────
-        if headmate:
+        if headmate and intimate_ok:
             try:
                 from core.memory.psychology import _load_object_memories
                 now     = time.time()
@@ -472,8 +450,6 @@ class MemoryRetriever:
 
         duration_ms = round((time.monotonic() - t_start) * 1000)
 
-        
-
         log_event("MemoryRetriever", "RETRIEVED",
             session     = session_id[:8],
             headmate    = headmate or "unknown",
@@ -484,23 +460,7 @@ class MemoryRetriever:
             details     = len(ctx.details),
             duration_ms = duration_ms,
         )
-        print("FULL PROMPT")
-        print("------------------")
-        print("headmate:", {headmate})
-        print("Memories")
-        for m in ctx.memories: 
-            print(m)
-        print("Entities")
-        for e in ctx.entities:
-            print(e)
-        print("Places")
-        for p in ctx.places:
-            print(p)
-        print("Details")
-        for d in ctx.details:
-            print(d)
-        print(f"Duration: {duration_ms}")
-        print("------------------")
+
         return ctx
 
     async def _crawl_refs(
@@ -725,8 +685,7 @@ def _trim_to_budget(ctx: MemoryContext, budget_tokens: int) -> MemoryContext:
         if used + len(content) > char_budget:
             break
         trimmed_memories.append(m)
-        if content not in used:
-            used += len(content)
+        used += len(content)
     ctx.memories = trimmed_memories
 
     # Details — lowest priority

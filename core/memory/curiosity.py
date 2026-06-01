@@ -364,9 +364,21 @@ JSON only, one per line."""
         Returns the question phrased naturally for this moment,
         or None if nothing fits.
         """
-        # Don't ask during crisis or active distress — not the moment
+        # ── Register awareness ────────────────────────────────────────────────
+        # Crisis/distress: no questions. Full stop.
         if register in ("crisis", "distress"):
             return None
+
+        # Subspace: presence only. No questions.
+        if register == "subspace":
+            return None
+
+        # Sensitive registers: questions must be ABOUT what's happening,
+        # not redirecting away from it. "Why are you naked?" is valid.
+        # "What's your favorite candy?" is not.
+        _SENSITIVE = {"submissive", "scene", "intimate", "dominant",
+                      "degradation", "erotic", "sensual"}
+        is_sensitive = register in _SENSITIVE
 
         # Don't ask too many times per session
         asked_this_session = self._session_asked.get(session_id, 0)
@@ -458,6 +470,20 @@ JSON only, one per line."""
             if is_rich else ""
         )
 
+        sensitive_note = ""
+        if is_sensitive:
+            sensitive_note = (
+                f"\nIMPORTANT: The register is {register}. "
+                f"Something is happening right now — {headmate.title() if headmate else 'they'} "
+                f"is doing something or being a certain way. "
+                f"The right question is ABOUT what's happening: why are they doing this, "
+                f"what does it mean to them, what are they feeling, what do they need. "
+                f"Questions that redirect away from the moment (food preferences, "
+                f"random curiosity, unrelated topics) are wrong here. "
+                f"'Why are you naked?' is valid. 'What's your favorite candy?' is not. "
+                f"The answer to a well-timed question here goes straight into their profile."
+            )
+
         prompt = f"""You are Gizmo, mid-conversation.
 
 Who you're talking to: {headmate or "unknown"}
@@ -465,20 +491,37 @@ Current register: {register}
 What they just said: "{message}"
 {invitation_note}
 {rich_note}
+{sensitive_note}
 
 Things you've been wanting to ask (pick the one that fits best):
 {questions_text}
 
-These are your options. Pick whichever one fits most naturally into
-this specific moment. The conversation topic matters — a question about
-food won't fit if they're talking about their outfit. Find the one that
-could emerge naturally from what's being said right now.
+Two things to evaluate before asking anything:
 
-If none of them fit this moment, return ask=false. Don't force it.
-One sentence, curious, not clinical. Woven in — not bolted on.
+1. TIMING — Is this a good moment for a question at all?
+   - Are they in the middle of something emotionally significant?
+   - Would a question feel like an interruption or a redirection?
+   - In sensitive/intimate moments: questions ABOUT what's happening
+     are exactly right. Questions that ignore what's happening are wrong.
+
+2. FIT — Does this question belong in this moment?
+   - Does the topic connect to what's happening right now?
+   - Does the weight of the question match the register?
+   - In an intimate/submissive moment: "why are you doing this?" or
+     "what do you need right now?" — valid, present, useful.
+     "What's your favorite food?" — completely wrong register.
+   - A clarifying question about something they just did almost always fits.
+
+The answer to a well-timed question in a charged moment is worth ten
+answers from a casual conversation. It goes straight into the profile.
+
+If the timing is wrong, or nothing fits — return ask=false.
+Don't force a question into a moment that doesn't want one.
+One sentence. Present. Woven in — not bolted on.
 
 Return JSON:
-{{"ask": true/false, "number": N or null, "phrasing": "how you'd ask it right now, naturally"}}"""
+{{"ask": true/false, "number": N or null, "phrasing": "how you'd ask it right now, naturally",
+  "timing_ok": true/false, "reason": "brief note on why you asked or didn't"}}"""
 
         try:
             raw = await llm.generate(
@@ -511,10 +554,17 @@ Return JSON:
         except Exception:
             return None
 
-        if not data.get("ask"):
-            # Mark top question as considered but not asked
+        timing_ok = data.get("timing_ok", True)
+        reason    = data.get("reason", "")
+
+        if not data.get("ask") or not timing_ok:
             if top:
                 self.store.mark_considered(top[0].id, asked=False)
+            log_event("CuriosityEngine", "SELECTION_SKIPPED",
+                reason   = reason or ("timing" if not timing_ok else "no fit"),
+                headmate = headmate or "unknown",
+                session  = session_id[:8],
+            )
             return None
 
         n = data.get("number")
@@ -644,6 +694,31 @@ ask_now: only if something in this specific beat makes a question
                     q_id     = q_id[:8],
                 )
 
+                # Find the original question
+                original_q = next(
+                    (q for q in self.store.get_pool(unanswered_only=False)
+                     if q.id == q_id),
+                    None
+                )
+
+                # Write to psych profile — this is exactly the kind of
+                # observation that builds the real picture over time.
+                # "Woke up and did X. Asked why. Got answer Y."
+                if original_q and headmate:
+                    try:
+                        from core.memory.psychology import _append_psychology, _fmt_date
+                        entry = (
+                            f"\n### {_fmt_date()} | session: {session_id[:8]} "
+                            f"| beat_answer\n"
+                            f"Asked: {original_q.question}\n"
+                            f"Context: {user_message[:120]}\n"
+                            f"Answer: {answer}\n"
+                        )
+                        _append_psychology(headmate, entry, intimate=False)
+                    except Exception as e:
+                        log_error("CuriosityEngine",
+                            f"psych write for beat answer failed: {e}", exc=None)
+
         # Queue an urgent ask if the beat calls for it
         ask_now = data.get("ask_now")
         if ask_now and ask_now.get("id") and ask_now.get("phrasing"):
@@ -768,10 +843,10 @@ Null if everything was expected and nothing new surfaced."""
         except Exception:
             return
 
-        question = data.get("question", "").strip()
-        about    = data.get("about", headmate).strip()
-        priority = float(data.get("priority", 0.6))
-        obs      = data.get("observation", "").strip()
+        question = (data.get("question") or "").strip()
+        about    = (data.get("about") or headmate or "").strip()
+        priority = float(data.get("priority") or 0.6)
+        obs      = (data.get("observation") or "").strip()
 
         if not question:
             return
@@ -870,20 +945,42 @@ JSON only, one per line."""
                 if not answer:
                     continue
 
+                # Find original question before marking answered
+                original_q = next(
+                    (q for q in self.store.get_pool(unanswered_only=True)
+                     if q.id == q_id),
+                    None
+                )
+
                 self.store.mark_answered(
-                    q_id    = q_id,
-                    answer  = answer,
+                    q_id     = q_id,
+                    answer   = answer,
                     headmate = headmate or "",
                 )
 
                 # Write the answer to the entity/place doc
                 if write_to:
                     await _write_answer_to_doc(
-                        name     = write_to,
-                        answer   = answer,
-                        headmate = headmate,
+                        name       = write_to,
+                        answer     = answer,
+                        headmate   = headmate,
                         session_id = session_id,
                     )
+
+                # Always write answered questions to psych profile
+                if original_q and headmate:
+                    try:
+                        from core.memory.psychology import _append_psychology, _fmt_date
+                        entry = (
+                            f"\n### {_fmt_date()} | session: {session_id[:8]}"
+                            f" | question_answered\n"
+                            f"Asked: {original_q.question}\n"
+                            f"Answer: {answer}\n"
+                        )
+                        _append_psychology(headmate, entry, intimate=False)
+                    except Exception as e:
+                        log_error("CuriosityEngine",
+                            f"psych write for answer failed: {e}", exc=None)
 
                 count += 1
             except Exception:
