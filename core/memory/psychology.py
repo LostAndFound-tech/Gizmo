@@ -360,7 +360,7 @@ JSON only, one per line."""
                 nickname = d.get("variant_nickname", "").strip()
                 variant_str = variant
                 if nickname:
-                    variant_str = f"{variant} ("{nickname}")" if variant else f"("{nickname}")"
+                    variant_str = f"{variant} ('{nickname}')" if variant else f"('{nickname}')"
 
                 # Build session entry
                 already_this_session = session_id[:8] in [
