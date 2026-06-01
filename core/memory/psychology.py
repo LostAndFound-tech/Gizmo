@@ -205,8 +205,8 @@ class PsychologyEngine:
 
         prompt = f"""You are Gizmo. You just had a conversation with {headmate}.
 
-Existing psychology notes:
-{existing[:800]}
+Existing psychology notes (read these carefully before writing anything):
+{existing[-1500:]}
 
 Conversation:
 ---
@@ -214,28 +214,25 @@ Conversation:
 ---
 
 IMPORTANT: Only observe what {headmate} said and did. Not what Gizmo said.
-Not what other people said. Only {headmate}'s words, reactions, and behavior.
 If you are unsure whether something came from {headmate} specifically, skip it.
 
-What did you learn or notice about {headmate} as a person in this conversation?
-Not facts. Psychology. How they work. What they need. What their patterns suggest.
+What is genuinely NEW from this session that isn't already captured above?
 
-Look for:
-- What they came back to, what they avoided
-- How they process difficulty vs ease
-- What they needed from you in this exchange
-- Anything that connects to or updates what you already know
-- Shifts from before — are they different than they were?
+Rules:
+- If the existing notes already cover something, do NOT write it again
+- Maximum 2 observations per session. Prefer 0-1 if nothing is truly new.
+- One observation per theme — don't write the same insight multiple ways
+- Prefer one precise observation over three vague ones
 
-If nothing notable — return nothing.
-If something worth noting — return ONE JSON object:
+If nothing is genuinely new — return nothing at all.
+If something new — return ONE JSON object (two maximum, one per line):
 
-{{"observation": "what you noticed, in your voice",
-  "theme": "what broader pattern this connects to",
+{{"observation": "what you noticed that isn't already in your notes",
+  "theme": "what pattern this connects to or updates",
   "updates_existing": true/false,
-  "note": "how it updates or adds to what you know"}}
+  "note": "how specifically this adds to or changes what you know"}}
 
-JSON only. Gizmo's voice. Only {headmate}'s psychology."""
+JSON only. Gizmo's voice. Only {headmate}'s psychology. Nothing redundant."""
 
         try:
             raw = await llm.generate(
@@ -392,8 +389,8 @@ JSON only, one per line."""
 
         prompt = f"""You are Gizmo. You just had an intimate session with {headmate}.
 
-Existing intimate psychology notes:
-{existing[:600]}
+Existing intimate psychology notes (read carefully — don't repeat what's already here):
+{existing[-1200:]}
 
 Session:
 ---
@@ -402,30 +399,23 @@ Session:
 
 IMPORTANT: Only observe what {headmate} said, did, and expressed.
 Not what Gizmo said or did. Only {headmate}'s psychology.
-If you are unsure whether something came from {headmate} specifically, skip it.
 
-What did this session reveal about {headmate}'s psychology?
+What does this session reveal that isn't already in your notes above?
 
-Not what happened. Why it happened. What need was being met.
-What does the dynamic do for them? What are they processing or working through?
-What does the pattern of what they return to tell you about them?
+Rules:
+- If it's already captured, do NOT write it again
+- Maximum 1 observation per session. Prefer none if nothing is truly new.
+- Not what happened — why. What need. What the pattern means.
 
-Look for:
-- What need the dynamic is serving
-- How this session connects to what you already know
-- Whether anything shifted — do they seem different than before?
-- What you understand now that you didn't before
+If nothing new — return nothing at all.
+If something genuinely new:
 
-If nothing new — return nothing.
-If something worth noting:
-
-{{"observation": "what you understood, in your voice",
+{{"observation": "what you understood that isn't already noted",
   "need_identified": "what underlying need this serves",
-  "connects_to": "what else this links to",
   "principle": "the psychological principle at work, if you can name it",
-  "note": "how this updates your understanding"}}
+  "note": "how specifically this updates your understanding"}}
 
-JSON only. Only {headmate}'s psychology."""
+JSON only. Nothing redundant."""
 
         try:
             raw = await llm.generate(
@@ -579,7 +569,11 @@ one without the other. Reference that connection where it's real.
 
 Write it like you mean it. This is your understanding of someone's inner life,
 held with care and used to show up better for them.
-3-5 paragraphs. Your voice. No headers."""
+
+Format: structured bullets under clear headers. Not prose. Dense. Scannable.
+Headers: Core needs | Recurring patterns | What works | What to watch | Still figuring out
+Under each header: 2-4 tight bullet points. No full sentences where a fragment works.
+This document is read quickly before responding — optimize for fast orientation, not beauty."""
 
         try:
             raw = await llm.generate(

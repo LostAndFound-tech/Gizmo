@@ -12,6 +12,7 @@ import re
 import time
 from typing import Optional, Callable
 
+from pathlib import Path
 from core.log import log, log_event, log_error
 from core.timezone import tz_now
 
@@ -110,9 +111,9 @@ async def run_single_pipeline(message, session_id, headmate, context, history, l
         chunks = []
         async for chunk in agent.respond(
             user_message=message,
-            history=history,
             session_id=session_id,
             context=context,
+            history=history,
         ):
             chunks.append(chunk)
         return "".join(chunks)
@@ -120,6 +121,34 @@ async def run_single_pipeline(message, session_id, headmate, context, history, l
         import traceback
         print(f"[SINGLE PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
         raise
+
+def _get_known_headmates() -> set:
+    """
+    Build the set of known headmate names from the memory store.
+    Used by host_tracker.process_message() to validate identifications.
+    Cached loosely — rebuilds on each call but fast (filesystem glob).
+    """
+    try:
+        from core.memory.store import memory_store
+        memories_dir = memory_store.root / "memories"
+        if not memories_dir.exists():
+            return set()
+        return {p.name.lower() for p in memories_dir.iterdir() if p.is_dir()}
+    except Exception:
+        return set()
+
+def _add_known_headmate(name: str) -> None:
+    """
+    Ensure a headmate has a memories directory.
+    Anyone who appears in the speaker window is definitively a headmate.
+    Creates the directory if it doesn't exist — that's all it takes.
+    """
+    try:
+        from core.memory.store import memory_store
+        p = memory_store.root / "memories" / name.lower()
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
 def _extract_topics_from_parts(parts: list[dict]) -> list[str]:
     try:
@@ -261,6 +290,7 @@ class GizmoServer:
     async def _handle_chat_message(self, websocket, session_id: str, msg: dict) -> None:
         from core.llm import llm
         from core.session_manager import session_manager
+        from core.host_tracker import host_tracker
 
         content  = msg.get("content", "")
         context  = msg.get("context", {})
@@ -272,7 +302,13 @@ class GizmoServer:
         if live_ctx.get("fronters"):
             context.setdefault("fronters", live_ctx["fronters"])
 
+        # ── Speaker window is ground truth ────────────────────────────────────
+        # context.current_host comes directly from the client UI speaker window.
+        # Trust it unconditionally. Register as known headmate immediately.
         headmate = context.get("current_host") or ""
+        if headmate:
+            _add_known_headmate(headmate)
+            session_manager.set_host(session_id=session_id, headmate=headmate, confidence=1.0)
 
         if not content:
             return
@@ -292,6 +328,32 @@ class GizmoServer:
         if _is_duplicate(session_id, raw_text):
             return
 
+        # ── Host identification — natural speech patterns ─────────────────────
+        # Catches "it's Jess", "I'm Ara", "Jess here" etc.
+        # Fires before everything else so headmate is known for the full pipeline
+        _prev_headmate = headmate
+        try:
+            known = _get_known_headmates()
+            changes = host_tracker.process_message(session_id, raw_text, known)
+            if changes.get("host_identified"):
+                identified = changes["host_identified"].lower()
+                # Add to known headmates — anyone seen in speaker window is a headmate
+                _add_known_headmate(identified)
+                context["current_host"] = identified
+                headmate = identified
+                log_event("GizmoServer", "HOST_IDENTIFIED",
+                    session=session_id[:8], headmate=identified)
+        except Exception as e:
+            log_error("GizmoServer", "host identification failed", exc=e)
+
+        # ── Host change — hard reset session context ──────────────────────────
+        # If who we're talking to changed, tell Gizmo before he responds
+        _host_changed = (
+            headmate and _prev_headmate and
+            headmate.lower() != _prev_headmate.lower()
+        )
+
+        # ── Speaker detection from structured [Name]: format ──────────────────
         speech_parts = [p for p in parts if p.get("content_type") == "speech"]
         if speech_parts:
             first_speaker = speech_parts[0].get("headmate")
@@ -307,7 +369,7 @@ class GizmoServer:
 
         fronters = context.get("fronters", [headmate] if headmate else [])
 
-        # Identify host from plain answer to "who's there?"
+        # ── Fallback — bare name answer ───────────────────────────────────────
         if not headmate and not multi and len(parts) == 1:
             c = parts[0].get("content", "").strip()
             import re as _re
@@ -323,8 +385,18 @@ class GizmoServer:
                 fronters = [detected]
                 context["fronters"] = fronters
 
+        # ── Inject host change into context if switch detected ───────────────
+        if _host_changed:
+            context["host_changed"] = True
+            context["previous_host"] = _prev_headmate
+            log_event("GizmoServer", "HOST_SWITCH_DETECTED",
+                session=session_id[:8],
+                from_host=_prev_headmate,
+                to_host=headmate,
+            )
+
         log_event("GizmoServer", "MESSAGE_RECEIVED",
-            session=session_id[:8], headmate=headmate, multi=multi,
+            session=session_id[:8], headmate=headmate or "unknown", multi=multi,
             parts=len(parts), words=len(raw_text.split()))
 
         await asyncio.sleep(THINKING_DELAY)
@@ -347,13 +419,31 @@ class GizmoServer:
             await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)
 
-        await self._send(websocket, {"type": "done", "session_id": session_id})
+        await self._send(websocket, {"type": "done", "session_id": session_id, "current_host": headmate or ""})
 
+        # ── Session touch — correct signature (hosts + topics only) ──────────
         session_manager.touch(
-            session_id=session_id,
-            hosts=fronters or ([headmate] if headmate else []),
-            topics=_extract_topics_from_parts(parts),
-)
+            session_id = session_id,
+            hosts      = [headmate] if headmate else [],
+            topics     = _extract_topics_from_parts(parts),
+        )
+
+        # ── Scene extraction — fire and forget after response ─────────────────
+        try:
+            from core.memory.session_context import session_context_manager
+            ctx = session_context_manager.get(session_id)
+            if ctx and session_context_manager.should_update_scene(session_id):
+                asyncio.ensure_future(
+                    session_context_manager.update_scene(
+                        session_id = session_id,
+                        assembled  = raw_text,
+                        parts      = parts,
+                        headmate   = headmate,
+                        llm        = llm,
+                    )
+                )
+        except Exception as e:
+            log_error("GizmoServer", "scene update failed to schedule", exc=e)
 
         log_event("GizmoServer", "RESPONSE_SENT",
             session=session_id[:8], words=len(response.split()), multi=multi)

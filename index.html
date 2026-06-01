@@ -848,7 +848,6 @@ function handleIncoming(msg) {
 
   if (msg.type === 'done') {
     // Check if response was a "who are you?" question
-    // If so, the next message from user is the answer — listen for it
     const fullResponse = currentChunks.join('').toLowerCase();
     const isAskingHost = (
       fullResponse.includes("who am i talking to") ||
@@ -858,6 +857,26 @@ function handleIncoming(msg) {
     );
     if (isAskingHost) {
       pendingHostIdentification = true;
+    }
+
+    // Server echoes back the identified host — update primaryHost if it was unknown
+    if (msg.current_host && msg.current_host !== primaryHost) {
+      const identified = msg.current_host.toLowerCase();
+      primaryHost = identified;
+      updatePrimaryLabel(identified.charAt(0).toUpperCase() + identified.slice(1));
+      // Add to fronters if not already there
+      if (!fronters.includes(identified)) {
+        fronters.push(identified);
+      }
+      updateFronterChips();
+      // Tell server to persist this
+      if (ws && connected) {
+        ws.send(JSON.stringify({
+          type:       'switch_host',
+          session_id: SESSION_ID,
+          headmate:   identified,
+        }));
+      }
     }
 
     currentMsgEl  = null;
