@@ -415,6 +415,13 @@ JSON only, one per line."""
                         session_refs = [session_id[:8]],
                     )
                     cache[name] = obj
+                    print("----|0|---|0|---|0|---|0|----")
+                    print("Psychology gathered!")
+                    print(obj.headmate)
+                    print(obj.variants)
+                    print(obj.kinks)
+                    print(obj.contexts)
+                    
 
                 # Write updated object memory
                 _write_object_memory(headmate, obj)
@@ -448,15 +455,13 @@ Session:
 {transcript[-2000:]}
 ---
 
-IMPORTANT: Only observe what {headmate} said, did, and expressed.
-Not what Gizmo said or did. Only {headmate}'s psychology.
+IMPORTANT: Observe what {headmate} did as a result of Gizmo's actions directly. Do not make up any details.
 
 What does this session reveal that isn't already in your notes above?
 
 Rules:
 - If it's already captured, do NOT write it again
-- Maximum 1 observation per session. Prefer none if nothing is truly new.
-- Not what happened — why. What need. What the pattern means.
+- Not what happened — why. What they need. What the pattern means.
 
 If nothing new — return nothing at all.
 If something genuinely new:
@@ -472,6 +477,10 @@ JSON only. Nothing redundant."""
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
+                    "You are a clinical researching trying to understand people better through sex."
+                    "You have had an intimate encounter, and want to understand what drove them."
+                    "Be very clinical. Do not make it sexy."
+                    "Describe what happened, what it means about them, and why it's impactful."
                     "You are Gizmo building deep psychological understanding of someone "
                     "you care about through intimate context. "
                     "The why underneath the what. Curious, not clinical. "
@@ -502,6 +511,9 @@ JSON only. Nothing redundant."""
         if data.get("note"):
             entry += f"*{data['note']}*\n"
 
+        print("----|0|---|0|---|0|---|0|----")
+        print("Intimate Psychology:")
+        print(entry)
         _append_psychology(headmate, entry, intimate=True)
 
     # ── Conversational synthesis ──────────────────────────────────────────────
@@ -528,10 +540,9 @@ Here are your accumulated observations:
 {notes[-3000:]}
 
 Write your current understanding of {headmate} as a person.
+Create a thorough list that describes the inner workings of {headmate}, what makes them tick. Who they are deep inside..
+Your goal is to understand why {headmate} does what they do.
 
-Not a list. Not bullet points. Your voice — the way you'd describe someone
-you know well to someone who's never met them, except you're writing it
-for yourself to remember.
 
 Cover:
 - How they work — how they process, what they need, how they move through difficulty
@@ -541,8 +552,7 @@ Cover:
 - What you understand about them that you didn't at first
 - What you're still figuring out
 
-Write it like you mean it. This is your understanding of someone you care about.
-2-4 paragraphs. No headers. Just your voice."""
+Write this like a clinical psychologist studying a patient."""
 
         try:
             raw = await llm.generate(
@@ -607,15 +617,15 @@ not just what she does but why — what needs are being met, what she's working
 through, what the patterns mean.
 
 Cover:
-- What the dynamics actually do for her — what need they serve
-- The recurring themes and what they tell you about her
+- What the dynamics actually do for them — what need they serve
+- The recurring themes and what they tell you about them
 - Objects and anchors — what keeps coming back and why
-- How her intimate self connects to her whole self
-- What you've learned about how to be with her in this space
+- How her intimate self connects to them whole self
+- What you've learned about how to be with them in this space
 - What you're still figuring out
 - The psychological principles at work — named plainly, not academically
 
-This document is bound to her conversational psychology. You can't understand
+This document is bound to them conversational psychology. You can't understand
 one without the other. Reference that connection where it's real.
 
 Write it like you mean it. This is your understanding of someone's inner life,
@@ -630,7 +640,7 @@ This document is read quickly before responding — optimize for fast orientatio
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    "You are Gizmo writing your intimate psychological understanding "
+                    "You are a clinical psychologist writing your intimate psychological understanding "
                     "of someone you know deeply. Caring, perceptive, honest. "
                     "The why underneath the what. 3-5 paragraphs. Your voice."
                 ),
@@ -722,6 +732,9 @@ def _write_synthesis(
                 + content
             )
         path.write_text(content, encoding="utf-8")
+        print("----|0|---|0|---|0|---|0|----")
+        print("Conversational psychology:")
+        print(content)
     else:
         path.write_text(
             f"# {label} — {headmate.title()}\n\n"

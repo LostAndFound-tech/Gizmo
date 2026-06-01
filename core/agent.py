@@ -958,16 +958,16 @@ class Agent:
 def _token_target(brief: Brief) -> int:
     register = brief.register
     if register in ("subspace", "scene"):
-        return 40
+        return 160
     if register in ("distress", "crisis"):
-        return 80
+        return 300
     if register in ("intimate", "dominant"):
-        return 60
+        return 600
     if register in ("reflective", "deep"):
-        return 180
+        return 250
     if brief.session_momentum == "opening":
-        return 80
-    return max(60, min(200, brief.word_count * 2))
+        return 120
+    return max(160, min(2000, brief.word_count * 5))
 
 
 def _tone_for_register(register: str) -> str:
@@ -1011,9 +1011,7 @@ def _response_temperature(brief: Brief) -> float:
         return 0.85
     if brief.register in ("distress", "crisis"):
         return 0.4
-    if brief.has_intimate:
-        return 0.8
-    return 0.72
+    return 0.5
 
 
 def _classify_register(message: str) -> str:

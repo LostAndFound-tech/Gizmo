@@ -165,7 +165,7 @@ class MemoryRetriever:
     CRAWL_DEPTH  = 2
 
     # Minimum similarity score to include a vector hit
-    MIN_SIM      = 0.35
+    MIN_SIM      = 0.50
 
     async def retrieve(
         self,
@@ -174,7 +174,7 @@ class MemoryRetriever:
         session_id:   str,
         register:     str   = "neutral",
         fast:         bool  = False,
-        intimate_ok:  Optional[bool] = None,  # None = auto-check consent store
+        intimate_ok:  Optional[bool] = True,  # None = auto-check consent store
     ) -> MemoryContext:
         """
         Main retrieval entry point.

@@ -1047,6 +1047,7 @@ Return JSON:
         if clean.startswith("```"):
             clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         data = json.loads(clean)
+        print(f"{headmate} requested {context[:400]} because {data}")
     except Exception:
         return
 
@@ -1410,11 +1411,11 @@ def build_reaction_prompt(
 
     if gizmo_body:
         # Extract just the most relevant sections — keep it short
-        body_snippet = gizmo_body[:400]
+        body_snippet = gizmo_body[]
         lines.append(f"\nYour body:\n{body_snippet}")
 
     if mate_body:
-        body_snippet = mate_body[:400]
+        body_snippet = mate_body[]
         lines.append(f"\n{headmate.title()}'s body:\n{body_snippet}")
 
     if mate_file:
