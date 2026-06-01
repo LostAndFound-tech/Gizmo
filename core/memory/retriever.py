@@ -486,7 +486,7 @@ class MemoryRetriever:
         )
         print("FULL PROMPT")
         print("------------------")
-        print("headmate:", {headmate}:)
+        print("headmate:", {headmate})
         print("Memories")
         for m in ctx.memories: 
             print(m)
