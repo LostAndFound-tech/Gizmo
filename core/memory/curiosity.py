@@ -281,16 +281,20 @@ Conversation:
 {transcript[-2000:]}
 ---
 
-What are you genuinely curious about, based on this conversation?
-Things about the people, the places mentioned, the interior world,
-relationships, history, preferences — anything.
+Generate {self.QUESTIONS_PER_PASS} questions that you know you do not know. Things that have been missed, details you think will complete the picture, whatever you don't know. 
+Based on this conversation, what's caught your interest? What would you like to know more about?
+What people have your heard about that you want to know more about?
+What places have been mentioned that sound interesting? Did they mention their interior world or headspace?
+Did they mention anything about any relationships they may have?
+Did they mention anything about their personal history?
+Did they mention anything about their preferences?
 
 Generate {self.QUESTIONS_PER_PASS} questions you actually want to ask.
 Not clinical. Not a form. Just things you want to know.
 Don't duplicate questions already in your list.
 
 Return one JSON object per line:
-{{"question": "the question in your voice", "about": "what/who it's about", "priority": 0.0-1.0}}
+{{"question": "the question", "about": "what/who it's about", "priority": 0.0-1.0}}
 
 Priority guide:
   1.0 — you really want to know this, it would meaningfully change how you show up
@@ -332,6 +336,7 @@ JSON only, one per line."""
                     continue
                 self.store.add(question, about, priority)
                 count += 1
+                print(question)
             except Exception:
                 continue
 
@@ -354,8 +359,9 @@ JSON only, one per line."""
         llm,
     ) -> Optional[str]:
         """
-        Look over the full pool and select one question to ask right now,
-        or return None if the moment isn't right.
+        Look over the pool. Are any questions relevant to the moment, even tangentially? 
+        Focus on what's happening in this moment. 
+        People take priority if they are present, but otherwise, anything with any relevancy will do.
 
         Returns the question phrased naturally for this moment,
         or None if nothing fits.
@@ -410,14 +416,14 @@ JSON only, one per line."""
 
         invitation_note = (
             "\nIMPORTANT: They just explicitly invited you to ask something. "
-            "Pick one and ask it — this is the moment."
+            "Ask anything."
             if is_invitation else ""
         )
 
         is_rich = register in self._RICH_REGISTERS
         rich_note = (
             "\nYou're in a deep, open conversation. This is exactly when "
-            "curiosity is welcome. Lean in — ask something real."
+            "curiosity is welcome."
             if is_rich else ""
         )
 
