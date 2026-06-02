@@ -165,6 +165,43 @@ def _time_of_day(hour: int) -> str:
     return "night"
 
 
+async def _world_hourly_tick(llm) -> None:
+    """
+    Coordinated hourly world tick.
+    Inner world → Culture → Media, in order.
+    inner_world.start() fires once here, then _beat() every hour.
+    """
+    from core.inner_world import inner_world
+    from core.culture import culture_engine
+    from core.media import media_engine
+
+    # First call builds the town if needed, fires first atmosphere
+    await inner_world.start(llm)
+
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            # 1. Physical world
+            await inner_world._beat()
+
+            # 2. Culture — takes last hour's active events
+            last_hour_events = [
+                {**e.to_dict(), "current_scene": e.get_scene()}
+                for e in inner_world.active_events()
+            ]
+            await culture_engine.hourly_pass(last_hour_events, llm)
+
+            # 3. Media — spread posts, generate paper, process photo queue
+            await media_engine.hourly_pass(culture_engine._threads, llm)
+
+            log_event("GizmoServer", "WORLD_TICK_COMPLETE",
+                events  = len(inner_world.active_events()),
+                threads = len([t for t in culture_engine._threads if not t.resolved]),
+            )
+        except Exception as e:
+            log_error("GizmoServer", "world tick failed", exc=e)
+
+
 class GizmoServer:
 
     def __init__(self):
@@ -178,6 +215,21 @@ class GizmoServer:
         from core.session_manager import session_manager
 
         await session_manager.start(llm=llm)
+
+        # ── World systems startup ──────────────────────────────────────────────
+        try:
+            from core.culture import culture_engine
+            from core.media import media_engine
+            from core.photo_seeds import photo_seed_engine  # noqa — loads queue
+
+            await culture_engine.start(llm)
+            await media_engine.start(llm)
+
+            # Coordinated world tick — inner_world starts inside this
+            asyncio.ensure_future(_world_hourly_tick(llm))
+            log_event("GizmoServer", "WORLD_SYSTEMS_STARTED")
+        except Exception as e:
+            log_error("GizmoServer", "world systems failed to start", exc=e)
 
         # ── Scheduler — psych batch processor + any future cron jobs ──────────
         try:
@@ -243,6 +295,25 @@ class GizmoServer:
             finally:
                 self._connections.pop(session_id, None)
                 log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
+
+                # ── Flush world systems on disconnect ──────────────────────────
+                try:
+                    from core.llm import llm as _llm
+                    from core.session_telemetry import session_telemetry_manager
+                    from core.goal import goal_manager
+                    from core.directive import directive_engine
+                    from core.inner_world import world_reactor
+                    from core.culture import culture_engine
+
+                    asyncio.ensure_future(
+                        session_telemetry_manager.on_session_close(session_id, _llm)
+                    )
+                    asyncio.ensure_future(goal_manager.close_session(session_id))
+                    directive_engine.clear(session_id)
+                    world_reactor.close_session(session_id)
+                    culture_engine.close_session(session_id)
+                except Exception as e:
+                    log_error("GizmoServer", "session world flush failed", exc=e)
             return ws
 
         app.router.add_get("/",                       handle_index)
@@ -295,6 +366,27 @@ class GizmoServer:
         content  = msg.get("content", "")
         context  = msg.get("context", {})
         history  = session_manager.get_history(session_id)
+
+        # ── Per-session world systems — spin up on first message ───────────────
+        try:
+            from core.session_telemetry import session_telemetry_manager
+            from core.goal import goal_manager
+            _headmate_hint = (
+                context.get("current_host") or
+                session_manager.get_session_context(session_id).get("current_host") or ""
+            )
+            if session_telemetry_manager.get(session_id) is None:
+                asyncio.ensure_future(
+                    session_telemetry_manager.open_session(
+                        session_id, _headmate_hint or None, llm
+                    )
+                )
+                if _headmate_hint:
+                    asyncio.ensure_future(
+                        goal_manager.open_session(session_id, _headmate_hint, llm)
+                    )
+        except Exception as e:
+            log_error("GizmoServer", "session world systems failed", exc=e)
 
         live_ctx = session_manager.get_session_context(session_id)
         if live_ctx.get("current_host"):
@@ -427,6 +519,25 @@ class GizmoServer:
             hosts      = [headmate] if headmate else [],
             topics     = _extract_topics_from_parts(parts),
         )
+
+        # ── Telemetry exchange pass ───────────────────────────────────────────
+        try:
+            from core.session_telemetry import session_telemetry_manager
+            from core.llm import llm as _llm
+            from core.agent import _classify_register
+            _register = _classify_register(raw_text)
+            asyncio.ensure_future(
+                session_telemetry_manager.on_exchange(
+                    session_id = session_id,
+                    headmate   = headmate or None,
+                    user_msg   = raw_text,
+                    gizmo_msg  = response,
+                    llm        = _llm,
+                    register   = _register,
+                )
+            )
+        except Exception as e:
+            log_error("GizmoServer", "telemetry exchange failed to schedule", exc=e)
 
         # ── Scene extraction — fire and forget after response ─────────────────
         try:
