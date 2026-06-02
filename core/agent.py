@@ -654,6 +654,18 @@ async def close_loop(
             "fronters":     brief.fronters,
         })
 
+        # ── Track register for intimate detection ─────────────────────────────
+        try:
+            from core.session_manager import session_manager as _sm
+            _sm.touch(
+                session_id = brief.session_id,
+                hosts      = [brief.headmate] if brief.headmate else [],
+                topics     = brief.topics,
+                register   = brief.register,
+            )
+        except Exception:
+            pass
+
         # ── Emotion log ───────────────────────────────────────────────────────
         store.write("emotion_log", {
             "headmate":   brief.headmate.lower() if brief.headmate else None,
@@ -768,11 +780,16 @@ async def close_loop(
         except Exception as e:
             log_error("Agent", f"curiosity beat/coherence failed to schedule: {e}", exc=None)
 
-        # ── Gizmo self — body gap awareness ──────────────────────────────────
-        # On early messages, check if body file has gaps and queue questions
+        # ── Gizmo self — body gap awareness + file cleanup ───────────────────
         if brief.headmate and brief.session_momentum in ("opening", "building"):
             try:
-                from core.memory.gizmo_self import queue_body_gap_questions
+                from core.memory.gizmo_self import (
+                    queue_body_gap_questions, clean_temperature_noise
+                )
+                # Clean temperature noise from relationship file (idempotent)
+                if ctx.message_count == 1:
+                    clean_temperature_noise(brief.headmate)
+
                 asyncio.ensure_future(
                     queue_body_gap_questions(
                         headmate   = brief.headmate,
@@ -809,6 +826,7 @@ async def close_loop(
                         headmate   = brief.headmate,
                         user_msg   = brief.message,
                         session_id = brief.session_id,
+                        register   = brief.register,
                     )
                 )
         except Exception as e:
@@ -958,16 +976,16 @@ class Agent:
 def _token_target(brief: Brief) -> int:
     register = brief.register
     if register in ("subspace", "scene"):
-        return 160
+        return 40
     if register in ("distress", "crisis"):
-        return 300
+        return 80
     if register in ("intimate", "dominant"):
-        return 600
+        return 60
     if register in ("reflective", "deep"):
-        return 250
+        return 180
     if brief.session_momentum == "opening":
-        return 120
-    return max(160, min(2000, brief.word_count * 5))
+        return 80
+    return max(60, min(200, brief.word_count * 2))
 
 
 def _tone_for_register(register: str) -> str:
@@ -1011,7 +1029,9 @@ def _response_temperature(brief: Brief) -> float:
         return 0.85
     if brief.register in ("distress", "crisis"):
         return 0.4
-    return 0.5
+    if brief.has_intimate:
+        return 0.8
+    return 0.72
 
 
 def _classify_register(message: str) -> str:
@@ -1080,7 +1100,12 @@ def _infer_outcome(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _track_all_reactions(headmate: str, user_msg: str, session_id: str) -> None:
+async def _track_all_reactions(
+    headmate:   str,
+    user_msg:   str,
+    session_id: str,
+    register:   str = "neutral",
+) -> None:
     """Track reactions to all active temperature dimensions for this headmate."""
     try:
         from core.question_bank import question_bank
@@ -1094,6 +1119,7 @@ async def _track_all_reactions(headmate: str, user_msg: str, session_id: str) ->
                     response   = "",
                     user_next  = user_msg,
                     session_id = session_id,
+                    register   = register,
                 )
     except Exception:
         pass

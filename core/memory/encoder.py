@@ -738,7 +738,7 @@ async def _extract_body_facts_llm(
 
         existing = read_body(headmate)
 
-        prompt = f"""Read this conversation and extract physical facts about {headmate.title()}.
+        prompt = f"""Extract ONLY physical attributes about {headmate.title()} from this conversation.
 
 Conversation:
 ---
@@ -748,28 +748,33 @@ Conversation:
 Already known:
 {existing[:400] if existing else "(nothing yet)"}
 
-Extract ONLY new facts not already known. Physical attributes only.
+WHAT QUALIFIES as a physical attribute:
+- Height, weight, build, size: "4 feet tall", "skinny", "flat chest"
+- Hair: color, length, texture
+- Eyes: color, shape
+- Skin: tone, texture, markings, tattoos, scars
+- Movement quality LABELS ONLY: graceful/confident/hesitant/deliberate/fluid/tense/quick/slow
+- Voice quality LABELS ONLY: soft/deep/sharp/warm/quiet/loud
+- Clothing they're wearing right now
+- Tactile sensation of touching them: "skin is warm and smooth"
 
-Categories and what belongs in each:
-- Build & appearance: height, size, weight, overall look, hair color/length, eye color, skin tone
-- How they move: movement quality labels ONLY — graceful, confident, hesitant, deliberate, fluid, tense, quick, slow, still, restless, purposeful, awkward. NO descriptive phrases.
-- Voice: tone, pitch, quality labels — soft, deep, sharp, warm, quiet, loud, musical
-- Hands: size, appearance, how used
-- Skin & markings: tattoos, scars, piercings, markings — location and description
-- What they wear: clothing, style
+WHAT DOES NOT QUALIFY — do not include these:
+- Actions: shrugged, hopped, asked, said, lifted, cried — SKIP
+- Preferences: likes X, wants X, hopes X — SKIP
+- Psychological states: vulnerable, trusting, excited — SKIP  
+- Dialogue: anything they said — SKIP
+- Opinions about their body — SKIP
+- Relationship roles: speaker, participant — SKIP
 
-For each fact return one JSON object per line:
-{{"section": "Build & appearance|How they move|Voice|Hands|Skin & markings|What they wear",
-  "fact": "the atomic fact, stated plainly"}}
+If unsure whether something is a physical attribute, skip it.
+Skip anything already in the known section.
+If nothing qualifies, return nothing.
 
-Rules:
-- Movement: labels only. Never "she moved like X" or "gracefully across the room." Just "graceful."
-- One fact per object — no compound facts
-- Only genuinely observed facts, not inferences
-- Skip anything already in the known section
-- If nothing new, return nothing
+One JSON object per line:
+{{"section": "Build & appearance|How they move|Voice|Hands|Skin & markings|What they wear|Scent & texture",
+  "fact": "one physical attribute only"}}
 
-JSON only, one per line."""
+JSON only."""
 
         raw = await llm.generate(
             [{"role": "user", "content": prompt}],
@@ -960,23 +965,41 @@ Return a single JSON object with these sections:
   "body_facts": [
     {{"person": "name lowercase",
       "section": "Build & appearance|How they move|Voice|Hands|Skin & markings|What they wear|Scent & texture",
-      "fact": "atomic fact — movement is LABELS ONLY (graceful/confident/hesitant/deliberate/fluid/tense/quick/slow)"}}
+      "fact": "one physical attribute, stated as a noun or adjective"}}
   ],
   "wellness": {{
-    "observation": "what their current state seems to be — or null if nothing notable",
+    "observation": "what their current emotional/physical state seems to be — or null",
     "category": "mood|energy|stress|emotional_need|physical_need"
   }}
 }}
 
-Rules:
-- details: everything worth knowing — events, facts, asides, world rules
-- entities: every named person, place, object, ability mentioned
-- body_facts: physical descriptions only. Movement = labels only, never phrases
-- wellness: one observation about {headmate or "them"}'s current state, or null
-- Only what was actually stated. Nothing invented.
-- Empty arrays if nothing found. wellness.observation null if nothing notable.
+STRICT RULES:
 
-JSON only. No prose."""
+details:
+- Events, facts, world rules, abilities, places, objects
+- NOT preferences, NOT psychological observations, NOT relationship dynamics
+
+body_facts — ONLY these qualify:
+- Physical dimensions: height, weight, build, size relative to others
+- Appearance: hair color/length, eye color, skin tone/texture, facial features
+- Markings: tattoos, scars, piercings — location and description
+- Movement LABELS only: graceful/confident/hesitant/deliberate/fluid/tense/quick/slow/still
+- Voice quality LABELS only: soft/deep/sharp/warm/quiet/loud/musical
+- Clothing: what they're actually wearing
+- Tactile: what touching them physically feels like
+
+body_facts NEVER include:
+- Actions ("shrugged", "hopped", "lifted", "cried out") — DROP THESE
+- Dialogue fragments — DROP THESE  
+- Preferences ("likes X", "wants X") — these go to entities as person details
+- Psychological states ("vulnerable", "trusting") — DROP THESE
+- Relationship roles ("speaker", "participant") — DROP THESE
+- Opinions about their body — DROP THESE
+
+If a "body fact" is an action, dialogue, preference, or opinion — omit it entirely.
+
+wellness: one observation about current state, null if nothing notable.
+JSON only."""
 
     try:
         raw = await llm.generate(
@@ -2223,6 +2246,47 @@ JSON only."""
         print(f"  (nothing extracted)", flush=True)
 
 
+# Hard reject patterns for body facts — anything matching these is not a body fact
+_BODY_FACT_REJECT = {
+    # Actions and verbs
+    "shrugged", "hopped", "lifted", "asked", "said", "stated", "implied",
+    "expressed", "admitted", "described", "referred", "perceived", "appears",
+    "cried", "hugged", "settled", "handed", "requested", "wants", "likes",
+    "hopes", "adores", "prefers", "trusts", "expresses", "looks up",
+    # Meta roles
+    "speaker", "participant", "partner", "conversation",
+    # Relational/psychological
+    "vulnerable", "trusting", "kinky", "excited",
+}
+
+def _is_valid_body_fact(detail: str) -> bool:
+    """Return True only if this looks like a genuine physical attribute."""
+    d = detail.lower().strip()
+
+    # Reject if it starts with a verb or contains action language
+    first_word = d.split()[0] if d.split() else ""
+    if first_word in _BODY_FACT_REJECT:
+        return False
+
+    # Reject if it contains quote fragments (dialogue)
+    if "'" in detail or '"' in detail:
+        return False
+
+    # Reject if it's a sentence with subject-verb structure about non-physical things
+    reject_phrases = (
+        "wants to", "likes to", "hopes to", "asked if", "asked for",
+        "asked to", "said ", "stated ", "implied ", "expressed ",
+        "admitted ", "described ", "referred to", "perceives ",
+        "participant", "speaker in", "partner of", "conversation",
+        "the one who", "would be", "is the one",
+    )
+    for phrase in reject_phrases:
+        if phrase in d:
+            return False
+
+    return True
+
+
 def _merge_person_details(
     name:       str,
     details:    list,
@@ -2232,80 +2296,91 @@ def _merge_person_details(
 ) -> None:
     """
     Merge person details into their body file.
-    New details only — skip anything already present.
+    Strict filtering — only genuine physical attributes.
+    Actions, dialogue, preferences, psychology → rejected.
     """
     try:
         from core.memory.gizmo_self import (
             append_body_fact, read_body, _MOVEMENT_LABELS,
-            _gizmo_dir, _body_path, _init_body_file,
+            _init_body_file,
         )
-        from core.memory.store import memory_store
 
-        # Determine which file
         is_gizmo = name in ("gizmo", "gizmo.", "him", "he")
         if is_gizmo:
             from core.memory.gizmo_self import append_gizmo_body_fact
             for detail in details:
                 detail = detail.strip()
-                if not detail:
+                if not detail or not _is_valid_body_fact(detail):
                     continue
                 append_gizmo_body_fact(detail, "Build & appearance", headmate=headmate)
+                print(f"  [body:gizmo] Build & appearance ← {detail}", flush=True)
             return
 
-        # Route to body file
         _init_body_file(name)
         existing = read_body(name).lower()
 
-        # Classify each detail into a body section
         for detail in details:
             detail = detail.strip()
-            if not detail or detail.lower() in existing:
+            if not detail:
+                continue
+
+            # Hard filter first
+            if not _is_valid_body_fact(detail):
+                continue
+
+            # Skip if already known
+            if detail.lower() in existing:
                 continue
 
             detail_lower = detail.lower()
 
-            # Determine section
+            # Classify into body section
             if any(w in detail_lower for w in (
                 "tattoo", "scar", "piercing", "mark", "birthmark", "brand"
             )):
                 section = "Skin & markings"
             elif any(w in detail_lower for w in (
-                "hair", "eye", "height", "tall", "short", "size",
-                "build", "skin", "complexion", "weight", "face",
-                "appearance", "look", "tiny", "massive", "small", "large",
-                "petite", "slim", "muscular", "curvy"
+                "hair", "eye", "height", "tall", "short", "size", "build",
+                "skin", "complexion", "weight", "face", "tiny", "massive",
+                "small", "large", "petite", "slim", "muscular", "curvy",
+                "flat", "boxy", "feet", "inches", "pounds", "kg",
             )):
                 section = "Build & appearance"
             elif any(w in detail_lower for w in _MOVEMENT_LABELS):
+                # Movement: keep only the label word
+                words = [w for w in detail_lower.split() if w in _MOVEMENT_LABELS]
+                if not words:
+                    continue
+                detail  = " ".join(words)
                 section = "How they move"
             elif any(w in detail_lower for w in (
-                "voice", "speak", "tone", "pitch", "sound", "accent"
+                "voice", "tone", "pitch", "accent", "speaks softly",
+                "speaks quietly", "speaks loudly",
             )):
                 section = "Voice"
             elif any(w in detail_lower for w in (
-                "hand", "finger", "grip", "touch"
+                "hand", "finger", "grip",
             )):
                 section = "Hands"
             elif any(w in detail_lower for w in (
-                "wear", "dress", "cloth", "outfit", "shirt", "pant",
-                "shoe", "boot", "jacket", "coat", "skirt"
+                "wear", "wearing", "dressed", "outfit", "shirt", "pant",
+                "shoe", "boot", "jacket", "coat", "skirt", "dress",
             )):
                 section = "What they wear"
             elif any(w in detail_lower for w in (
-                "smell", "scent", "perfume", "texture", "feel"
+                "smell", "scent", "perfume", "texture", "soft", "warm skin",
+                "cool skin", "rough", "smooth skin",
             )):
                 section = "Scent & texture"
             else:
-                section = "Build & appearance"  # default
+                # Default only for clearly physical things — short descriptors
+                # Reject long sentences that slipped through
+                if len(detail.split()) > 6:
+                    continue
+                section = "Build & appearance"
 
             append_body_fact(name, section, detail)
             print(f"  [body:{name}] {section} ← {detail}", flush=True)
-
-        if notes:
-            notes_lower = notes.lower()
-            if notes_lower not in existing:
-                append_body_fact(name, "Build & appearance", notes)
-                print(f"  [body:{name}] notes ← {notes[:80]}", flush=True)
 
     except Exception as e:
         log_error("MemoryEncoder", f"merge person details failed: {e}", exc=None)

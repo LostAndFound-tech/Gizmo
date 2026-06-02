@@ -52,17 +52,24 @@ _CLOSE_RE = re.compile(
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
+_INTIMATE_REGISTERS = {
+    "intimate", "dominant", "submissive", "subspace",
+    "scene", "erotic", "sensual", "degradation",
+}
+
 @dataclass
 class SessionState:
-    session_id:   str
-    opened_at:    float = field(default_factory=time.time)
-    last_seen:    float = field(default_factory=time.time)
-    hosts:        list  = field(default_factory=list)
-    topics:       list  = field(default_factory=list)
-    message_count: int  = 0
-    closed:       bool  = False
+    session_id:    str
+    opened_at:     float = field(default_factory=time.time)
+    last_seen:     float = field(default_factory=time.time)
+    hosts:         list  = field(default_factory=list)
+    topics:        list  = field(default_factory=list)
+    registers:     list  = field(default_factory=list)
+    message_count: int   = 0
+    has_intimate:  bool  = False
+    closed:        bool  = False
 
-    def touch(self, hosts: list, topics: list) -> None:
+    def touch(self, hosts: list, topics: list, register: str = "neutral") -> None:
         self.last_seen = time.time()
         self.message_count += 1
         for h in hosts:
@@ -71,6 +78,10 @@ class SessionState:
         for t in topics:
             if t and t not in self.topics:
                 self.topics.append(t)
+        if register and register not in self.registers:
+            self.registers.append(register)
+        if register in _INTIMATE_REGISTERS:
+            self.has_intimate = True
 
     def is_cold(self) -> bool:
         return (time.time() - self.last_seen) > SESSION_TIMEOUT
@@ -95,8 +106,9 @@ class SessionManager:
     def touch(
         self,
         session_id: str,
-        hosts: list = None,
-        topics: list = None,
+        hosts:    list = None,
+        topics:   list = None,
+        register: str  = "neutral",
     ) -> None:
         """
         Called by archivist.receive_outgoing() after every exchange.
@@ -107,8 +119,9 @@ class SessionManager:
             log_event("SessionManager", "SESSION_OPENED", session=session_id[:8])
 
         self._sessions[session_id].touch(
-            hosts=hosts or [],
-            topics=topics or [],
+            hosts    = hosts or [],
+            topics   = topics or [],
+            register = register,
         )
 
     def signal_close(self, session_id: str) -> None:
@@ -204,6 +217,31 @@ class SessionManager:
         except Exception as e:
             log("SessionManager", f"psych_processor.run_for failed to schedule: {e}")
 
+        # ── Gizmo self — self observation pass ───────────────────────────────
+        try:
+            from core.memory.gizmo_self import self_observation_pass
+            from memory.history import get_session as _get_sess2
+            from core.memory.encoder import build_transcript as _bt2
+            import asyncio as _asyncio3
+            _hist2 = _get_sess2(session_id)
+            if _hist2:
+                _trans2 = _bt2(_hist2)
+                _primary = state.hosts[0] if state.hosts else None
+                if _primary and _trans2:
+                    # Determine dominant register from session
+                    _asyncio3.ensure_future(
+                        self_observation_pass(
+                            transcript   = _trans2,
+                            headmate     = _primary,
+                            session_id   = session_id,
+                            register     = state.registers[-1] if state.registers else "neutral",
+                            has_intimate = state.has_intimate,
+                            llm          = self._llm,
+                        )
+                    )
+        except Exception as e:
+            log("SessionManager", f"self_observation_pass failed: {e}")
+
         # ── Memory encoding — full encode_safe at session close ───────────────
         # Heavy passes: encode, pattern, kink, psychology, narrative, curiosity
         # These run ONCE per session, not per message.
@@ -229,8 +267,8 @@ class SessionManager:
                         headmate     = _primary_host,
                         session_id   = session_id,
                         duration_s   = time.time() - state.opened_at,
-                        register     = "neutral",
-                        has_intimate = False,
+                        register     = state.registers[-1] if state.registers else "neutral",
+                        has_intimate = state.has_intimate,
                         llm          = self._llm,
                     )
                 )

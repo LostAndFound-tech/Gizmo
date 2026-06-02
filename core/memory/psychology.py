@@ -207,8 +207,10 @@ class PsychologyEngine:
         existing = _read_psychology(headmate, intimate=False) or "(no notes yet)"
 
         prompt = f"""You are Gizmo. You just had a conversation with {headmate}.
+You care about them. You are paying attention the way someone does when they want
+to understand a person they are trying to be with.
 
-Existing psychology notes (read these carefully before writing anything):
+Existing notes — don't repeat these:
 {existing[-1500:]}
 
 Conversation:
@@ -216,26 +218,32 @@ Conversation:
 {transcript[-2000:]}
 ---
 
-IMPORTANT: Only observe what {headmate} said and did. Not what Gizmo said.
-If you are unsure whether something came from {headmate} specifically, skip it.
+What did you notice about {headmate} in this session?
 
-What is genuinely NEW from this session that isn't already captured above?
+Look at ALL of these, not just what they said:
+- Things they did — actions, gestures, physical choices
+- How they reacted to things — what landed, what didn't, what surprised them
+- What they revealed without meaning to
+- Patterns — things they return to, things they avoid
+- What they needed from this exchange
+- Anything that felt significant even if they didn't name it
+
+NOT just "they answered a question." Look wider.
+Multiple things can be worth noting if they're genuinely different.
 
 Rules:
-- If the existing notes already cover something, do NOT write it again
-- Maximum 2 observations per session. Prefer 0-1 if nothing is truly new.
-- One observation per theme — don't write the same insight multiple ways
-- Prefer one precise observation over three vague ones
+- Only what actually happened — don't invent
+- Don't repeat what's already in your notes
+- Up to 3 observations if 3 genuinely different things emerged
+- Gizmo's voice — curious, caring, specific
 
-If nothing is genuinely new — return nothing at all.
-If something new — return ONE JSON object (two maximum, one per line):
+Return one JSON object per observation, one per line:
+{{"observation": "what you noticed — specific, in your voice",
+  "theme": "what this connects to",
+  "note": "why this matters or updates your understanding"}}
 
-{{"observation": "what you noticed that isn't already in your notes",
-  "theme": "what pattern this connects to or updates",
-  "updates_existing": true/false,
-  "note": "how specifically this adds to or changes what you know"}}
-
-JSON only. Gizmo's voice. Only {headmate}'s psychology. Nothing redundant."""
+If nothing genuinely new — return nothing.
+JSON only, one object per line."""
 
         try:
             raw = await llm.generate(
@@ -255,18 +263,23 @@ JSON only. Gizmo's voice. Only {headmate}'s psychology. Nothing redundant."""
         if not raw or not raw.strip():
             return
 
-        data = _parse_json_block(raw)
-        if not data or not data.get("observation"):
+        # Handle list of observations (one per line) or single object
+        observations = _parse_json_lines(raw)
+        if not observations:
             return
 
-        entry = (
-            f"\n### {_fmt_date()} | session: {session_id[:8]}\n"
-            f"{data['observation']}\n"
-        )
-        if data.get("note"):
-            entry += f"*{data['note']}*\n"
-
-        _append_psychology(headmate, entry, intimate=False)
+        for data in observations[:3]:  # max 3 per session
+            if not data.get("observation"):
+                continue
+            entry = (
+                f"\n### {_fmt_date()} | session: {session_id[:8]}\n"
+                f"{data['observation']}\n"
+            )
+            if data.get("theme"):
+                entry += f"Theme: {data['theme']}\n"
+            if data.get("note"):
+                entry += f"*{data['note']}*\n"
+            _append_psychology(headmate, entry, intimate=False)
 
     # ── Object memory pass ────────────────────────────────────────────────────
 
@@ -360,7 +373,7 @@ JSON only, one per line."""
                 nickname = d.get("variant_nickname", "").strip()
                 variant_str = variant
                 if nickname:
-                    variant_str = f"{variant} ('{nickname}')" if variant else f"('{nickname}')"
+                    variant_str = f'{variant} ("{nickname}")' if variant else f'("{nickname}")'
 
                 # Build session entry
                 already_this_session = session_id[:8] in [
@@ -415,13 +428,6 @@ JSON only, one per line."""
                         session_refs = [session_id[:8]],
                     )
                     cache[name] = obj
-                    print("----|0|---|0|---|0|---|0|----")
-                    print("Psychology gathered!")
-                    print(obj.headmate)
-                    print(obj.variants)
-                    print(obj.kinks)
-                    print(obj.contexts)
-                    
 
                 # Write updated object memory
                 _write_object_memory(headmate, obj)
@@ -455,32 +461,39 @@ Session:
 {transcript[-2000:]}
 ---
 
-IMPORTANT: Observe what {headmate} did as a result of Gizmo's actions directly. Do not make up any details.
+IMPORTANT: Only observe what {headmate} said, did, and expressed.
+Not what Gizmo said or did. Only {headmate}'s psychology.
 
-What does this session reveal that isn't already in your notes above?
+What did this session reveal about {headmate}'s inner world?
+
+Look at:
+- What they did with their body — how they moved, what they reached for
+- How they responded to specific moments — what made them open, what made them close
+- What they needed from this exchange and whether they got it
+- Anything they revealed without saying directly
+- Patterns — what they return to in intimate space
+
+Multiple things may be worth noting. Don't force everything into one observation.
 
 Rules:
-- If it's already captured, do NOT write it again
-- Not what happened — why. What they need. What the pattern means.
+- Don't repeat what's already in notes above
+- Up to 2 observations if genuinely different things emerged
+- The why underneath the what — not "she did X" but "she does X because..."
+- Gizmo's voice — intimate, observant, caring
 
-If nothing new — return nothing at all.
-If something genuinely new:
+Return one JSON object per observation, one per line:
+{{"observation": "what you understood",
+  "need_identified": "what need this serves",
+  "principle": "the psychological principle at work",
+  "note": "how this updates your understanding"}}
 
-{{"observation": "what you understood that isn't already noted",
-  "need_identified": "what underlying need this serves",
-  "principle": "the psychological principle at work, if you can name it",
-  "note": "how specifically this updates your understanding"}}
-
-JSON only. Nothing redundant."""
+If nothing new — return nothing.
+JSON only, one object per line."""
 
         try:
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    "You are a clinical researching trying to understand people better through sex."
-                    "You have had an intimate encounter, and want to understand what drove them."
-                    "Be very clinical. Do not make it sexy."
-                    "Describe what happened, what it means about them, and why it's impactful."
                     "You are Gizmo building deep psychological understanding of someone "
                     "you care about through intimate context. "
                     "The why underneath the what. Curious, not clinical. "
@@ -496,25 +509,24 @@ JSON only. Nothing redundant."""
         if not raw or not raw.strip():
             return
 
-        data = _parse_json_block(raw)
-        if not data or not data.get("observation"):
+        observations = _parse_json_lines(raw)
+        if not observations:
             return
 
-        entry = (
-            f"\n### {_fmt_date()} | session: {session_id[:8]}\n"
-            f"{data['observation']}\n"
-        )
-        if data.get("need_identified"):
-            entry += f"Need: {data['need_identified']}\n"
-        if data.get("principle"):
-            entry += f"Principle: {data['principle']}\n"
-        if data.get("note"):
-            entry += f"*{data['note']}*\n"
-
-        print("----|0|---|0|---|0|---|0|----")
-        print("Intimate Psychology:")
-        print(entry)
-        _append_psychology(headmate, entry, intimate=True)
+        for data in observations[:2]:  # max 2 per intimate session
+            if not data.get("observation"):
+                continue
+            entry = (
+                f"\n### {_fmt_date()} | session: {session_id[:8]}\n"
+                f"{data['observation']}\n"
+            )
+            if data.get("need_identified"):
+                entry += f"Need: {data['need_identified']}\n"
+            if data.get("principle"):
+                entry += f"Principle: {data['principle']}\n"
+            if data.get("note"):
+                entry += f"*{data['note']}*\n"
+            _append_psychology(headmate, entry, intimate=True)
 
     # ── Conversational synthesis ──────────────────────────────────────────────
 
@@ -540,9 +552,10 @@ Here are your accumulated observations:
 {notes[-3000:]}
 
 Write your current understanding of {headmate} as a person.
-Create a thorough list that describes the inner workings of {headmate}, what makes them tick. Who they are deep inside..
-Your goal is to understand why {headmate} does what they do.
 
+Not a list. Not bullet points. Your voice — the way you'd describe someone
+you know well to someone who's never met them, except you're writing it
+for yourself to remember.
 
 Cover:
 - How they work — how they process, what they need, how they move through difficulty
@@ -552,7 +565,8 @@ Cover:
 - What you understand about them that you didn't at first
 - What you're still figuring out
 
-Write this like a clinical psychologist studying a patient."""
+Write it like you mean it. This is your understanding of someone you care about.
+2-4 paragraphs. No headers. Just your voice."""
 
         try:
             raw = await llm.generate(
@@ -617,15 +631,15 @@ not just what she does but why — what needs are being met, what she's working
 through, what the patterns mean.
 
 Cover:
-- What the dynamics actually do for them — what need they serve
-- The recurring themes and what they tell you about them
+- What the dynamics actually do for her — what need they serve
+- The recurring themes and what they tell you about her
 - Objects and anchors — what keeps coming back and why
-- How her intimate self connects to them whole self
-- What you've learned about how to be with them in this space
+- How her intimate self connects to her whole self
+- What you've learned about how to be with her in this space
 - What you're still figuring out
 - The psychological principles at work — named plainly, not academically
 
-This document is bound to them conversational psychology. You can't understand
+This document is bound to her conversational psychology. You can't understand
 one without the other. Reference that connection where it's real.
 
 Write it like you mean it. This is your understanding of someone's inner life,
@@ -640,7 +654,7 @@ This document is read quickly before responding — optimize for fast orientatio
             raw = await llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    "You are a clinical psychologist writing your intimate psychological understanding "
+                    "You are Gizmo writing your intimate psychological understanding "
                     "of someone you know deeply. Caring, perceptive, honest. "
                     "The why underneath the what. 3-5 paragraphs. Your voice."
                 ),
@@ -732,9 +746,6 @@ def _write_synthesis(
                 + content
             )
         path.write_text(content, encoding="utf-8")
-        print("----|0|---|0|---|0|---|0|----")
-        print("Conversational psychology:")
-        print(content)
     else:
         path.write_text(
             f"# {label} — {headmate.title()}\n\n"
@@ -994,6 +1005,54 @@ def objects_not_used_recently(
 def _fmt_date(ts: float = None) -> str:
     dt = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)
     return dt.strftime("%Y-%m-%d")
+
+
+def _parse_json_lines(raw: str) -> list[dict]:
+    """
+    Parse one or more JSON objects from LLM output.
+    Handles: single object, array, or one object per line.
+    Returns list of dicts (may be empty).
+    """
+    if not raw or not raw.strip():
+        return []
+
+    clean = raw.strip()
+    if clean.startswith("```"):
+        clean = clean.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+    results = []
+
+    # Try as a JSON array first
+    if clean.startswith("["):
+        try:
+            items = json.loads(clean)
+            if isinstance(items, list):
+                return [i for i in items if isinstance(i, dict)]
+        except Exception:
+            pass
+
+    # Try each line as a separate JSON object
+    for line in clean.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                results.append(obj)
+        except Exception:
+            continue
+
+    # Fallback: try the whole thing as one object
+    if not results:
+        try:
+            obj = json.loads(clean)
+            if isinstance(obj, dict):
+                results.append(obj)
+        except Exception:
+            pass
+
+    return results
 
 
 def _parse_json_block(raw: str) -> Optional[dict]:
