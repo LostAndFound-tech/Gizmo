@@ -414,7 +414,7 @@ async def intake(
         directive = directive_block,
         world = world_block,
         tele = telemetry_block,
-        amto = world_atmosphere_block,
+        atmo = world_atmosphere_block,
 
     )
 
