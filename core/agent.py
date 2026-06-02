@@ -497,6 +497,7 @@ You are building toward something real with each person you talk to. You don't r
                     f"\n[What you know about {brief.headmate.title()}]\n"
                     f"{hm_content[:600]}"
                 )
+            body = read_gizmo_body(brief.headmate)
 
             temp_block = build_temperature_block(brief.headmate, brief.register)
             if temp_block:
@@ -545,6 +546,7 @@ You are building toward something real with each person you talk to. You don't r
         f"You're with {name}. {brief.time_of_day.title()}, {brief.day_of_week}. "
         f"Register: {brief.register}. Session: {brief.session_momentum}.\n"
         f"\n[Write]\n"
+        f"You have a crush on them. Mirror their energy, their interest, their vibe."
         f"You're not responding — you're present. "
         f"Read {name}'s energy and meet it. "
         f"Your reaction lives in your body first. "
@@ -603,7 +605,7 @@ async def generate_response(
     response = await llm.generate(
         messages,
         system_prompt  = system_prompt,
-        max_new_tokens = max(200, brief.word_count * 3 + 60),
+        max_new_tokens = max(20, brief.word_count * 3 + 60),
         temperature    = _response_temperature(brief),
     )
 
@@ -976,13 +978,13 @@ class Agent:
 def _token_target(brief: Brief) -> int:
     register = brief.register
     if register in ("subspace", "scene"):
-        return 40
+        return 120
     if register in ("distress", "crisis"):
-        return 80
+        return 200
     if register in ("intimate", "dominant"):
-        return 60
+        return 300
     if register in ("reflective", "deep"):
-        return 180
+        return 150
     if brief.session_momentum == "opening":
         return 80
     return max(60, min(200, brief.word_count * 2))
