@@ -2490,4 +2490,6 @@ def _merge_entity_details(
             print(f"  [entity:{name}({etype})] CREATED ← {', '.join(new_lines[:4])}", flush=True)
 
     except Exception as e:
+        import traceback
         log_error("MemoryEncoder", f"merge entity details failed: {e}", exc=None)
+        print(f"[merge_entity_details] FULL TRACEBACK:\n{traceback.format_exc()}", flush=True)
