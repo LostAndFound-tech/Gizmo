@@ -84,6 +84,12 @@ class Brief:
     # Host identification short-circuit
     host_question: Optional[str] = None
 
+    #world info
+    directive: str = "Have fun"
+    atmo: str = "Neutral"
+    world : str = ""
+    tele : str = ""
+
 
 # ── LLM call helper ───────────────────────────────────────────────────────────
 
@@ -160,8 +166,8 @@ async def intake(
         pass
 
     cadence = (
-        "rapid"          if since_last < 120   else
-        "fast"           if since_last < 300   else
+        "rapid"          if since_last < 300   else
+        "fast"           if since_last < 750   else
         "conversational" if since_last < 1200  else
         "slow"           if since_last < 3200  else
         "returning"
