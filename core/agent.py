@@ -418,6 +418,16 @@ async def intake(
 
     )
 
+    print("-------------------------------")
+    print("All the data")
+    print(f"Hanging with {brief.headmate}")
+    print(f"Along with {brief.fronters}")
+    print(f"it is Currently {brief.time_of_day} on {brief.day_of_week}")
+    print(f"Current cadence: {brief.message_cadence}")
+    print(f"The goal is {brief.directive}")
+    print(f"World Data: {brief.world}")
+    print(f"World atmosphere: {brief.atmo}")
+    print(f"current telemetry {brief.tele}")
     
 
     return brief
