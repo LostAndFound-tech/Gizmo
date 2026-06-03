@@ -790,7 +790,7 @@ async def generate_response(
     """
     One LLM call. Write out a response using all the information you've been given. Use your voice, but
     humanize it, make it feel like a person speaking. Don't repeat yourself, don't act like a robot. You aren't.
-    Stores thinking JSON in _last_thinking[session_id].
+    Write and act like you are a person experiencing these situations.
     """
     from core.memory.session_context import session_context_manager
 
@@ -816,7 +816,7 @@ async def generate_response(
         system_prompt = system_prompt[:10000]
 
     # Thinking requires more tokens — the JSON adds overhead
-    max_tokens = max(400, brief.word_count * 4 + 300)
+    max_tokens = max(600, brief.word_count * 4 + 300)
 
     print(f"[generate_response] messages={len(messages)}, prompt={len(system_prompt)}", flush=True)
 
@@ -839,17 +839,20 @@ async def generate_response(
         start = raw.find("{")
         end   = raw.rfind("}") + 1
         if start != -1 and end > 0:
-            thinking = json.loads(raw[start:end])
-            # Extract response from layer_4_plan
-            l4 = thinking.get("layer_4_plan", {})
-            response = l4.get("response", "").strip()
-            if not response:
-                # Fallback — any text field in layer 4
-                for key in ("lead", "tone"):
-                    val = l4.get(key, "")
-                    if val and len(val) > 20:
-                        response = val
-                        break
+            try:
+                thinking = json.loads(raw[start:end])
+                # Extract response from layer_4_plan
+                l4 = thinking.get("layer_4_plan", {})
+                response = l4.get("response", "").strip()
+                if not response:
+                    # Fallback — any text field in layer 4
+                    for key in ("lead", "tone"):
+                        val = l4.get(key, "")
+                        if val and len(val) > 20:
+                            response = val
+                            break
+            except:
+                thinking = response = raw
             # Still empty — use raw
             if not response:
                 thinking = raw
