@@ -963,9 +963,18 @@ Return a single JSON object with these sections:
       "notes": "anything else"}}
   ],
   "body_facts": [
-    {{"person": "name lowercase",
-      "section": "Build & appearance|How they move|Voice|Hands|Skin & markings|What they wear|Scent & texture",
-      "fact": "one physical attribute, stated as a noun or adjective"}}
+    {{
+      "person": "name lowercase — use 'gizmo' for Gizmo's own body",
+      "appearance":   "all facts about overall look, face, hair, eyes — or NONE",
+      "frame":        "all facts about height, build, size, proportions — or NONE",
+      "skin":         "all facts about skin tone, texture, scars, tattoos, piercings — or NONE",
+      "movement":     "movement quality labels only: graceful/confident/hesitant/deliberate/fluid/tense/quick/slow/still — or NONE",
+      "voice":        "voice quality labels only: soft/deep/sharp/warm/quiet/loud/musical — or NONE",
+      "hands":        "all facts about hands, fingers, grip — or NONE",
+      "scent":        "all facts about scent, texture of skin — or NONE",
+      "what_they_wear": "all facts about clothing, style — or NONE",
+      "gizmo_read":   "what Gizmo notices or feels about them physically — or NONE"
+    }}
   ],
   "wellness": {{
     "observation": "what their current emotional/physical state seems to be — or null",
@@ -979,24 +988,25 @@ details:
 - Events, facts, world rules, abilities, places, objects
 - NOT preferences, NOT psychological observations, NOT relationship dynamics
 
-body_facts — ONLY these qualify:
-- Physical dimensions: height, weight, build, size relative to others
-- Appearance: hair color/length, eye color, skin tone/texture, facial features
-- Markings: tattoos, scars, piercings — location and description
-- Movement LABELS only: graceful/confident/hesitant/deliberate/fluid/tense/quick/slow/still
-- Voice quality LABELS only: soft/deep/sharp/warm/quiet/loud/musical
-- Clothing: what they're actually wearing
-- Tactile: what touching them physically feels like
+body_facts — one entry per person mentioned. Fill ALL sections for each person.
+- appearance: face, hair color/length/style, eye color, general look
+- frame: height (short/tall/petite), build (slim/curvy/muscular), proportions
+- skin: tone, texture, scars, tattoos (location+description), piercings
+- movement: LABELS ONLY — graceful/confident/hesitant/deliberate/fluid/tense/quick/slow/still
+- voice: LABELS ONLY — soft/deep/sharp/warm/quiet/loud/musical
+- hands: size, texture, how they use them
+- scent: any scent mentioned or implied
+- what_they_wear: what they're actually wearing right now
+- gizmo_read: what Gizmo notices or feels about them physically
+
+Include Gizmo ("gizmo") as a person if anything about his body or presence is described.
+Each section: write all facts as a plain string, or exactly "NONE" if nothing.
+Multiple facts in one section: separate with a comma.
 
 body_facts NEVER include:
-- Actions ("shrugged", "hopped", "lifted", "cried out") — DROP THESE
-- Dialogue fragments — DROP THESE  
-- Preferences ("likes X", "wants X") — these go to entities as person details
-- Psychological states ("vulnerable", "trusting") — DROP THESE
-- Relationship roles ("speaker", "participant") — DROP THESE
-- Opinions about their body — DROP THESE
-
-If a "body fact" is an action, dialogue, preference, or opinion — omit it entirely.
+- Actions ("shrugged", "hopped", "walked in") — DROP
+- Dialogue or preferences — DROP
+- Psychological states ("vulnerable", "trusting") — DROP
 
 wellness: one observation about current state, null if nothing notable.
 JSON only."""
@@ -1079,31 +1089,87 @@ JSON only."""
             continue
 
     # ── Write body facts ──────────────────────────────────────────────────────
+    # Per-section structured output — no keyword guessing, no bleeding
     body_count = 0
     try:
         from core.memory.gizmo_self import (
             append_body_fact, append_gizmo_body_fact, _MOVEMENT_LABELS
         )
+
+        # Map from JSON key → body file section name
+        _HEADMATE_SECTION_MAP = {
+            "appearance":     "Build & appearance",
+            "frame":          "Build & appearance",
+            "skin":           "Skin & markings",
+            "movement":       "How they move",
+            "voice":          "Voice",
+            "hands":          "Hands",
+            "scent":          "Scent & texture",
+            "what_they_wear": "What they wear",
+            "gizmo_read":     "Gizmo's read",
+        }
+
+        _GIZMO_SECTION_MAP = {
+            "appearance":     "Build & appearance",
+            "frame":          "Build & appearance",
+            "movement":       "How I move",
+            "voice":          "Voice",
+            "hands":          "Hands",
+            "gizmo_read":     "Gizmo's read of himself",
+            "what_they_wear": "Build & appearance",
+            "skin":           "Build & appearance",
+            "scent":          "What my presence feels like",
+        }
+
+        _GIZMO_WITH_SECTION_MAP = {
+            "gizmo_read":     "What Jess draws out of me physically",
+            "appearance":     "How my presence shifts",
+            "frame":          "How my presence shifts",
+            "movement":       "How I move differently",
+            "voice":          "Voice shift",
+            "scent":          "What my presence feels like",
+        }
+
         for bf in data.get("body_facts", []):
-            person  = (bf.get("person") or "").strip().lower()
-            section = (bf.get("section") or "").strip()
-            fact    = (bf.get("fact") or "").strip()
-            if not person or not section or not fact:
+            person = (bf.get("person") or "").strip().lower()
+            if not person:
                 continue
-            # Movement label validation
-            if section == "How they move":
-                words = fact.lower().split()
-                valid = [w for w in words if w in _MOVEMENT_LABELS]
-                if not valid:
-                    continue
-                fact = " ".join(valid)
+
             is_gizmo = person in ("gizmo", "him", "he")
-            if is_gizmo:
-                append_gizmo_body_fact(fact, section, headmate=headmate)
-            else:
-                append_body_fact(person, section, fact)
-            body_count += 1
-            print(f"  [body:{person}] {section} ← {fact}", flush=True)
+
+            for key, section_map in (
+                [("headmate", _HEADMATE_SECTION_MAP)] if not is_gizmo
+                else [("base", _GIZMO_SECTION_MAP), ("with", _GIZMO_WITH_SECTION_MAP)]
+            ):
+                for json_key, section in section_map.items():
+                    fact = (bf.get(json_key) or "").strip()
+                    if not fact or fact.upper() == "NONE":
+                        continue
+
+                    # Movement: labels only
+                    if json_key == "movement":
+                        words = fact.lower().split()
+                        valid = [w for w in words if w in _MOVEMENT_LABELS]
+                        if not valid:
+                            continue
+                        fact = ", ".join(valid)
+
+                    if is_gizmo:
+                        if key == "base":
+                            append_gizmo_body_fact(fact, section, headmate=None)
+                        else:
+                            # with-headmate file — only write gizmo_read and movement
+                            if json_key in ("gizmo_read", "movement", "voice"):
+                                with_section = _GIZMO_WITH_SECTION_MAP.get(json_key)
+                                if with_section and headmate:
+                                    append_gizmo_body_fact(fact, with_section, headmate=headmate)
+                    else:
+                        append_body_fact(person, section, fact)
+
+                    body_count += 1
+                    target = f"gizmo({'base' if key == 'base' else headmate or '?'})" if is_gizmo else person
+                    print(f"  [body:{target}] {section} ← {fact[:60]}", flush=True)
+
     except Exception as e:
         log_error("MemoryEncoder", f"quick_pass body write failed: {e}", exc=None)
 

@@ -1191,21 +1191,58 @@ def append_gizmo_body_fact(
 ) -> None:
     """
     Append a fact about Gizmo's own body.
-    If headmate provided — writes to body_with_{headmate}.md
-    Otherwise writes to body_base.md
+    If headmate provided — writes to body_with_{headmate}.md using with-sections.
+    Otherwise writes to body_base.md using base sections.
+
+    base sections:   Build & appearance | How I move | Voice | Hands |
+                     What my presence feels like | Gizmo's read of himself
+    with sections:   How my presence shifts | How I move differently |
+                     Voice shift | What {name} draws out of me physically
     """
     if headmate:
         _init_gizmo_body_with(headmate)
         path = _gizmo_body_with_path(headmate)
+
+        # Map base section names to with-file section names if needed
+        _WITH_SECTION_ALIASES = {
+            "Build & appearance":       "How my presence shifts",
+            "How I move":               "How I move differently",
+            "Voice":                    "Voice shift",
+            "What my presence feels like": "How my presence shifts",
+            "Gizmo's read of himself":  f"What {headmate.title()} draws out of me physically",
+            "Hands":                    "How my presence shifts",
+        }
+        # If section exists verbatim in the file use it, else alias
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if f"## {section}" not in text:
+            section = _WITH_SECTION_ALIASES.get(section, "How my presence shifts")
     else:
         _init_gizmo_body_base()
         path = _gizmo_body_base_path()
 
-    text = path.read_text(encoding="utf-8")
+        # Map with-file section names to base section names if needed
+        _BASE_SECTION_ALIASES = {
+            "How my presence shifts":   "Build & appearance",
+            "How I move differently":   "How I move",
+            "Voice shift":              "Voice",
+            f"What {headmate.title() if headmate else 'them'} draws out of me physically":
+                                        "What my presence feels like",
+        }
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if f"## {section}" not in text:
+            section = _BASE_SECTION_ALIASES.get(section, "Build & appearance")
+
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
     if fact.lower().strip() in text.lower():
         return
 
     _append_to_section(path, section, fact)
+
+    log_event("GizmoSelf", "GIZMO_BODY_FACT_ADDED",
+        headmate = headmate or "base",
+        section  = section,
+        fact     = fact[:60],
+    )
 
 
 def read_body(headmate: str) -> str:
