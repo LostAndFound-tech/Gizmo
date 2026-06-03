@@ -478,7 +478,7 @@ class GizmoServer:
                     "content": q,
                     "source":  "gizmo",
                 }))
-                continue   # don't process this message through agent yet
+                return   # don't process this message through agent yet
 
             # Route to interview if active
             if inner_world.interview and inner_world.interview.is_active():
@@ -489,7 +489,7 @@ class GizmoServer:
                         "source":  "gizmo",
                     }))
                 await inner_world.receive_interview_answer(raw_text, _send_to_user)
-                continue   # don't process through normal agent
+                return   # don't process through normal agent
         except Exception as e:
             log_error("GizmoServer", "interview routing failed", exc=e)
 
