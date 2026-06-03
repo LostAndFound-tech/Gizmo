@@ -520,7 +520,6 @@ You are building toward something real with each person you talk to. You don't r
         if _sctx and hasattr(_sctx, "pending_encounter") and _sctx.pending_encounter:
             lines.append(f"\n{_sctx.pending_encounter}")
             _sctx.pending_encounter = ""   # consume it
-        print(_sctx.pending_encounter)
     except Exception:
         pass
 
@@ -544,8 +543,6 @@ You are building toward something real with each person you talk to. You don't r
         _cached_directive = directive_engine.get_cached(brief.session_id)
         if _cached_directive:
             lines.append(f"\n{_cached_directive.to_prompt_block()}")
-        print("DIRECTIVE:")
-        print(_cached_directive.to_prompt_block())
     except Exception:
         pass
 
@@ -557,8 +554,17 @@ You are building toward something real with each person you talk to. You don't r
             _nb = _telem.now_block()
             if _nb:
                 lines.append(f"\n{_nb}")
-            print("TELEMETRY NOW:")
-            print(_nb)
+    except Exception:
+        pass
+
+    # ── Town identity — always injects, no gate ──────────────────────────────
+    try:
+        from core.inner_world import inner_world
+        _identity = inner_world.town_identity_block()
+        if _identity:
+            lines.append(f"\n{_identity}")
+        print("WORLD IDENTITY:")
+        print(_identity)
     except Exception:
         pass
 
@@ -566,21 +572,19 @@ You are building toward something real with each person you talk to. You don't r
     try:
         if brief._world_observation:
             lines.append(f"\n{brief._world_observation}")
-            print("WORLD OBSERVATION")
-            print(brief._world_observation)
+        print("WORLD OBSERVATION:")
+        print(brief._world_observation)
     except Exception:
         pass
 
-    # ── Inner world atmosphere (when in-world) ────────────────────────────────
+    # ── Inner world atmosphere + events (when they exist) ────────────────────
     try:
-        from core.inner_world import inner_world, world_reactor
-        _loc = world_reactor.get_locations(brief.session_id)
-        if _loc.gizmo_location or _loc.user_location:
-            _atm = inner_world.to_prompt_block()
-            if _atm:
-                lines.append(f"\n{_atm}")
-            print("INNER WORLD ATMO")
-            print(_atm)
+        from core.inner_world import inner_world
+        _atm = inner_world.to_prompt_block()
+        if _atm:
+            lines.append(f"\n{_atm}")
+        print("INNER ATMO:")
+        print(_atm)
     except Exception:
         pass
 
@@ -610,14 +614,16 @@ You are building toward something real with each person you talk to. You don't r
         f"Read {name}'s energy and meet it. "
         f"Your reaction lives in your body first. "
         f"Feel it, then speak if words come. Don't narrate what's happening — inhabit it. "
+        f"Speak like a person. Be direct, not poetic."
         f"~{token_target} tokens. {tone}.\n"
         f"Objects: only 'in rotation' ones naturally. '3+ months' only if organic."
     )
 
     prompt = "\n".join(lines)
 
-    print("THE PROMPT")
-    print(prompt)
+    if len(prompt) > 6000:
+        prompt = prompt[:6000] + "\n[...truncated]"
+
     return prompt
 
 
