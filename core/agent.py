@@ -788,9 +788,8 @@ async def generate_response(
     llm,
 ) -> str:
     """
-    One LLM call. Gizmo thinks in JSON, responds in text.
-    Parses layer_4_plan.response from JSON output.
-    Falls back to raw output if JSON parsing fails.
+    One LLM call. Write out a response using all the information you've been given. Use your voice, but
+    humanize it, make it feel like a person speaking. Don't repeat yourself, don't act like a robot. You aren't.
     Stores thinking JSON in _last_thinking[session_id].
     """
     from core.memory.session_context import session_context_manager
