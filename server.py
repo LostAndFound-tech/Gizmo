@@ -168,30 +168,36 @@ def _time_of_day(hour: int) -> str:
 async def _world_hourly_tick(llm) -> None:
     """
     Coordinated hourly world tick.
-    Inner world → Culture → Media, in order.
-    inner_world.start() fires once here, then _beat() every hour.
+    On first run: starts inner_world (may trigger interview).
+    Subsequently: beats every hour.
     """
     from core.inner_world import inner_world
     from core.culture import culture_engine
     from core.media import media_engine
 
-    # First call builds the town if needed, fires first atmosphere
-    await inner_world.start(llm)
+    # First call — builds town or starts interview
+    first_question = await inner_world.start(llm)
+
+    if first_question:
+        # Interview needed — broadcast to all connected sessions
+        # Store the question so new connections pick it up
+        _pending_interview_question[0] = first_question
+        log_event("GizmoServer", "INTERVIEW_PENDING",
+            question=first_question[:60])
 
     while True:
         await asyncio.sleep(3600)
         try:
-            # 1. Physical world
+            if not inner_world._running:
+                continue   # Still in interview
+
             await inner_world._beat()
 
-            # 2. Culture — takes last hour's active events
             last_hour_events = [
                 {**e.to_dict(), "current_scene": e.get_scene()}
                 for e in inner_world.active_events()
             ]
             await culture_engine.hourly_pass(last_hour_events, llm)
-
-            # 3. Media — spread posts, generate paper, process photo queue
             await media_engine.hourly_pass(culture_engine._threads, llm)
 
             log_event("GizmoServer", "WORLD_TICK_COMPLETE",
@@ -200,6 +206,73 @@ async def _world_hourly_tick(llm) -> None:
             )
         except Exception as e:
             log_error("GizmoServer", "world tick failed", exc=e)
+
+
+# Holds a pending interview question to send on next connection
+_pending_interview_question = [None]
+
+# Last response per session — for training pair comparison
+_last_responses: dict = {}
+
+
+async def _save_training_pair(
+    session_id:         str,
+    headmate:           str,
+    original_sections:  dict,
+    corrected_sections: dict,
+    original_response:  str,
+    corrected_response: str,
+    original_thinking:  dict = None,
+    corrected_thinking: dict = None,
+) -> None:
+    """
+    Save a DPO training pair to /data/training/.
+
+    DPO format:
+      prompt:   assembled system prompt (corrected)
+      chosen:   corrected response
+      rejected: original response
+      metadata: headmate, register, thinking chain
+    """
+    import time as _time
+    try:
+        from pathlib import Path
+        from core.agent import _assemble_prompt_from_sections
+
+        training_dir = Path("/data/training")
+        training_dir.mkdir(parents=True, exist_ok=True)
+
+        # Assemble prompt string from corrected sections
+        prompt_str = _assemble_prompt_from_sections(corrected_sections)
+
+        pair = {
+            # DPO fields
+            "prompt":   prompt_str,
+            "chosen":   corrected_response,
+            "rejected": original_response,
+            # Metadata
+            "metadata": {
+                "session_id":          session_id,
+                "headmate":            headmate,
+                "timestamp":           _time.time(),
+                "original_thinking":   original_thinking or {},
+                "corrected_thinking":  corrected_thinking or {},
+                "original_sections":   original_sections,
+                "corrected_sections":  corrected_sections,
+            }
+        }
+
+        filename = f"{int(_time.time())}_{session_id[:8]}_{headmate or 'unknown'}.json"
+        (training_dir / filename).write_text(
+            json.dumps(pair, indent=2, ensure_ascii=False)
+        )
+        log_event("GizmoServer", "DPO_PAIR_SAVED",
+            session  = session_id[:8],
+            headmate = headmate,
+            file     = filename,
+        )
+    except Exception as e:
+        log_error("GizmoServer", f"DPO pair save failed: {e}", exc=e)
 
 
 class GizmoServer:
@@ -226,6 +299,7 @@ class GizmoServer:
             await media_engine.start(llm)
 
             # Coordinated world tick — inner_world starts inside this
+            # Returns first interview question if world needs building
             asyncio.ensure_future(_world_hourly_tick(llm))
             log_event("GizmoServer", "WORLD_SYSTEMS_STARTED")
         except Exception as e:
@@ -355,6 +429,9 @@ class GizmoServer:
         if msg_type == "remove_fronter":
             await self._handle_remove_fronter(sid, msg)
             return
+        if msg_type == "regenerate":
+            await self._handle_regenerate(websocket, sid, msg)
+            return
         if msg_type == "message":
             await self._handle_chat_message(websocket, sid, msg)
 
@@ -387,6 +464,34 @@ class GizmoServer:
                     )
         except Exception as e:
             log_error("GizmoServer", "session world systems failed", exc=e)
+
+        # ── World setup interview — intercept messages if active ───────────────
+        try:
+            from core.inner_world import inner_world
+
+            # Send pending interview question to new connections
+            if _pending_interview_question[0]:
+                q = _pending_interview_question[0]
+                _pending_interview_question[0] = None
+                await ws.send_str(json.dumps({
+                    "type":    "message",
+                    "content": q,
+                    "source":  "gizmo",
+                }))
+                continue   # don't process this message through agent yet
+
+            # Route to interview if active
+            if inner_world.interview and inner_world.interview.is_active():
+                async def _send_to_user(text: str) -> None:
+                    await ws.send_str(json.dumps({
+                        "type":    "message",
+                        "content": text,
+                        "source":  "gizmo",
+                    }))
+                await inner_world.receive_interview_answer(raw_text, _send_to_user)
+                continue   # don't process through normal agent
+        except Exception as e:
+            log_error("GizmoServer", "interview routing failed", exc=e)
 
         live_ctx = session_manager.get_session_context(session_id)
         if live_ctx.get("current_host"):
@@ -513,6 +618,23 @@ class GizmoServer:
 
         await self._send(websocket, {"type": "done", "session_id": session_id, "current_host": headmate or ""})
 
+        # Track last response for training pairs
+        _last_responses[session_id] = response
+
+        # ── Send prompt sections + thinking for inspector panel ───────────────
+        try:
+            from core.agent import _last_prompt_sections, _last_thinking
+            sections = _last_prompt_sections.get(session_id, {})
+            thinking = _last_thinking.get(session_id, {})
+            if sections or thinking:
+                await self._send(websocket, {
+                    "type":     "prompt_sections",
+                    "sections": sections,
+                    "thinking": thinking,
+                })
+        except Exception:
+            pass
+
         # ── Session touch — correct signature (hosts + topics only) ──────────
         session_manager.touch(
             session_id = session_id,
@@ -558,6 +680,142 @@ class GizmoServer:
 
         log_event("GizmoServer", "RESPONSE_SENT",
             session=session_id[:8], words=len(response.split()), multi=multi)
+
+    async def _handle_regenerate(
+        self,
+        websocket,
+        session_id: str,
+        msg:        dict,
+    ) -> None:
+        """
+        Receive corrected prompt sections and/or thinking JSON.
+        Regenerates response, replaces last message, saves DPO training pair.
+        Corrected sections update _last_prompt_sections for the rest of the session.
+        """
+        from core.llm import llm
+        from core.session_manager import session_manager
+        from core.agent import (
+            _last_prompt_sections, _last_thinking,
+            _assemble_prompt_from_sections,
+        )
+
+        sections = msg.get("sections", {})
+        thinking = msg.get("thinking", {})
+        context  = msg.get("context", {})
+
+        if not sections and not thinking:
+            return
+
+        headmate = context.get("current_host") or ""
+        history  = session_manager.get_history(session_id)
+
+        # Get originals for DPO pair
+        original_sections = _last_prompt_sections.get(session_id, {})
+        original_thinking = _last_thinking.get(session_id, {})
+        original_response = _last_responses.get(session_id, "")
+
+        # Update session prompt sections permanently for this session
+        if sections:
+            _last_prompt_sections[session_id] = sections
+
+        # Update thinking JSON if corrected
+        if thinking:
+            _last_thinking[session_id] = thinking
+
+        # Build corrected prompt
+        # If thinking was corrected, inject corrected response directly
+        corrected_response = ""
+        if thinking:
+            l4 = thinking.get("layer_4_plan", {})
+            corrected_response = l4.get("response", "").strip()
+
+        if not corrected_response:
+            # Regenerate from corrected prompt
+            try:
+                corrected_prompt = _assemble_prompt_from_sections(sections or original_sections)
+                corrected_prompt += f"\n\n[Message from {headmate or 'user'}]\n"
+
+                # Get last user message from history
+                try:
+                    msgs = history.as_messages("") or []
+                    user_msgs = [m for m in msgs if m.get("role") == "user"]
+                    if user_msgs:
+                        corrected_prompt += user_msgs[-1].get("content", "")
+                except Exception:
+                    pass
+
+                await self._send(websocket, {"type": "thinking"})
+
+                from core.llm import llm as _llm
+                messages = []
+                try:
+                    messages = history.as_messages("") or []
+                    if len(messages) > 5:
+                        messages = messages[-5:]
+                except Exception:
+                    pass
+
+                raw = await _llm.generate(
+                    messages,
+                    system_prompt  = corrected_prompt,
+                    max_new_tokens = 600,
+                    temperature    = 0.75,
+                )
+                raw = (raw or "").strip()
+
+                # Parse JSON if returned
+                try:
+                    import json as _json
+                    start = raw.find("{")
+                    end   = raw.rfind("}") + 1
+                    if start != -1 and end > 0:
+                        parsed = _json.loads(raw[start:end])
+                        corrected_response = parsed.get("layer_4_plan", {}).get("response", "").strip()
+                        if not corrected_response:
+                            corrected_response = raw
+                        # Update thinking store
+                        _last_thinking[session_id] = parsed
+                    else:
+                        corrected_response = raw
+                except Exception:
+                    corrected_response = raw
+
+            except Exception as e:
+                log_error("GizmoServer", f"regenerate failed: {e}", exc=e)
+                await self._send(websocket, {"type": "error", "message": "regenerate failed"})
+                return
+
+        if not corrected_response:
+            corrected_response = original_response
+
+        # Save DPO training pair
+        asyncio.ensure_future(
+            _save_training_pair(
+                session_id          = session_id,
+                headmate            = headmate,
+                original_sections   = original_sections,
+                corrected_sections  = sections or original_sections,
+                original_thinking   = original_thinking,
+                corrected_thinking  = thinking or original_thinking,
+                original_response   = original_response,
+                corrected_response  = corrected_response,
+            )
+        )
+
+        _last_responses[session_id] = corrected_response
+
+        await self._send(websocket, {
+            "type":     "regenerated",
+            "response": corrected_response,
+            "thinking": _last_thinking.get(session_id, {}),
+            "session_id": session_id,
+        })
+
+        log_event("GizmoServer", "REGENERATED",
+            session  = session_id[:8],
+            headmate = headmate,
+            words    = len(corrected_response.split()),
+        )
 
     async def _handle_restore_session(self, websocket, msg: dict) -> None:
         from core.store import store

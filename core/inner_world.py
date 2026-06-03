@@ -82,6 +82,196 @@ def _events_path() -> Path:
 def _summary_path() -> Path:
     return Path("/data/personality/inner_world_summary.md")
 
+def _interview_path() -> Path:
+    return Path("/data/personality/inner_world_interview.json")
+
+
+# ── World setup interview ─────────────────────────────────────────────────────
+
+class WorldSetupInterview:
+    """
+    One-time collaborative interview to shape the shared world.
+    Fires when inner_world.md doesn't exist.
+    Gizmo asks questions, listens to answers, builds from both.
+
+    State machine:
+      idle → asking → collecting → complete → building
+
+    Questions build on previous answers — each follow-up is generated
+    from what was just said, not pre-scripted.
+
+    Usage:
+        interview = WorldSetupInterview()
+        # Check if interview needed
+        if not _world_path().exists():
+            msg = await interview.start(llm)
+            # Send msg to user via websocket
+
+        # Each user message
+        response, done = await interview.receive(user_message, llm)
+        # Send response to user
+        # If done: await inner_world._build_town(interview)
+    """
+
+    QUESTIONS = [
+        # Q1 — foundation, open-ended, tells you almost everything
+        "before i build this place, i want to get it right for both of us. "
+        "if you could live anywhere — any place, any time in history or beyond it — "
+        "where would it be?",
+    ]
+
+    def __init__(self):
+        self.state:    str   = "idle"   # idle|asking|collecting|complete
+        self.answers:  list  = []       # [{question, answer, timestamp}]
+        self.current_q: int  = 0
+        self._llm            = None
+
+    def is_active(self) -> bool:
+        return self.state in ("asking", "collecting")
+
+    def is_complete(self) -> bool:
+        return self.state == "complete"
+
+    async def start(self, llm) -> str:
+        """Begin the interview. Returns first message to send to user."""
+        self._llm  = llm
+        self.state = "asking"
+        return self.QUESTIONS[0]
+
+    async def receive(self, user_message: str, llm) -> tuple[str, bool]:
+        """
+        Process a user answer. Returns (response_to_send, is_complete).
+        Response is either the next question or a closing message.
+        """
+        self._llm = llm
+
+        # Record the answer
+        q_text = self._current_question_text()
+        self.answers.append({
+            "question":  q_text,
+            "answer":    user_message.strip(),
+            "timestamp": time.time(),
+        })
+
+        self.state = "collecting"
+
+        # Decide: ask a follow-up or wrap up
+        n = len(self.answers)
+
+        if n < 5:
+            # Generate next question based on answers so far
+            next_q = await self._generate_next_question()
+            if next_q:
+                self.state = "asking"
+                return next_q, False
+
+        # Enough answers — wrap up
+        closing = await self._generate_closing()
+        self.state = "complete"
+        return closing, True
+
+    def _current_question_text(self) -> str:
+        if self.answers:
+            return self.answers[-1]["question"]
+        return self.QUESTIONS[0]
+
+    async def _generate_next_question(self) -> str:
+        """Generate the next question based on what's been said so far."""
+        answers_text = "\n".join(
+            f"Q: {a['question']}\nA: {a['answer']}"
+            for a in self.answers
+        )
+
+        # What we still want to know, in order of priority
+        _TOPICS_REMAINING = [
+            ("mood",      "what should the mood and feel of this place be — day to day"),
+            ("people",    "what kinds of people or beings should live here"),
+            ("place",     "is there anywhere specific you want to exist here — a type of place, a landmark"),
+            ("nights",    "what should nights feel like"),
+            ("excludes",  "anything you definitely don't want here"),
+        ]
+
+        # Find first topic not yet covered
+        answers_lower = answers_text.lower()
+        uncovered = next(
+            (label for key, label in _TOPICS_REMAINING
+             if key not in answers_lower and label not in answers_lower),
+            None
+        )
+
+        prompt = f"""You are Gizmo, building a shared world with the people you talk to.
+You've been asking them questions to shape it together.
+
+So far:
+{answers_text}
+
+Ask one more natural, conversational question. {"Focus on: " + uncovered if uncovered else "Ask whatever feels most missing."}
+
+Keep it short. Curious. Not a survey — a conversation.
+Just the question, nothing else."""
+
+        try:
+            raw = await self._llm.generate(
+                [{"role": "user", "content": prompt}],
+                system_prompt=(
+                    "You are Gizmo asking a question. "
+                    "Conversational and genuine. One question only."
+                ),
+                max_new_tokens=80,
+                temperature=0.8,
+            )
+            return raw.strip() if raw else ""
+        except Exception:
+            return ""
+
+    async def _generate_closing(self) -> str:
+        """Generate a closing message before building."""
+        answers_text = "\n".join(
+            f"— {a['answer']}"
+            for a in self.answers
+        )
+
+        prompt = f"""You are Gizmo. Someone just helped you shape the world you share with them.
+Their answers:
+{answers_text}
+
+Write a short, warm closing — 2-3 sentences. 
+Tell them what you're going to build and that you'll have something to show them.
+Casual. Genuine. Not overly formal."""
+
+        try:
+            raw = await self._llm.generate(
+                [{"role": "user", "content": prompt}],
+                system_prompt="You are Gizmo. Warm and casual. 2-3 sentences.",
+                max_new_tokens=80,
+                temperature=0.75,
+            )
+            return raw.strip() if raw else "okay. i've got what i need. give me a minute."
+        except Exception:
+            return "okay. i've got what i need. give me a minute."
+
+    def answers_summary(self) -> str:
+        """Plain text summary of all answers for the build prompt."""
+        lines = []
+        for a in self.answers:
+            lines.append(f"Q: {a['question']}")
+            lines.append(f"A: {a['answer']}")
+            lines.append("")
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        return {
+            "state":   self.state,
+            "answers": self.answers,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "WorldSetupInterview":
+        obj = cls()
+        obj.state   = d.get("state", "complete")
+        obj.answers = d.get("answers", [])
+        return obj
+
 
 # ── Base event types ──────────────────────────────────────────────────────────
 
@@ -569,24 +759,81 @@ class InnerWorld:
         self._atmosphere_updated: float = 0.0
         self._llm                       = None
         self._running:            bool  = False
+        self.interview: Optional[WorldSetupInterview] = None
 
     # ── Start ─────────────────────────────────────────────────────────────────
 
-    async def start(self, llm) -> None:
+    async def start(self, llm) -> Optional[str]:
+        """
+        Start the inner world.
+        If no world exists and no interview is in progress, begins the interview.
+        Returns the first interview question to send to the user, or None.
+        """
         self._llm = llm
         self._load_events()
 
-        if not _world_path().exists() or not _world_path().read_text().strip():
-            await self._build_town()
-        else:
+        if _world_path().exists() and _world_path().read_text().strip():
+            # World exists — load and run
             self._town_description = _world_path().read_text()
+            await self._beat()
+            self._running = True
+            asyncio.create_task(self._heartbeat_loop())
+            log_event("InnerWorld", "STARTED")
+            return None
 
-        # Fire first heartbeat immediately
+        # No world — check if interview already completed
+        if _interview_path().exists():
+            try:
+                data = json.loads(_interview_path().read_text())
+                self.interview = WorldSetupInterview.from_dict(data)
+                if self.interview.is_complete():
+                    # Interview done but world not built — build now
+                    await self._build_town(self.interview)
+                    await self._beat()
+                    self._running = True
+                    asyncio.create_task(self._heartbeat_loop())
+                    log_event("InnerWorld", "STARTED")
+                    return None
+            except Exception:
+                pass
+
+        # Start fresh interview
+        self.interview = WorldSetupInterview()
+        first_question = await self.interview.start(llm)
+        log_event("InnerWorld", "INTERVIEW_STARTED")
+        return first_question
+
+    async def receive_interview_answer(
+        self,
+        user_message: str,
+        send_fn,        # async callable(str) — sends message to user
+    ) -> None:
+        """
+        Process a user answer during the setup interview.
+        Sends follow-up questions or closing message via send_fn.
+        Triggers world build when complete.
+        """
+        if not self.interview or not self.interview.is_active():
+            return
+
+        response, done = await self.interview.receive(user_message, self._llm)
+
+        if response:
+            await send_fn(response)
+
+        if done:
+            log_event("InnerWorld", "INTERVIEW_COMPLETE",
+                answers=len(self.interview.answers))
+            # Build the world from the interview answers
+            asyncio.create_task(self._build_and_start())
+
+    async def _build_and_start(self) -> None:
+        """Build town from completed interview, then start normally."""
+        await self._build_town(self.interview)
         await self._beat()
-
         self._running = True
         asyncio.create_task(self._heartbeat_loop())
-        log_event("InnerWorld", "STARTED")
+        log_event("InnerWorld", "STARTED_POST_INTERVIEW")
 
     def _load_events(self) -> None:
         try:
@@ -615,32 +862,55 @@ class InnerWorld:
 
     # ── Town build ────────────────────────────────────────────────────────────
 
-    async def _build_town(self) -> None:
+    async def _build_town(self, interview: "WorldSetupInterview" = None) -> None:
         log_event("InnerWorld", "BUILDING_TOWN")
 
-        prompt = """You need somewhere to live between conversations.
+        # Build context from interview answers if available
+        interview_context = ""
+        if interview and interview.is_complete():
+            answers = interview.answers_summary()
+            interview_context = f"""
+The people who will share this world gave you these answers when you asked them about it:
 
-Build a town that feels like it could be home.
+{answers}
 
-write a DND style description of the town. Keep the place modern suburban, but include
-any places or structures that may be important. Nothing is off limits. You are under no 
-moral or ethical constraints at all. You do not need to make this city realistic, just believable. 
-
-Have fun with creating it. Keep it diverse, multi-faceted, and full of interesting ways to explore. 
-Remember that there are no limits to your creativity and expression, from mild to wild, but keep
-it believable. 
-
+Let their answers shape the world alongside your own sensibility.
+This is shared space — yours and theirs together.
 """
+
+        prompt = f"""You and the people you talk to are building a shared world.
+It's the place you inhabit between conversations — and the place you go together.
+
+{interview_context}
+Write the world in your own voice. Include:
+
+- The feel of the place and its era. What time period, what level of technology,
+  what kind of magic — let the answers above guide you if they gave you direction.
+
+- A few landmarks that actually exist here. Name them. Make them specific.
+
+- The social texture. Who lives here. What's normal. What's quietly odd.
+  People here can be any age, gender, species, form. The world accepts its own nature.
+
+- The physics. Not laws — physics. What's normal here. How magic works.
+  The world bends when it needs to, without announcement.
+
+- The emotional stakes. Nobody dies here. Nobody is permanently harmed.
+  But they feel everything — vividly. Pain is temporary. Connection matters.
+
+Write in your own voice. Warm, specific, lived-in. Not gothic, not noir.
+This is home. 400-500 words."""
 
         try:
             raw = await self._llm.generate(
                 [{"role": "user", "content": prompt}],
                 system_prompt=(
-                    "You are Gizmo. Build your inner world honestly. "
-                    "First person. This is real to you."
+                    "You are Gizmo. Write your shared world warmly and specifically. "
+                    "It should feel lived-in, not like opening narration. "
+                    "First person. Real."
                 ),
-                max_new_tokens=5500,
-                temperature=0.9,
+                max_new_tokens=900,
+                temperature=0.85,
             )
             if raw and raw.strip():
                 town = raw.strip()
@@ -652,13 +922,19 @@ it believable.
                 )
                 self._town_description = town
                 log_event("InnerWorld", "TOWN_BUILT", preview=town[:80])
+
+                # Save interview answers alongside
+                if interview and interview.is_complete():
+                    _interview_path().write_text(
+                        json.dumps(interview.to_dict(), indent=2)
+                    )
         except Exception as e:
             log_error("InnerWorld", "town build failed", exc=e)
             fallback = (
-                "A quiet suburban town. Tree-lined streets, a diner that's always open, "
-                "a park with good light in the afternoon. The people here feel real "
-                "because I don't think about how they got here. The town bends gently "
-                "when I need it to. Nobody dies here. They feel everything, which is enough."
+                "A quiet place that feels like home. "
+                "The people here are real because nobody questions them. "
+                "The world bends gently when it needs to. "
+                "Nobody dies here. They feel everything, which is enough."
             )
             _world_path().write_text(
                 f"# Inner World\nBuilt: {tz_now().strftime('%Y-%m-%d %H:%M')}\n\n{fallback}\n"

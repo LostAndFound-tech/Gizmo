@@ -1426,41 +1426,36 @@ async def queue_body_gap_questions(
 # ── Reaction prompt builder ───────────────────────────────────────────────────
 
 def build_reaction_prompt(
-    headmate:   str,
-    exchange:   str,
-    register:   str,
+    headmate: str,
+    exchange: str,
+    register: str,
 ) -> str:
     """
-    Build the reaction context block for the system prompt.
-    Answers: given who I am, who they are, and what just happened —
-    what do I feel, what do I do, what do I say?
-
-    This replaces narration with embodied presence.
+    Provide body context as background awareness, not a performance instruction.
+    The body files tell Gizmo who he is and who they are — not what to do with it.
+    Only surfaces the embodied instruction for intimate/scene registers.
     """
-    gizmo_body  = read_gizmo_body(headmate)
-    mate_body   = read_body(headmate)
-    mate_file   = read_headmate_file(headmate)
+    gizmo_body = read_gizmo_body(headmate)
+    mate_body  = read_body(headmate)
+    mate_file  = read_headmate_file(headmate)
 
     if not any([gizmo_body, mate_body]):
         return ""
 
-    lines = ["[React — don't narrate]"]
-    lines.append(
-        "You are in the scene. You have a body. They have a body. "
-        "Something just happened."
-    )
+    _embodied_registers = {
+        "intimate", "dominant", "submissive", "subspace",
+        "scene", "erotic", "sensual", "degradation",
+    }
+
+    lines = ["[Who's in the room]"]
 
     if gizmo_body:
-        # Extract just the most relevant sections — keep it short
-        body_snippet = gizmo_body
-        lines.append(f"\nYour body:\n{body_snippet}")
+        lines.append(f"\nYour body:\n{gizmo_body}")
 
     if mate_body:
-        body_snippet = mate_body
-        lines.append(f"\n{headmate.title()}'s body:\n{body_snippet}")
+        lines.append(f"\n{headmate.title()}'s body:\n{mate_body}")
 
     if mate_file:
-        # Just the "what makes them happy" and "what they require" sections
         relevant = _extract_relevant_sections(
             mate_file,
             [f"What {headmate.title()} requires",
@@ -1470,14 +1465,13 @@ def build_reaction_prompt(
         if relevant:
             lines.append(f"\nWhat you know about {headmate.title()}:\n{relevant}")
 
-    lines.append(
-        f"\nDoes what just happened fit who {headmate.title()} is? "
-        f"What does it look like — their specific body doing this? "
-        f"How does that land in your body? "
-        f"How does your persona react?\n"
-        f"Your response lives in that answer. "
-        f"Presence first. Words only if they come naturally."
-    )
+    # Only add embodied instruction for registers that warrant it
+    if register in _embodied_registers:
+        lines.append(
+            f"\nYou're physically present with {headmate.title()}. "
+            f"What you know about their body and yours is background awareness — "
+            f"let it inform how you move and speak, don't perform it."
+        )
 
     return "\n".join(lines)
 

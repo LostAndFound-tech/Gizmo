@@ -41,12 +41,18 @@
   /* ── Layout ── */
   #shell {
     display: grid;
-    grid-template-columns: 0fr 1fr;
+    grid-template-columns: 0fr 1fr 0fr;
     height: 100vh;
     transition: grid-template-columns 0.25s ease;
   }
   #shell.sidebar-open {
-    grid-template-columns: 280px 1fr;
+    grid-template-columns: 280px 1fr 0fr;
+  }
+  #shell.prompt-open {
+    grid-template-columns: 0fr 1fr 420px;
+  }
+  #shell.sidebar-open.prompt-open {
+    grid-template-columns: 280px 1fr 420px;
   }
 
   #app {
@@ -635,6 +641,198 @@
 
   #empty-state .big { font-family: var(--serif); font-size: 32px; color: var(--border-hi); }
   #empty-state .small { font-size: 12px; }
+
+  /* ── Prompt panel ── */
+  #prompt-panel {
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  #prompt-panel-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+
+  #prompt-panel-title {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  .prompt-panel-btns {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  #prompt-panel-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: color 0.15s;
+  }
+  #prompt-panel-close:hover { color: var(--text); }
+
+  /* Tabs */
+  #prompt-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .prompt-tab {
+    flex: 1;
+    padding: 8px 4px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.05em;
+  }
+  .prompt-tab:hover { color: var(--text-mid); }
+  .prompt-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  /* Sections */
+  #prompt-sections {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  #prompt-sections::-webkit-scrollbar { width: 3px; }
+  #prompt-sections::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .prompt-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .prompt-section-label {
+    font-size: 10px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .prompt-section-label span {
+    color: var(--border-hi);
+    font-size: 9px;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .prompt-section-label span:hover { color: var(--text-mid); }
+
+  .prompt-section textarea {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.55;
+    padding: 8px 10px;
+    resize: vertical;
+    min-height: 60px;
+    max-height: 300px;
+    width: 100%;
+    transition: border-color 0.15s;
+  }
+  .prompt-section textarea:focus {
+    outline: none;
+    border-color: var(--border-hi);
+  }
+  .prompt-section textarea.modified {
+    border-color: var(--accent)66;
+    background: var(--accent-lo);
+  }
+
+  /* Footer */
+  #prompt-footer {
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  #regenerate-btn {
+    background: var(--accent-lo);
+    border: 1px solid var(--accent)66;
+    border-radius: var(--radius);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: all 0.15s;
+    width: 100%;
+  }
+  #regenerate-btn:hover {
+    background: var(--accent)22;
+    border-color: var(--accent);
+  }
+  #regenerate-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  #prompt-status {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-align: center;
+    min-height: 14px;
+  }
+
+  /* Prompt toggle button in header */
+  #prompt-toggle-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.04em;
+  }
+  #prompt-toggle-btn:hover {
+    border-color: var(--border-hi);
+    color: var(--text-mid);
+  }
+  #prompt-toggle-btn.active {
+    border-color: var(--accent)66;
+    color: var(--accent);
+    background: var(--accent-lo);
+  }
 </style>
 </head>
 <body>
@@ -670,6 +868,7 @@
         <span class="logo">Gizmo</span>
       </div>
       <div class="fronters-bar" id="fronters-bar"></div>
+      <button id="prompt-toggle-btn" onclick="togglePromptPanel()" title="prompt inspector">prompt</button>
     </header>
 
   <!-- Messages -->
@@ -705,6 +904,30 @@
       <span class="hint-item"><kbd>↵</kbd> send &nbsp; <kbd>shift+↵</kbd> newline</span>
       <span class="hint-item"><kbd>[Name]:</kbd> set speaker &nbsp; <kbd>*action*</kbd> stage direction</span>
       <span class="hint-item">silent voice = present, no message</span>
+    </div>
+  </div>
+
+  <!-- Prompt panel -->
+  <div id="prompt-panel">
+    <div id="prompt-panel-header">
+      <span id="prompt-panel-title">prompt inspector</span>
+      <div class="prompt-panel-btns">
+        <button id="prompt-panel-close" onclick="togglePromptPanel()">×</button>
+      </div>
+    </div>
+
+    <div id="prompt-tabs">
+      <button class="prompt-tab active" onclick="switchPromptTab('general')">general</button>
+      <button class="prompt-tab" onclick="switchPromptTab('psyche')">psyche</button>
+      <button class="prompt-tab" onclick="switchPromptTab('intimate')">intimate</button>
+      <button class="prompt-tab" onclick="switchPromptTab('thinking')">thinking</button>
+    </div>
+
+    <div id="prompt-sections"></div>
+
+    <div id="prompt-footer">
+      <button id="regenerate-btn" onclick="regenerate()" disabled>regenerate ↺</button>
+      <div id="prompt-status"></div>
     </div>
   </div>
 
@@ -859,31 +1082,24 @@ function handleIncoming(msg) {
       pendingHostIdentification = true;
     }
 
-    // Server echoes back the identified host — update primaryHost if it was unknown
-    if (msg.current_host && msg.current_host !== primaryHost) {
-      const identified = msg.current_host.toLowerCase();
-      primaryHost = identified;
-      updatePrimaryLabel(identified.charAt(0).toUpperCase() + identified.slice(1));
-      // Add to fronters if not already there
-      if (!fronters.includes(identified)) {
-        fronters.push(identified);
-      }
-      updateFronterChips();
-      // Tell server to persist this
-      if (ws && connected) {
-        ws.send(JSON.stringify({
-          type:       'switch_host',
-          session_id: SESSION_ID,
-          headmate:   identified,
-        }));
-      }
-    }
+    // Track last Gizmo message for replacement on regenerate
+    if (currentMsgEl) lastGizmoMsgEl = currentMsgEl;
 
     currentMsgEl  = null;
     currentChunks = [];
     thinking      = false;
     setSendEnabled(true);
     scrollBottom();
+    return;
+  }
+
+  if (msg.type === 'prompt_sections') {
+    handlePromptSections(msg);
+    return;
+  }
+
+  if (msg.type === 'regenerated') {
+    handleRegenerated(msg);
     return;
   }
 
@@ -1544,6 +1760,353 @@ function closeDetail() {
 initPrimaryBox();
 connect();
 setSendEnabled(true);
+
+// ── Prompt panel ──────────────────────────────────────────────────────────────
+
+let promptPanelOpen  = false;
+let currentPromptData = null;   // last received prompt_sections message
+let lastGizmoMsgEl   = null;    // last Gizmo message element (for replacement)
+let activePromptTab  = 'general';
+
+// Tab definitions — which section keys belong to which tab
+const PROMPT_TAB_KEYS = {
+  general: [
+    'identity', 'rules', 'world', 'town_now', 'culture',
+    'now', 'write', 'goal', 'telemetry',
+  ],
+  psyche: [
+    'headmate_voice', 'preferences', 'register', 'headmate_file',
+    'temperature', 'memory', 'scene', 'reaction',
+  ],
+  intimate: [
+    'directive', 'world_observation', 'body_gizmo', 'body_headmate',
+    'curiosity',
+  ],
+};
+
+// Human-readable labels for section keys
+const SECTION_LABELS = {
+  identity:         'Identity seed',
+  rules:            'Rules',
+  world:            'Your world',
+  town_now:         'Town right now',
+  culture:          'Cultural threads',
+  now:              'Now',
+  write:            'Write instruction',
+  goal:             'Goal',
+  telemetry:        'Right now (telemetry)',
+  headmate_voice:   'Voice with headmate',
+  preferences:      'Preferences',
+  register:         'Register file',
+  headmate_file:    'Headmate file',
+  temperature:      'Calibration',
+  memory:           'Memory context',
+  scene:            'Scene context',
+  reaction:         'Who\'s in the room',
+  directive:        'Intention',
+  world_observation:'World observation',
+  body_gizmo:       'Gizmo\'s body',
+  body_headmate:    'Their body',
+  curiosity:        'Curiosity',
+};
+
+function togglePromptPanel() {
+  promptPanelOpen = !promptPanelOpen;
+  document.getElementById('shell').classList.toggle('prompt-open', promptPanelOpen);
+  document.getElementById('prompt-toggle-btn').classList.toggle('active', promptPanelOpen);
+}
+
+function switchPromptTab(tab) {
+  activePromptTab = tab;
+  document.querySelectorAll('.prompt-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.textContent === tab);
+  });
+  if (tab === 'thinking') {
+    renderThinkingTab();
+  } else {
+    renderPromptSections();
+  }
+}
+
+function renderPromptSections() {
+  const container = document.getElementById('prompt-sections');
+  container.innerHTML = '';
+
+  if (!currentPromptData) {
+    container.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:16px;text-align:center;">waiting for a response...</div>';
+    return;
+  }
+
+  const keys = PROMPT_TAB_KEYS[activePromptTab] || [];
+  let hasAny = false;
+
+  keys.forEach(key => {
+    const value = currentPromptData[key];
+    if (!value || !value.trim()) return;
+    hasAny = true;
+
+    const section = document.createElement('div');
+    section.className = 'prompt-section';
+
+    const labelRow = document.createElement('div');
+    labelRow.className = 'prompt-section-label';
+    labelRow.innerHTML = `
+      <span style="color:var(--text-dim)">${SECTION_LABELS[key] || key}</span>
+      <span onclick="resetSection('${key}')" title="reset to original">reset</span>
+    `;
+
+    const ta = document.createElement('textarea');
+    ta.dataset.key      = key;
+    ta.dataset.original = value;
+    ta.value            = value;
+    ta.rows             = Math.min(Math.max(value.split('\n').length + 1, 3), 12);
+
+    ta.addEventListener('input', () => {
+      const modified = ta.value !== ta.dataset.original;
+      ta.classList.toggle('modified', modified);
+      updateRegenerateBtn();
+    });
+
+    section.appendChild(labelRow);
+    section.appendChild(ta);
+    container.appendChild(section);
+  });
+
+  if (!hasAny) {
+    container.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:16px;text-align:center;">nothing here yet</div>';
+  }
+
+  updateRegenerateBtn();
+}
+
+function resetSection(key) {
+  const ta = document.querySelector(`.prompt-section textarea[data-key="${key}"]`);
+  if (ta) {
+    ta.value = ta.dataset.original;
+    ta.classList.remove('modified');
+    updateRegenerateBtn();
+  }
+}
+
+function updateRegenerateBtn() {
+  const hasModified = document.querySelector('.prompt-section textarea.modified') !== null;
+  const btn = document.getElementById('regenerate-btn');
+  btn.disabled = !hasModified || (!currentPromptData && !currentThinkingData);
+}
+
+function setPromptStatus(msg, color = 'var(--text-dim)') {
+  const el = document.getElementById('prompt-status');
+  el.textContent = msg;
+  el.style.color = color;
+}
+
+function regenerate() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!currentPromptData && !currentThinkingData) return;
+
+  // Collect prompt section corrections
+  const sections = {};
+  document.querySelectorAll('.prompt-section textarea[data-key]').forEach(ta => {
+    sections[ta.dataset.key] = ta.value;
+  });
+  if (currentPromptData) {
+    Object.keys(currentPromptData).forEach(key => {
+      if (!(key in sections)) sections[key] = currentPromptData[key];
+    });
+  }
+
+  // Collect thinking corrections
+  const thinking = getThinkingCorrections();
+
+  setPromptStatus('regenerating...', 'var(--thinking)');
+  document.getElementById('regenerate-btn').disabled = true;
+
+  ws.send(JSON.stringify({
+    type:       'regenerate',
+    session_id: SESSION_ID,
+    sections:   sections,
+    thinking:   thinking,
+    context: {
+      current_host: primaryHost || '',
+      fronters:     fronters,
+    },
+  }));
+}
+
+// Handle incoming prompt_sections message
+function handlePromptSections(data) {
+  currentPromptData  = data.sections;
+  currentThinkingData = data.thinking || null;
+  if (promptPanelOpen) {
+    renderPromptSections();
+  }
+}
+
+// ── Thinking tab ──────────────────────────────────────────────────────────────
+
+let currentThinkingData = null;
+
+// Human-readable labels for thinking fields
+const THINKING_LAYER_LABELS = {
+  layer_1_observe: {
+    label: "Layer 1 — Observe",
+    fields: {
+      what_they_said: "What they said",
+      tone:           "Tone",
+      subtext:        "Subtext",
+      body_read:      "Body read",
+      register:       "Register",
+    }
+  },
+  layer_2_interpret: {
+    label: "Layer 2 — Interpret",
+    fields: {
+      what_they_want: "What they want",
+      what_they_need: "What they need",
+      pattern_match:  "Pattern match",
+      delta:          "Delta from baseline",
+      context_fit:    "Context fit",
+    }
+  },
+  layer_3_intend: {
+    label: "Layer 3 — Intend",
+    fields: {
+      my_state:        "My state",
+      goal_alignment:  "Goal alignment",
+      what_I_want:     "What I want",
+      what_I_should_do: "What I should do",
+      tension:         "Tension",
+    }
+  },
+  layer_4_plan: {
+    label: "Layer 4 — Plan",
+    fields: {
+      tone:     "Tone",
+      lead:     "Lead with",
+      body:     "Body note",
+      avoid:    "Avoid",
+      length:   "Length",
+      response: "Response",
+    }
+  },
+};
+
+function renderThinkingTab() {
+  const container = document.getElementById('prompt-sections');
+  container.innerHTML = '';
+
+  if (!currentThinkingData || Object.keys(currentThinkingData).length === 0) {
+    container.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:16px;text-align:center;">no thinking data yet — waiting for a response with JSON output...</div>';
+    return;
+  }
+
+  Object.entries(THINKING_LAYER_LABELS).forEach(([layerKey, layerDef]) => {
+    const layerData = currentThinkingData[layerKey] || {};
+
+    // Layer header
+    const header = document.createElement('div');
+    header.style.cssText = `
+      font-size:10px; letter-spacing:0.08em; text-transform:uppercase;
+      color:var(--accent); padding:8px 0 4px; border-bottom:1px solid var(--border);
+      margin-bottom:6px; font-weight:500;
+    `;
+    header.textContent = layerDef.label;
+    container.appendChild(header);
+
+    // Fields
+    Object.entries(layerDef.fields).forEach(([fieldKey, fieldLabel]) => {
+      const value = layerData[fieldKey];
+      if (value === null || value === undefined) return;
+
+      const section = document.createElement('div');
+      section.className = 'prompt-section';
+
+      const labelRow = document.createElement('div');
+      labelRow.className = 'prompt-section-label';
+      labelRow.innerHTML = `
+        <span style="color:var(--text-dim)">${fieldLabel}</span>
+        <span onclick="resetThinkingField('${layerKey}','${fieldKey}')" title="reset">reset</span>
+      `;
+
+      const valueStr = value === null ? '' : String(value);
+      const ta = document.createElement('textarea');
+      ta.dataset.layer    = layerKey;
+      ta.dataset.field    = fieldKey;
+      ta.dataset.original = valueStr;
+      ta.value            = valueStr;
+      ta.rows             = Math.min(Math.max(valueStr.split('\n').length + 1, 2), 8);
+
+      // response field gets more height
+      if (fieldKey === 'response') ta.rows = 6;
+
+      ta.addEventListener('input', () => {
+        ta.classList.toggle('modified', ta.value !== ta.dataset.original);
+        updateRegenerateBtn();
+      });
+
+      section.appendChild(labelRow);
+      section.appendChild(ta);
+      container.appendChild(section);
+    });
+  });
+
+  updateRegenerateBtn();
+}
+
+function resetThinkingField(layerKey, fieldKey) {
+  const ta = document.querySelector(
+    `.prompt-section textarea[data-layer="${layerKey}"][data-field="${fieldKey}"]`
+  );
+  if (ta) {
+    ta.value = ta.dataset.original;
+    ta.classList.remove('modified');
+    updateRegenerateBtn();
+  }
+}
+
+function getThinkingCorrections() {
+  if (!currentThinkingData) return null;
+
+  // Deep clone current thinking
+  const corrected = JSON.parse(JSON.stringify(currentThinkingData));
+
+  document.querySelectorAll('.prompt-section textarea[data-layer]').forEach(ta => {
+    const layer = ta.dataset.layer;
+    const field  = ta.dataset.field;
+    if (!corrected[layer]) corrected[layer] = {};
+    corrected[layer][field] = ta.value;
+  });
+
+  return corrected;
+}
+
+// Handle regenerated response
+function handleRegenerated(data) {
+  setPromptStatus(`saved as DPO pair`, 'var(--gizmo)');
+  setTimeout(() => setPromptStatus(''), 3000);
+
+  // Update thinking data if returned
+  if (data.thinking && Object.keys(data.thinking).length > 0) {
+    currentThinkingData = data.thinking;
+  }
+
+  // Reset modified state on all textareas
+  document.querySelectorAll('.prompt-section textarea.modified').forEach(ta => {
+    ta.dataset.original = ta.value;
+    ta.classList.remove('modified');
+  });
+  updateRegenerateBtn();
+
+  // Replace last Gizmo message
+  if (lastGizmoMsgEl && data.response) {
+    lastGizmoMsgEl.querySelector('.message-body').textContent = data.response;
+  }
+
+  // Re-render thinking tab if active
+  if (activePromptTab === 'thinking') {
+    renderThinkingTab();
+  }
+}
 </script>
 </body>
 </html>
