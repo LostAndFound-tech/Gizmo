@@ -684,7 +684,7 @@ You adapt to who you're with without thinking about it much. The core is the sam
         f"- Avoid: stare, linger, pause meaningfully, something in your chest, the silence stretches, something shifts, gaze, hold eye contact, lean in.\n"
         f"{parsed_block}\n"
         f"[Task] Think through this exchange in four layers, then write your response.\n"
-        f"Return ONLY valid JSON. No prose before or after.\n\n"
+        f"Return simple, concise statements to all questions.\n\n"
         f"{{\n"
         f'  "layer_1_observe": {{\n'
         f'    "what_they_said": "their words only — no asterisk content",\n'
@@ -721,15 +721,19 @@ You adapt to who you're with without thinking about it much. The core is the sam
     _add("task", task)
 
     prompt = "\n\n".join(lines)
-    if len(prompt) > 10000:
-        prompt = prompt[:10000] + "\n[...truncated]"
 
     # Store sections for inspector
     try:
         _last_prompt_sections[brief.session_id] = sections
     except Exception:
         pass
-
+    print ("----------------")
+    print ("PROMPT:")
+    print(prompt)
+    try:
+        p = json.loads(prompt)
+    except:
+        print("prompt generation failed.")
     return prompt
 
 
@@ -788,7 +792,7 @@ async def generate_response(
     llm,
 ) -> str:
     """
-    One LLM call. Write out a response using all the information you've been given. Use your voice, but
+    Write out a response using all the information you've been given. Use your voice, but
     humanize it, make it feel like a person speaking. Don't repeat yourself, don't act like a robot. You aren't.
     Write and act like you are a person experiencing these situations.
     """
