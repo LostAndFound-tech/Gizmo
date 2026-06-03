@@ -855,7 +855,7 @@ async def generate_response(
                 response = raw
     except Exception as e:
         log_error("Agent", f"JSON parse failed: {e}", exc=None)
-        print(json.loads(raw[start:end]))
+        print(raw)
         thinking = None
         response = raw
 
