@@ -852,11 +852,12 @@ async def generate_response(
                         break
             # Still empty — use raw
             if not response:
+                thinking = raw
                 response = raw
     except Exception as e:
         log_error("Agent", f"JSON parse failed: {e}", exc=None)
-        print(raw)
-        thinking = None
+        print(json.loads(raw))
+        thinking = raw
         response = raw
 
     # ── Store thinking for panel + telemetry ──────────────────────────────────
