@@ -173,16 +173,19 @@ class ContentDeductor:
         if not user_message.strip() and not gizmo_response.strip():
             return
 
-        prompt = _build_prompt(user_message, gizmo_response, subject)
-        context = await _call_llm(prompt)
+        try:
+            prompt = _build_prompt(user_message, gizmo_response, subject)
+            context = await _call_llm(prompt)
 
-        if not context:
-            log_event("EventExtractor", "NO_EVENTS_EXTRACTED",
-                subject=subject,
-                session=session_file,
-            )
-            return
+            if not context:
+                log_event("EventExtractor", "NO_EVENTS_EXTRACTED",
+                    subject=subject,
+                    session=session_file,
+                )
+                return
 
-        return context
+            return context
+        except Exception as E:
+            print("context extractor failed with an error:", E)
 
 content_deductor = ContentDeductor()
