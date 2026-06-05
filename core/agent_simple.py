@@ -16,15 +16,8 @@ from typing import AsyncGenerator, Optional
 
 from core.log import log_event, log_error
 from core.llm import llm
-
-
-# ── Swap this out as you test each module ─────────────────────────────────────
-#
-# Current target: raw LLM — just message + history, nothing else.
-# Replace the body of _call_module() with whatever you're testing.
 from core.context_deductor import content_deductor as CD
-#
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 async def _call_module(
     message: str,
@@ -32,17 +25,17 @@ async def _call_module(
     session_id: str,
     context: dict,
 ) -> str:
-    """
-    Drop your module call here.
-    Must return a string!
-    """
-    m = CD.extract(message)
+    context_data = await CD.extract(message, "", "unknown", session_id)
+    if context_data is None:
+        print("Context extraction returned nothing")
+
     print("---------------")
-    print(f"Using {message} to get:")
-    print(m)
+    print(f"Input: {message}")
+    print(f"Context: {context_data}")
+
     messages = [
-        {"role": m["role"], "content": m["content"]}
-        for m in (history or [])
+        {"role": entry["role"], "content": entry["content"]}
+        for entry in (history or [])
     ]
     messages.append({"role": "user", "content": message})
 
@@ -78,7 +71,7 @@ class AgentSimple:
             )
         except Exception as e:
             log_error("AgentSimple", "module call failed", exc=e)
-            yield "Something went wrong."
+            yield f"Something went wrong: {type(e).__name__}: {e}"
             return
 
         duration_ms = round((time.monotonic() - t_start) * 1000)
