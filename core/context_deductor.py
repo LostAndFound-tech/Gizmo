@@ -108,15 +108,15 @@ async def _call_llm(prompt: str) -> Optional[list[dict]]:
         print("RAW:", raw)
         if not raw.strip():
             log_event("EventExtractor", "EMPTY_RESPONSE", model=EXTRACTOR_MODEL)
-            return None
+            return "EMPTY RESPONSE"
 
         return raw
     except json.JSONDecodeError as e:
-        log_error("EventExtractor", "JSON parse failed", exc=e)
-        return None
+        print("EventExtractor", "JSON parse failed", exc=e)
+        return e
     except Exception as e:
-        log_error("EventExtractor", "LLM call failed", exc=e)
-        return None
+        print("EventExtractor", "LLM call failed", exc=e)
+        return e
     
 # ── File write ────────────────────────────────────────────────────────────────
 
