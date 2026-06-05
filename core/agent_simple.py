@@ -3,14 +3,14 @@ core/agent_simple.py
 Bypass agent — one module, no orchestration.
 
 Current target: context_deductor output only.
-Returns prompt via context dict so server can send it to the inspector.
+Returns prompt+system via context dict so server can send it to the inspector.
 """
 
 import time
 from typing import AsyncGenerator, Optional
 
 from core.log import log_event, log_error
-from core.context_deductor import content_deductor as CD, _build_prompt
+from core.context_deductor import content_deductor as CD, _build_prompt, _SYSTEM
 
 
 async def _call_module(
@@ -19,13 +19,14 @@ async def _call_module(
     session_id: str,
     context: dict,
 ) -> tuple[str, str]:
-    subject = context.get("current_host") or "unknown"
-    prompt  = _build_prompt(message, subject)
+    subject      = context.get("current_host") or "unknown"
+    user_prompt  = _build_prompt(message, subject)
+    full_prompt  = f"{_SYSTEM}\n\n{user_prompt}"
 
     context_data = await CD.extract(message, "", subject, session_id)
-    response = str(context_data) if context_data else "Context extraction returned nothing."
+    response     = str(context_data) if context_data else "Context extraction returned nothing."
 
-    return prompt, response
+    return full_prompt, response
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────

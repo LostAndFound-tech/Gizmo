@@ -232,7 +232,6 @@ class GizmoServer:
         if _is_duplicate(session_id, raw_text):
             return
 
-        # ── Speaker detection ─────────────────────────────────────────────────
         speech_parts = [p for p in parts if p.get("content_type") == "speech"]
         if speech_parts:
             first_speaker = speech_parts[0].get("headmate")
@@ -244,7 +243,6 @@ class GizmoServer:
         if all_speakers:
             context["fronters"] = list(set(context.get("fronters", []) + all_speakers))
 
-        # ── Bare name detection ───────────────────────────────────────────────
         if not headmate and not multi and len(parts) == 1:
             c = parts[0].get("content", "").strip()
             name_match = (
@@ -278,13 +276,11 @@ class GizmoServer:
             await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
             return
 
-        # ── Send prompt to inspector ──────────────────────────────────────────
         await self._send(websocket, {
             "type":     "prompt_sections",
             "sections": {"extractor_prompt": prompt},
         })
 
-        # ── Stream response ───────────────────────────────────────────────────
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)
@@ -296,7 +292,6 @@ class GizmoServer:
 
     async def _handle_regenerate(self, websocket, session_id: str, msg: dict) -> None:
         from core.llm import llm
-        from core.context_deductor import _SYSTEM
 
         sections = msg.get("sections", {})
         prompt   = sections.get("extractor_prompt", "").strip()
@@ -305,19 +300,14 @@ class GizmoServer:
             await self._send(websocket, {"type": "error", "message": "no prompt to regenerate"})
             return
 
-        log_event("GizmoServer", "REGENERATE",
-            session=session_id[:8],
-            prompt_len=len(prompt),
-        )
-
+        log_event("GizmoServer", "REGENERATE", session=session_id[:8], prompt_len=len(prompt))
         await self._send(websocket, {"type": "thinking"})
 
         try:
             response = await llm.generate(
                 messages=[{"role": "user", "content": prompt}],
-                system_prompt=_SYSTEM,
-                temperature=0.0,
                 max_new_tokens=3000,
+                temperature=0.0,
             )
         except Exception as e:
             await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
@@ -329,10 +319,7 @@ class GizmoServer:
             "thinking": {},
         })
 
-        log_event("GizmoServer", "REGENERATE_SENT",
-            session=session_id[:8],
-            words=len(response.split()),
-        )
+        log_event("GizmoServer", "REGENERATE_SENT", session=session_id[:8], words=len(response.split()))
 
     async def _send(self, websocket, data: dict) -> None:
         try:

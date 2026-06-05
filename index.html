@@ -765,7 +765,7 @@
     padding: 8px 10px;
     resize: vertical;
     min-height: 60px;
-    max-height: 300px;
+    max-height: 600px;
     width: 100%;
     transition: border-color 0.15s;
   }
@@ -1871,7 +1871,9 @@ function renderPromptSections() {
     ta.dataset.key      = key;
     ta.dataset.original = value;
     ta.value            = value;
-    ta.rows             = Math.min(Math.max(value.split('\n').length + 1, 3), 12);
+    ta.rows             = key === 'extractor_prompt'
+      ? 20
+      : Math.min(Math.max(value.split('\n').length + 1, 3), 12);
 
     ta.addEventListener('input', () => {
       const modified = ta.value !== ta.dataset.original;
