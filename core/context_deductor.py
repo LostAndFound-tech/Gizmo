@@ -50,7 +50,7 @@ DATA_DIR    = Path("/data")
 DB_PATH     = DATA_DIR / "action_log.db"
 
 # Cheap model — this is classification, not reasoning
-EXTRACTOR_MODEL = "mistralai/mistral-small-3"
+EXTRACTOR_MODEL = "mistralai/mistral-small-24b-instruct-2501"
 
 
 
@@ -93,6 +93,8 @@ async def _call_llm(prompt: str) -> Optional[list[dict]]:
             api_key=os.getenv("OPENROUTER_API_KEY"),
             timeout=30,
         )
+        print(prompt)
+        print(_SYSTEM)
 
         response = await client.chat.completions.create(
             model=EXTRACTOR_MODEL,
@@ -103,6 +105,7 @@ async def _call_llm(prompt: str) -> Optional[list[dict]]:
             max_tokens=3000,
             temperature=0.0,   # deterministic — this is extraction not generation
         )
+        
 
         raw = response.choices[0].message.content or ""
         print("RAW:", raw)
