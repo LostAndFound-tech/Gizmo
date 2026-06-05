@@ -171,6 +171,7 @@ class GizmoServer:
             finally:
                 self._connections.pop(session_id, None)
                 log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
+            return ws
 
         app.router.add_get("/",       handle_index)
         app.router.add_get("/health", handle_health)
