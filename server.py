@@ -117,18 +117,20 @@ def _time_of_day(hour: int) -> str:
     return "night"
 
 
-async def run_single_pipeline(message, session_id, headmate, context, history) -> str:
+async def run_single_pipeline(message, session_id, headmate, context, history) -> tuple[str, str]:
     from core.agent_simple import agent_simple as agent
+    ctx = context or {}
     try:
         chunks = []
         async for chunk in agent.run(
             user_message=message,
             history=history,
             session_id=session_id,
-            context=context,
+            context=ctx,
         ):
             chunks.append(chunk)
-        return "".join(chunks)
+        prompt = ctx.get("_last_prompt", "")
+        return prompt, "".join(chunks)
     except Exception as e:
         import traceback
         print(f"[SINGLE PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
@@ -202,7 +204,6 @@ class GizmoServer:
             await self._handle_chat_message(websocket, sid, msg)
             return
 
-        # All other message types are no-ops in this branch
         log_event("GizmoServer", "MSG_TYPE_IGNORED", type=msg_type, session=sid[:8])
 
     async def _handle_chat_message(self, websocket, session_id: str, msg: dict) -> None:
@@ -261,7 +262,7 @@ class GizmoServer:
         await self._send(websocket, {"type": "thinking"})
 
         try:
-            response = await run_single_pipeline(
+            prompt, response = await run_single_pipeline(
                 message=raw_text,
                 session_id=session_id,
                 headmate=headmate,
@@ -274,6 +275,13 @@ class GizmoServer:
             await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
             return
 
+        # ── Send prompt to inspector ──────────────────────────────────────────
+        await self._send(websocket, {
+            "type":     "prompt_sections",
+            "sections": { "extractor_prompt": prompt },
+        })
+
+        # ── Stream response ───────────────────────────────────────────────────
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)

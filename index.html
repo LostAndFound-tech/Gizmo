@@ -928,6 +928,7 @@
       <button class="prompt-tab" onclick="switchPromptTab('psyche')">psyche</button>
       <button class="prompt-tab" onclick="switchPromptTab('intimate')">intimate</button>
       <button class="prompt-tab" onclick="switchPromptTab('thinking')">thinking</button>
+      <button class="prompt-tab" onclick="switchPromptTab('extractor')">extractor</button>
     </div>
 
     <div id="prompt-sections"></div>
@@ -1789,6 +1790,9 @@ const PROMPT_TAB_KEYS = {
     'directive', 'world_observation', 'body_gizmo', 'body_headmate',
     'curiosity',
   ],
+  extractor: [
+    'extractor_prompt',
+  ],
 };
 
 // Human-readable labels for section keys
@@ -1815,6 +1819,7 @@ const SECTION_LABELS = {
   body_gizmo:       'Gizmo\'s body',
   body_headmate:    'Their body',
   curiosity:        'Curiosity',
+  extractor_prompt: 'Extractor prompt',
 };
 
 function togglePromptPanel() {
