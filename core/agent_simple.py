@@ -37,6 +37,9 @@ async def _call_module(
     Must return a string!
     """
     m = CD.extract(message)
+    print("---------------")
+    print(f"Using {message} to get:")
+    print(m)
     messages = [
         {"role": m["role"], "content": m["content"]}
         for m in (history or [])
