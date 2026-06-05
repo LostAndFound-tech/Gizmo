@@ -26,20 +26,7 @@ async def _call_module(
     context: dict,
 ) -> str:
     context_data = await CD.extract(message, "", "unknown", session_id)
-    if context_data is None:
-        print("Context extraction returned nothing")
-
-    print("---------------")
-    print(f"Input: {message}")
-    print(f"Context: {context_data}")
-
-    messages = [
-        {"role": entry["role"], "content": entry["content"]}
-        for entry in (history or [])
-    ]
-    messages.append({"role": "user", "content": message})
-
-    return await llm.generate(messages)
+    return str(context_data)
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
