@@ -59,7 +59,8 @@ EXTRACTOR_MODEL = "mistralai/mistral-small-24b-instruct-2501"
 _SYSTEM = """
     You determine the context of a beat of a conversation. You're excellent at determining the subject of a sentence,
     and determining whether they are speaking, or acting, and to whom or to what. You write them out in valid JSON 
-    format. Do not infer any details unless you are confident they are correct. Write simple statements in [SUBJECT, VERB, SUBJECT] format. 
+    format. Do not infer any details unless you are confident they are correct. Write simple statements in [SUBJECT, VERB, SUBJECT] format.
+    Be as granular and detailed as you can. 
 """.strip()
 
 
@@ -113,7 +114,7 @@ async def _call_llm(prompt: str) -> Optional[list[dict]]:
             log_event("EventExtractor", "EMPTY_RESPONSE", model=EXTRACTOR_MODEL)
             return "EMPTY RESPONSE"
 
-        return raw
+        return (f"for prompt: \n {prompt}\n\n{raw}")
     except json.JSONDecodeError as e:
         print("EventExtractor", "JSON parse failed", exc=e)
         return e
