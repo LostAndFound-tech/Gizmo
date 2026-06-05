@@ -106,7 +106,7 @@ def assemble_scene_text(parts: list[dict]) -> str:
     return "\n".join(lines)
 
 async def run_single_pipeline(message, session_id, headmate, context, history, llm) -> str:
-    from core.agent import agent
+    from core.agent_simple import agent_simple as agent
     try:
         chunks = []
         async for chunk in agent.respond(
