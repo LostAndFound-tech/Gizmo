@@ -40,7 +40,7 @@ Use exactly this structure:
     "subjects": {
       "<subject name>": {
         "type": "person|place|action",
-        <whatever this sentence actually says about this subject>
+        <whatever this sentence actually says about this subject. If it describes the object, use what describes as the key.>
       }
     }
   }

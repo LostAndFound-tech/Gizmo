@@ -2,21 +2,15 @@
 core/agent_simple.py
 Bypass agent — one module, no orchestration.
 
-Flow:
-  1. Receive message + history
-  2. Call the target module
-  3. Stream response back to caller
-
-Swap TARGET_MODULE and how you call it as you test each engine.
+Current target: context_deductor output only.
+Returns prompt via context dict so server can send it to the inspector.
 """
 
-import asyncio
 import time
 from typing import AsyncGenerator, Optional
 
 from core.log import log_event, log_error
-from core.llm import llm
-from core.context_deductor import content_deductor as CD
+from core.context_deductor import content_deductor as CD, _build_prompt
 
 
 async def _call_module(
@@ -24,9 +18,14 @@ async def _call_module(
     history: list,
     session_id: str,
     context: dict,
-) -> str:
-    context_data = await CD.extract(message, "", "unknown", session_id)
-    return str(context_data)
+) -> tuple[str, str]:
+    subject = context.get("current_host") or "unknown"
+    prompt  = _build_prompt(message, subject)
+
+    context_data = await CD.extract(message, "", subject, session_id)
+    response = str(context_data) if context_data else "Context extraction returned nothing."
+
+    return prompt, response
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
@@ -42,7 +41,7 @@ class AgentSimple:
         source: str = "user",
     ) -> AsyncGenerator[str, None]:
         t_start = time.monotonic()
-        ctx = context or {}
+        ctx = context if context is not None else {}
 
         log_event("AgentSimple", "RECEIVE",
             session=session_id[:8],
@@ -50,12 +49,13 @@ class AgentSimple:
         )
 
         try:
-            response_text = await _call_module(
+            prompt, response_text = await _call_module(
                 message=user_message,
                 history=history,
                 session_id=session_id,
                 context=ctx,
             )
+            ctx["_last_prompt"] = prompt
         except Exception as e:
             log_error("AgentSimple", "module call failed", exc=e)
             yield f"Something went wrong: {type(e).__name__}: {e}"
@@ -65,7 +65,6 @@ class AgentSimple:
         log_event("AgentSimple", "COMPLETE",
             session=session_id[:8],
             duration_ms=duration_ms,
-            words=len(response_text.split()),
         )
 
         chunk_size = 8

@@ -119,7 +119,7 @@ def _time_of_day(hour: int) -> str:
 
 async def run_single_pipeline(message, session_id, headmate, context, history) -> tuple[str, str]:
     from core.agent_simple import agent_simple as agent
-    ctx = context or {}
+    ctx = context if context is not None else {}
     try:
         chunks = []
         async for chunk in agent.run(
@@ -203,6 +203,9 @@ class GizmoServer:
         if msg_type == "message":
             await self._handle_chat_message(websocket, sid, msg)
             return
+        if msg_type == "regenerate":
+            await self._handle_regenerate(websocket, sid, msg)
+            return
 
         log_event("GizmoServer", "MSG_TYPE_IGNORED", type=msg_type, session=sid[:8])
 
@@ -278,7 +281,7 @@ class GizmoServer:
         # ── Send prompt to inspector ──────────────────────────────────────────
         await self._send(websocket, {
             "type":     "prompt_sections",
-            "sections": { "extractor_prompt": prompt },
+            "sections": {"extractor_prompt": prompt},
         })
 
         # ── Stream response ───────────────────────────────────────────────────
@@ -290,6 +293,46 @@ class GizmoServer:
 
         log_event("GizmoServer", "RESPONSE_SENT",
             session=session_id[:8], words=len(response.split()), multi=multi)
+
+    async def _handle_regenerate(self, websocket, session_id: str, msg: dict) -> None:
+        from core.llm import llm
+        from core.context_deductor import _SYSTEM
+
+        sections = msg.get("sections", {})
+        prompt   = sections.get("extractor_prompt", "").strip()
+
+        if not prompt:
+            await self._send(websocket, {"type": "error", "message": "no prompt to regenerate"})
+            return
+
+        log_event("GizmoServer", "REGENERATE",
+            session=session_id[:8],
+            prompt_len=len(prompt),
+        )
+
+        await self._send(websocket, {"type": "thinking"})
+
+        try:
+            response = await llm.generate(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt=_SYSTEM,
+                temperature=0.0,
+                max_new_tokens=3000,
+            )
+        except Exception as e:
+            await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
+            return
+
+        await self._send(websocket, {
+            "type":     "regenerated",
+            "response": response,
+            "thinking": {},
+        })
+
+        log_event("GizmoServer", "REGENERATE_SENT",
+            session=session_id[:8],
+            words=len(response.split()),
+        )
 
     async def _send(self, websocket, data: dict) -> None:
         try:
