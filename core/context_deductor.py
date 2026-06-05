@@ -105,20 +105,12 @@ async def _call_llm(prompt: str) -> Optional[list[dict]]:
         )
 
         raw = response.choices[0].message.content or ""
+        print("RAW:", raw)
         if not raw.strip():
             log_event("EventExtractor", "EMPTY_RESPONSE", model=EXTRACTOR_MODEL)
             return None
 
-        # Strip markdown fences if the model added them anyway
-        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
-        parsed = json.loads(clean)
-
-        if not isinstance(parsed, list):
-            log_event("EventExtractor", "BAD_SHAPE", raw=raw[:200])
-            return None
-
-        return parsed
-
+        return raw
     except json.JSONDecodeError as e:
         log_error("EventExtractor", "JSON parse failed", exc=e)
         return None
