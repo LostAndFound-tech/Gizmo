@@ -44,7 +44,7 @@ def _build_prompt(user_message: str, subject: str) -> str:
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
-async def _call_llm(prompt: str) -> Optional[str]:
+async def _call_llm(prompt: str):
     try:
         from core.llm import llm
 
