@@ -9,15 +9,16 @@ actually says about them.
 Use exactly this structure:
 
 {
-  "<sentence as written>": {
-    "speaker": "<who spoke this sentence>",
-    "subjects": {
-      "<subject name>": {
-        "type": "<type>",
-        <whatever this sentence actually says about this subject. If it describes the object, use what describes as the key.>
-      }
-    }
-  }
+  "topic": "Willow's whereabouts and plans",
+  "primary_subjects": ["Willow", "the dog"],
+  "speakers": ["Ember", "Kaylee"],
+  "scene": "Willow is getting ready to take the dog out. Ember is asking about where Willow is going. Kaylee is answering.",
+  "thread": [
+    "Ember is curious about Willow's current activity",
+    "Kaylee clarifies Willow is taking the dog out",
+    "Ember presses for what happens after",
+    "Kaylee clarifies Willow is going to physical therapy"
+  ]
 }
 
 Rules:
