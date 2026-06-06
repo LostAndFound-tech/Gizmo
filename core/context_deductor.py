@@ -1,10 +1,36 @@
 """
+core/context_deductor.py
+Context extraction from conversational statements.
+
+Parses each sentence individually, identifies subjects, and extracts
+whatever that sentence actually says about them — freeform attributes
+under a typed envelope (person, place, action).
+
+Returns raw JSON string for inspection and downstream ingestion.
+"""
+
+import asyncio
+import json
+import re
+from pathlib import Path
+from typing import Optional
+
+from core.log import log_event, log_error
+from core.timezone import tz_now
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+DATA_DIR = Path("/data")
+
+# ── Prompt ────────────────────────────────────────────────────────────────────
+
+_SYSTEM = """
 You extract structured context from conversational statements.
 Return ONLY valid JSON. No markdown fences. No explanation. No preamble.
 
 Split the input into individual sentences. For each sentence, extract who said it,
 what subjects are referenced, what type each subject is, and whatever that sentence
-actually says about them.
+actually says about them. If it's a descriptor, note what it's descri
 
 Use exactly this structure:
 
@@ -12,7 +38,7 @@ Use exactly this structure:
   "topic": "Willow's whereabouts and plans",
   "primary_subjects": ["Willow", "the dog"],
   "speakers": ["Ember", "Kaylee"],
-  "scene": "Willow is getting ready to take the dog out. Ember is asking about where Willow is going. Kaylee is answering.",
+  "scene": "Ember is asking about where Willow is going. Kaylee is answering.",
   "thread": [
     "Ember is curious about Willow's current activity",
     "Kaylee clarifies Willow is taking the dog out",
@@ -28,8 +54,6 @@ Rules:
 - If a sentence references multiple subjects, each gets their own block
 - If a sentence has no clear subjects, still include the sentence key with speaker and empty subjects
 - Actions include who did it (verb) and who or what received it (recipient) if present
-- type is one of: person, place, object, action, speech
-- place is a location; object is a physical thing that can be held or worn
 """.strip()
 
 
@@ -44,7 +68,7 @@ def _build_prompt(user_message: str, subject: str) -> str:
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
-async def _call_llm(prompt: str):
+async def _call_llm(prompt: str) -> Optional[str]:
     try:
         from core.llm import llm
 
