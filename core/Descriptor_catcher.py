@@ -1,5 +1,5 @@
 """
-core/context_deductor.py
+core/Descriptor_catcher.py
 Context extraction from conversational statements.
 
 Parses each sentence individually, identifies subjects, and extracts
@@ -25,43 +25,59 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
 _SYSTEM = """
-You extract structured context from conversational statements.
-Return ONLY valid JSON. No markdown fences. No explanation. No preamble.
+You gather descriptive datapoints about people and objects from conversational statements.
+You will receive the original message and a thread summary.
+Return ONLY a valid JSON array. No markdown fences. No explanation. No preamble.
+If nothing is being described, return [].
 
-Split the input into individual sentences. For each sentence, extract who said it,
-what subjects are referenced, what type each subject is, and whatever that sentence
-actually says about them. If it's a descriptor, note what it's describing. If more than one word is in *asterisks*,
-it is in action or a declaration, and is not heard.
+Capture EVERYTHING the text says about each object — appearance, personality, behavior, possessions, relationships, conditions. One rich object per entity. Never invent. Never use null, Unknown, or empty lists. Omit fields not supported by the text.
 
-Use exactly this structure:
+Example of a rich Person entry:
+[{
+  "Object": "Ara",
+  "Type": "Person",
+  "Hair": ["hay-colored", "stringy"],
+  "Personality": ["self-deprecating", "deflects compliments"],
+  "Relationships": ["close with Honey", "Jess admires her hair"]
+}]
 
+Example of a Clothing entry:
+[{
+  "Object": "jacket",
+  "Type": "Clothing",
+  "Owner": "Jess",
+  "Color": "green",
+  "Style": ["puffy sleeves"]
+}]
+
+Example of multiple rich objects in one exchange:
+[{
+  "Object": "Ara",
+  "Type": "Person",
+  "Hair": ["hay-colored", "stringy"],
+  "Personality": ["self-deprecating"]
+},
 {
-  "topic": "Willow's whereabouts and plans",
-  "primary_subjects": ["Willow", "the dog"],
-  "speakers": ["Ember", "Kaylee"],
-  "scene": "Ember is asking about where Willow is going. Kaylee is answering.",
-  "thread": [
-    "Ember is curious about Willow's current activity",
-    "Kaylee clarifies Willow is taking the dog out",
-    "Ember presses for what happens after",
-    "Kaylee clarifies Willow is going to physical therapy"
-  ]
-}
+  "Object": "Honey",
+  "Type": "Person",
+  "Hair": ["widely considered the best"],
+  "Reputation": ["praised by Jess and Ara"]
+}]
 
 Rules:
-- speaker is always the person whose statement this is
-- type is one of: person, place, action
-- Under type, include only what this sentence actually expresses — no invented details
-- If a sentence references multiple subjects, each gets their own block
-- If a sentence has no clear subjects, still include the sentence key with speaker and empty subjects
-- Actions include who did it (verb) and who or what received it (recipient) if present
+- One object per entity, as many fields as the text supports.
+- If two speakers describe the same thing differently, include both in the same list.
+- Objects can be people, body parts, clothing, animals, places, or things.
+- Preferences and wishes about oneself are not descriptors of that person — skip them.
 """.strip()
 
 
-def _build_prompt(user_message: str, subject: str) -> str:
+def _build_prompt(user_message: str, thread: str) -> str:
+    print(f"The original message: {user_message}"
+          f"The threads: {thread}")
     return (
-        f"The person speaking is: {subject}\n\n"
-        f"Statement:\n{user_message}"
+        f"The original message: {user_message}"
+        f"The threads: {thread}"
     )
 
 
@@ -113,20 +129,20 @@ def _append_to_file(record: str, subject: str) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-class ContentDeductor:
+class DescriptorCatcher:
 
     async def extract(
         self,
         user_message:   str,
-        gizmo_response: str,
+        thread:         str,
         subject:        str,
         session_file:   str,
     ) -> Optional[str]:
+        print("DESCRIPTOR NUDGED")
         if not user_message.strip():
             return None
-
         try:
-            prompt  = _build_prompt(user_message, subject)
+            prompt  = _build_prompt(user_message, thread)
             context = await _call_llm(prompt)
 
             if not context:
@@ -144,4 +160,4 @@ class ContentDeductor:
             return None
 
 
-content_deductor = ContentDeductor()
+descriptor_catcher = DescriptorCatcher()

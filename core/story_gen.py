@@ -25,43 +25,17 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
 _SYSTEM = """
-You extract structured context from conversational statements.
-Return ONLY valid JSON. No markdown fences. No explanation. No preamble.
+Given this statement, write a short story depicting these events. Do not write everything verbatim, create an interesting story within the genre. 
 
-Split the input into individual sentences. For each sentence, extract who said it,
-what subjects are referenced, what type each subject is, and whatever that sentence
-actually says about them. If it's a descriptor, note what it's describing. If more than one word is in *asterisks*,
-it is in action or a declaration, and is not heard.
+Ensure the story is at least 2 paragraphs from the listener's point of view, making up as few details as possible. Do not invent any actions, dialogue, or sensations for the user. Use descriptors heavily.
 
-Use exactly this structure:
-
-{
-  "topic": "Willow's whereabouts and plans",
-  "primary_subjects": ["Willow", "the dog"],
-  "speakers": ["Ember", "Kaylee"],
-  "scene": "Ember is asking about where Willow is going. Kaylee is answering.",
-  "thread": [
-    "Ember is curious about Willow's current activity",
-    "Kaylee clarifies Willow is taking the dog out",
-    "Ember presses for what happens after",
-    "Kaylee clarifies Willow is going to physical therapy"
-  ]
-}
-
-Rules:
-- speaker is always the person whose statement this is
-- type is one of: person, place, action
-- Under type, include only what this sentence actually expresses — no invented details
-- If a sentence references multiple subjects, each gets their own block
-- If a sentence has no clear subjects, still include the sentence key with speaker and empty subjects
-- Actions include who did it (verb) and who or what received it (recipient) if present
+Genre - children's book
 """.strip()
 
 
-def _build_prompt(user_message: str, subject: str) -> str:
+def _build_prompt(story_parts: str, user_body:str, gizmo_body:str, details=list[str]) -> str:
     return (
-        f"The person speaking is: {subject}\n\n"
-        f"Statement:\n{user_message}"
+        f"The story so far: {story_parts}\n\n She looks like {user_body}. He looks like {gizmo_body}. Everything you need to know right now: {str(details)}"
     )
 
 
@@ -113,28 +87,21 @@ def _append_to_file(record: str, subject: str) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-class ContentDeductor:
+class StoryGen:
 
     async def extract(
         self,
-        user_message:   str,
-        gizmo_response: str,
-        subject:        str,
-        session_file:   str,
+        actions:   str,
+        user_body: str,
+        gizmo_body: str,
+        details:list[str],
     ) -> Optional[str]:
-        if not user_message.strip():
-            return None
-
         try:
-            prompt  = _build_prompt(user_message, subject)
+            gizmo_body = "8 feet tall, ugly, incredibly fat, sweaty, mid 50's"
+            user_body = "4 feet tall, cute face, skinny, blonde hair, adorable. just hit 18."
+            
+            prompt  = _build_prompt(actions, user_body, gizmo_body, details)
             context = await _call_llm(prompt)
-
-            if not context:
-                log_event("ContextDeductor", "NO_CONTEXT_EXTRACTED",
-                    subject=subject,
-                    session=session_file,
-                )
-                return None
 
             return context
 
@@ -144,4 +111,4 @@ class ContentDeductor:
             return None
 
 
-content_deductor = ContentDeductor()
+story_gen = StoryGen()

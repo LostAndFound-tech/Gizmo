@@ -984,15 +984,14 @@ let primaryHost   = '';
 let voiceBoxCount = 0;
 let pendingHostIdentification = false;
 let pendingMessage = null;  // queued if connection drops mid-send
-
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
+  
   if (ws && ws.readyState === WebSocket.CONNECTING) return;
   setStatus('');
   console.log('[ws] connecting to', WS_URL);
   try {
-    ws = new WebSocket(WS_URL);
-  } catch (e) {
+    ws = new WebSocket(`ws://${location.hostname || 'localhost'}:10000/ws`);  } catch (e) {
     console.error('[ws] failed to create WebSocket:', e);
     setTimeout(connect, 3000);
     return;

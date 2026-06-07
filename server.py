@@ -117,20 +117,19 @@ def _time_of_day(hour: int) -> str:
     return "night"
 
 
-async def run_single_pipeline(message, session_id, headmate, context, history) -> tuple[str, str]:
+async def run_single_pipeline(message, session_id, headmate, context, history) -> str:
     from core.agent_simple import agent_simple as agent
-    ctx = context if context is not None else {}
     try:
         chunks = []
-        async for chunk in agent.run(
+        async for chunk in agent.respond(
             user_message=message,
             history=history,
             session_id=session_id,
-            context=ctx,
+            context=context,
         ):
+            print("CHUNK RECEIVED:", repr(chunk[:40]), flush=True)
             chunks.append(chunk)
-        prompt = ctx.get("_last_prompt", "")
-        return prompt, "".join(chunks)
+        return "".join(chunks)
     except Exception as e:
         import traceback
         print(f"[SINGLE PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
@@ -203,16 +202,13 @@ class GizmoServer:
         if msg_type == "message":
             await self._handle_chat_message(websocket, sid, msg)
             return
-        if msg_type == "regenerate":
-            await self._handle_regenerate(websocket, sid, msg)
-            return
 
         log_event("GizmoServer", "MSG_TYPE_IGNORED", type=msg_type, session=sid[:8])
 
     async def _handle_chat_message(self, websocket, session_id: str, msg: dict) -> None:
         content  = msg.get("content", "")
         context  = msg.get("context", {})
-        headmate = context.get("current_host") or msg.get("headmate") or None
+        headmate = context.get("current_host") or msg.get("headmate") or None  # ← fixed
 
         if not content:
             return
@@ -263,7 +259,7 @@ class GizmoServer:
         await self._send(websocket, {"type": "thinking"})
 
         try:
-            prompt, response = await run_single_pipeline(
+            response = await run_single_pipeline(
                 message=raw_text,
                 session_id=session_id,
                 headmate=headmate,
@@ -276,11 +272,6 @@ class GizmoServer:
             await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
             return
 
-        await self._send(websocket, {
-            "type":     "prompt_sections",
-            "sections": {"extractor_prompt": prompt},
-        })
-
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)
@@ -289,37 +280,6 @@ class GizmoServer:
 
         log_event("GizmoServer", "RESPONSE_SENT",
             session=session_id[:8], words=len(response.split()), multi=multi)
-
-    async def _handle_regenerate(self, websocket, session_id: str, msg: dict) -> None:
-        from core.llm import llm
-
-        sections = msg.get("sections", {})
-        prompt   = sections.get("extractor_prompt", "").strip()
-
-        if not prompt:
-            await self._send(websocket, {"type": "error", "message": "no prompt to regenerate"})
-            return
-
-        log_event("GizmoServer", "REGENERATE", session=session_id[:8], prompt_len=len(prompt))
-        await self._send(websocket, {"type": "thinking"})
-
-        try:
-            response = await llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                max_new_tokens=3000,
-                temperature=0.0,
-            )
-        except Exception as e:
-            await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
-            return
-
-        await self._send(websocket, {
-            "type":     "regenerated",
-            "response": response,
-            "thinking": {},
-        })
-
-        log_event("GizmoServer", "REGENERATE_SENT", session=session_id[:8], words=len(response.split()))
 
     async def _send(self, websocket, data: dict) -> None:
         try:
