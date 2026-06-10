@@ -991,7 +991,7 @@ function connect() {
   setStatus('');
   console.log('[ws] connecting to', WS_URL);
   try {
-    ws = new WebSocket(`ws://${location.hostname || 'localhost'}:10000/ws`);  } catch (e) {
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}/ws`);
     console.error('[ws] failed to create WebSocket:', e);
     setTimeout(connect, 3000);
     return;
