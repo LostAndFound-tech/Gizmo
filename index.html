@@ -986,38 +986,16 @@ let pendingHostIdentification = false;
 let pendingMessage = null;  // queued if connection drops mid-send
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
-  
   if (ws && ws.readyState === WebSocket.CONNECTING) return;
   setStatus('');
   console.log('[ws] connecting to', WS_URL);
   try {
     ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}/ws`);
+  } catch (e) {
     console.error('[ws] failed to create WebSocket:', e);
     setTimeout(connect, 3000);
     return;
   }
-
-  ws.onopen = () => {
-    connected = true;
-    setStatus('connected');
-    console.log('[ws] connected');
-    ws.send(JSON.stringify({ type: 'ping' }));
-
-    // Send any queued message
-    if (pendingMessage) {
-      console.log('[ws] sending queued message');
-      ws.send(JSON.stringify(pendingMessage));
-      pendingMessage = null;
-    }
-
-    // Keepalive — ping every 20s to prevent Render's 30s idle timeout
-    if (window._keepalive) clearInterval(window._keepalive);
-    window._keepalive = setInterval(() => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ping' }));
-      }
-    }, 20000);
-  };
 
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
