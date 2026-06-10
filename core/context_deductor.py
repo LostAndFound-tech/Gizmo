@@ -93,24 +93,6 @@ async def _call_llm(prompt: str) -> Optional[str]:
         return None
 
 
-# ── File write ────────────────────────────────────────────────────────────────
-
-def _actions_file(subject: str) -> Path:
-    date_str = tz_now().strftime("%Y-%m-%d")
-    path = DATA_DIR / "testing" / subject.lower() / "actions" / f"{date_str}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _append_to_file(record: str, subject: str) -> None:
-    try:
-        path = _actions_file(subject)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(record + "\n")
-    except Exception as e:
-        log_error("ContextDeductor", "file write failed", exc=e)
-
-
 # ── Public API ────────────────────────────────────────────────────────────────
 
 class ContentDeductor:
@@ -141,6 +123,7 @@ class ContentDeductor:
         except Exception as e:
             log_error("ContextDeductor", "extract failed", exc=e)
             print(f"[ContextDeductor] extract failed: {type(e).__name__}: {e}")
+            print(context)
             return None
 
 

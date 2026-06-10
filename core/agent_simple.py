@@ -1,51 +1,30 @@
 """
 core/agent_simple.py
-Bypass agent — one module, no orchestration.
+Bypass agent — passive pipeline + optional chat mode.
 
-Current target: context_deductor + descriptor_catcher pipeline.
-Returns combined output as a streamed response.
+Passive mode: runs full chunk pipeline, writes all data, yields metadata JSON.
+Chat mode:    runs full chunk pipeline, writes all data, calls responder,
+              yields response text.
+
+Keyphrases:
+  "chat mode"           → switch to chat mode
+  "passive mode"        → switch to passive mode
+  "run wellness report" → trigger wellness synthesis
 """
 
-import os
 import time
 import json
 from typing import AsyncGenerator, Optional
 
 from core.log import log_event, log_error
-from core.context_deductor import content_deductor as CD, _build_prompt, _SYSTEM
-from core.Descriptor_catcher import descriptor_catcher as describer
-from core.BehaviorCatcher import behaviorcatcher as behavior
-from core.vision import visioncatcher as vision
-from core.story_gen import story_gen as story
+from core.chunk_processor import ChunkProcessor
+from core.responder import responder as _responder
 
 
-async def _call_module(
-    message: str,
-    session_id: str,
-    context: dict,
-) -> tuple[str, str]:
-    print("CALL MODULE ENTERED", flush=True)
-    subject     = context.get("current_host") or "unknown"
-    user_prompt = _build_prompt(message, subject)
-    full_prompt = f"{_SYSTEM}\n\n{user_prompt}"
+# ── Mode state ────────────────────────────────────────────────────────────────
 
-    context_data = await CD.extract(message, "", subject, session_id)
-    response     = str(context_data) if context_data else "Context extraction returned nothing."
-
-    return full_prompt, response
-
-
-class memSaver:
-    def write(
-            self,
-            path:str, content:str
-    ):
-        write_path = os.environ.get("DATA_DIR")+f"/{path}"
-        if not os.path.exists(write_path):
-            os.makedirs(write_path, exist_ok=True)
-        with open (os.environ.get("DATA_DIR")+f"/{path}/"+ "TEST.txt", "w", encoding="utf-8") as file:
-            file.write(content)
-        pass
+_chat_mode: bool                       = False
+_processor: Optional["ChunkProcessor"] = None
 
 
 class AgentSimple:
@@ -54,12 +33,17 @@ class AgentSimple:
         self,
         user_message: str,
         history,
-        session_id: str = "",
-        context: Optional[dict] = None,
-        source: str = "user",
+        session_id:  str   = "",
+        context:     Optional[dict] = None,
+        source:      str   = "user",
+        chunk_size:  int   = 8,
+        timeout_sec: float = 10.0,
     ) -> AsyncGenerator[str, None]:
+        global _chat_mode, _processor
         t_start = time.monotonic()
-        ctx = context if context is not None else {}
+        ctx  = context if context is not None else {}
+        host = ctx.get("current_host") or "unknown"
+        print(f"[DEBUG] agent_simple host: {repr(host)}, ctx: {ctx}")
 
         log_event("AgentSimple", "RECEIVE",
             session=session_id[:8],
@@ -67,60 +51,105 @@ class AgentSimple:
         )
 
         try:
-            prompt, response_text = await _call_module(
-                message=user_message,
-                session_id=session_id,
-                context=ctx,
+            msg_lower = user_message.lower().strip()
+
+            # ── Keyphrase triggers ────────────────────────────────────────────
+            if "run wellness report" in msg_lower:
+                print("[AgentSimple] wellness report triggered")
+                from core.wellness_synthesis import wellness_synthesis
+                await wellness_synthesis.run()
+                yield json.dumps({"status": "ok", "trigger": "wellness_report"})
+                return
+
+            if "run report for" in msg_lower:
+                name = msg_lower.split("run report for")[-1].strip().split()[0].strip(".,!?")
+                print(f"[AgentSimple] individual wellness report triggered for {name}")
+                from core.wellness_synthesis import wellness_synthesis
+                result = await wellness_synthesis.synthesize_one(name)
+                yield json.dumps({"status": "ok", "trigger": "wellness_report", "name": name, "synthesized": bool(result)})
+                return
+
+            if "chat mode" in msg_lower:
+                _chat_mode = True
+                print("[AgentSimple] switched to chat mode")
+                yield "Chat mode on."
+                return
+
+            if "passive mode" in msg_lower:
+                _chat_mode = False
+                print("[AgentSimple] switched to passive mode")
+                yield "Passive mode on."
+                return
+
+            # ── Chunk pipeline ────────────────────────────────────────────────
+            if _processor is None:
+                _processor = ChunkProcessor(
+                    session_id=session_id,
+                    host=host,
+                    chunk_size=chunk_size,
+                    timeout_sec=timeout_sec,
+                )
+            processor = _processor
+            processor = _processor
+            if host and host != "unknown":
+                processor.host = host
+                print("DEBUG: processor.host:", processor.host)
+
+            lines = [l for l in user_message.splitlines() if l.strip()]
+
+            chunk_result = None
+            for line in lines:
+                result = await processor.push_line(line)
+                if result:
+                    chunk_result = result
+
+            # In chat mode, only flush at natural end — don't force flush every message
+            # In passive mode, flush so transcript processing completes fully
+            if not _chat_mode:
+                final_chunk = await processor.flush()
+                chunk_result = final_chunk or chunk_result
+
+            last_result = chunk_result or (processor.results[-1] if processor.results else None)
+
+            ctx["session_id"] = session_id
+
+            duration_ms = round((time.monotonic() - t_start) * 1000)
+            log_event("AgentSimple", "COMPLETE",
+                session=session_id[:8],
+                duration_ms=duration_ms,
+                mode="chat" if _chat_mode else "passive",
             )
-            ctx["_last_prompt"] = prompt
 
-            descriptors = "NONE"
-            behaviors = "NONE"
-            try:
-                parsed = json.loads(response_text)
-                print("PARSED PASS 1:", parsed, flush=True)
-                thread = parsed.get("thread", [])
-                descriptors = await describer.extract(
+            # ── Chat mode ─────────────────────────────────────────────────────
+            if _chat_mode and last_result:
+                response_text = await _responder.respond(
+                    chunk_result=last_result,
+                    context=ctx,
+                    history=history or [],
                     user_message=user_message,
-                    thread=str(thread),
-                    subject=ctx.get("current_host") or "unknown",
-                    session_file=session_id,
-                )
-                behaviors = await behavior.extract(
-                    user_message=str(thread),
-                    thread=str(thread),
-                    subject=ctx.get("current_host") or "unknown",
-                    session_file=session_id
                 )
 
-                print("DESCRIPTORS:", descriptors, flush=True)
-                visions = await vision.extract(
-                    actions = thread,
-                    body = descriptors
-                )
-                visions = json.loads(visions)
-                print(visions)
-                story_written = await story.extract(thread, "", "", [f"Kinks:{visions["kinks"]}", f"fetishes:{visions["fetishes"]}", f"Try this: {visions["possible connections"]}"])
-            except Exception as e:
-                print("Descriptors failed:", e, flush=True)
-                descriptors = "NONE"
+                yield response_text or ""
+                return
+
+            # ── Passive mode ──────────────────────────────────────────────────
+            yield json.dumps({
+                "status":   "ok",
+                "subjects": [k for k in processor.registry.keys() if not k.startswith("_")],
+                "chunks":   len(processor.results),
+                "metadata": {
+                    "descriptors": last_result.get("descriptors", {}) if last_result else {},
+                    "behaviors":   last_result.get("behaviors",   []) if last_result else [],
+                    "wellness":    last_result.get("wellness",     []) if last_result else [],
+                    "partial":     last_result.get("partial", False)   if last_result else False,
+                }
+            }, indent=2)
 
         except Exception as e:
-            log_error("AgentSimple", "module call failed", exc=e)
-            print(f"OUTER EXCEPT: {type(e).__name__}: {e}", flush=True)
-            yield f"Something went wrong: {type(e).__name__}: {e}"
-            return
+            log_error("AgentSimple", "respond failed", exc=e)
+            print(f"[AgentSimple] {type(e).__name__}: {e}", flush=True)
+            yield json.dumps({"status": "error", "message": str(e)})
 
-        duration_ms = round((time.monotonic() - t_start) * 1000)
-        log_event("AgentSimple", "COMPLETE",
-            session=session_id[:8],
-            duration_ms=duration_ms,
-        )
-
-        final = f"RESPONSE:\n{response_text}\n\n---\n\nDESCRIPTORS\n{descriptors}\n\n---\n\nBEHAVIORS\n{behaviors}\n\n---\n\nsexuality:\n{visions}\n\n---\n\nsexuality:\n{story_written}"
-        mem = memSaver()
-        mem.write("final", final)
-        yield final
 
 
 agent_simple = AgentSimple()

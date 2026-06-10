@@ -15,7 +15,8 @@ from typing import Optional
 from pathlib import Path
 from core.log import log, log_event, log_error
 from core.timezone import tz_now
-
+from dotenv import load_dotenv
+load_dotenv()
 
 DEDUP_WINDOW    = 5.0
 THINKING_DELAY  = 0.3
@@ -26,7 +27,8 @@ _SPEECH_RE   = re.compile(r'^\[?([A-Za-z][A-Za-z0-9_\- ]{0,30})\]?\s*:\s*(.+)', 
 _ACTION_RE   = re.compile(r'^\*(.+)\*$', re.DOTALL)
 _DIRECTED_RE = re.compile(r'\b(to|at|@)\s+([A-Za-z][A-Za-z0-9_\- ]{0,20})\b', re.IGNORECASE)
 
-_seen_messages: dict[str, float] = {}
+_seen_messages:   dict[str, float]       = {}
+_session_history: dict[str, list[dict]] = {}
 
 
 def _is_duplicate(session_id: str, content: str) -> bool:
@@ -171,6 +173,7 @@ class GizmoServer:
                         log_error("GizmoServer", f"ws error: {ws.exception()}", exc=None)
             finally:
                 self._connections.pop(session_id, None)
+                _session_history.pop(session_id, None)
                 log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
             return ws
 
@@ -208,7 +211,7 @@ class GizmoServer:
     async def _handle_chat_message(self, websocket, session_id: str, msg: dict) -> None:
         content  = msg.get("content", "")
         context  = msg.get("context", {})
-        headmate = context.get("current_host") or msg.get("headmate") or None  # ← fixed
+        headmate = context.get("current_host") or msg.get("headmate") or None
 
         if not content:
             return
@@ -258,19 +261,25 @@ class GizmoServer:
         await asyncio.sleep(THINKING_DELAY)
         await self._send(websocket, {"type": "thinking"})
 
+        history = _session_history.get(session_id, [])
+
         try:
             response = await run_single_pipeline(
                 message=raw_text,
                 session_id=session_id,
                 headmate=headmate,
                 context=context,
-                history=[],
+                history=history,
             )
         except Exception as e:
             import traceback
             print(f"[PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
             await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
             return
+
+        history.append({"role": "user",      "content": raw_text})
+        history.append({"role": "assistant", "content": response})
+        _session_history[session_id] = history
 
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})

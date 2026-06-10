@@ -25,8 +25,8 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL_ID", "deepseek/deepseek-v4-flash")
 
-MAX_RETRIES     = 3
-RETRY_DELAY     = 2.0   # slightly longer — OpenRouter occasionally needs it
+MAX_RETRIES     = 5
+RETRY_DELAY     = .5   # slightly longer — OpenRouter occasionally needs it
 TIMEOUT_SECONDS = 60    # increased from 45 — V4 Flash can be slower on long prompts
 
 

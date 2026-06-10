@@ -1,26 +1,16 @@
 """
 core/Descriptor_catcher.py
-Context extraction from conversational statements.
+Appearance and attribute extraction from conversational statements.
 
-Parses each sentence individually, identifies subjects, and extracts
-whatever that sentence actually says about them — freeform attributes
-under a typed envelope (person, place, action).
-
-Returns raw JSON string for inspection and downstream ingestion.
+Returns a name-keyed dict: {"Ember": {"Type": "Person", "Hair": [...]}, ...}
+ready for per-person file merging.
 """
-import os
-import asyncio
 import json
 import re
 from pathlib import Path
 from typing import Optional
 
 from core.log import log_event, log_error
-from core.timezone import tz_now
-
-# ── Config ────────────────────────────────────────────────────────────────────
-
-DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
@@ -30,7 +20,8 @@ You will receive the original message and a thread summary.
 Return ONLY a valid JSON array. No markdown fences. No explanation. No preamble.
 If nothing is being described, return [].
 
-Capture EVERYTHING the text says about each object — appearance, personality, behavior, possessions, relationships, conditions. One rich object per entity. Never invent. Never use null, Unknown, or empty lists. Omit fields not supported by the text.
+Capture only appearance, physical attributes, possessions, and stable traits — NOT behaviors, actions, conditions, or states.
+One rich object per entity. Never invent. Never use null, Unknown, or empty lists. Omit fields not supported by the text.
 
 Example of a rich Person entry:
 [{
@@ -69,19 +60,23 @@ Rules:
 - If two speakers describe the same thing differently, include both in the same list.
 - Objects can be people, body parts, clothing, animals, places, or things.
 - Preferences and wishes about oneself are not descriptors of that person — skip them.
+- Do NOT include Actions, Behaviors, Conditions, or transient states. Those belong elsewhere.
 """.strip()
 
 
+
+_CONVERSATIONAL_FRAME = (
+    "Conversational frame: 'Gizmo' or 'you' refers to the AI companion, not a system member. "
+    "'I', 'me', 'us', 'we' refers to the plural system. "
+    "Lines prefixed 'Gizmo:' are AI responses — do not extract descriptors about Gizmo as if he were a system member."
+)
+
 def _build_prompt(user_message: str, thread: str) -> str:
-    print(f"The original message: {user_message}"
-          f"The threads: {thread}")
     return (
-        f"The original message: {user_message}"
-        f"The threads: {thread}"
+        f"{_CONVERSATIONAL_FRAME}\n\n"
+        f"The original message:\n{user_message}\n\n"
+        f"Thread summary:\n{thread}"
     )
-
-
-# ── LLM call ─────────────────────────────────────────────────────────────────
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
@@ -93,38 +88,36 @@ async def _call_llm(prompt: str) -> Optional[str]:
             messages=[{"role": "user", "content": prompt}],
             system_prompt=_SYSTEM,
             temperature=0.0,
-            max_new_tokens=3000,
+            max_new_tokens=8000,
         )
 
         if not raw or not raw.strip():
-            log_event("ContextDeductor", "EMPTY_RESPONSE")
+            log_event("DescriptorCatcher", "EMPTY_RESPONSE")
             return None
 
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
         return clean
 
     except Exception as e:
-        log_error("ContextDeductor", "LLM call failed", exc=e)
-        print(f"[ContextDeductor] LLM call failed: {type(e).__name__}: {e}")
+        log_error("DescriptorCatcher", "LLM call failed", exc=e)
+        print(f"[DescriptorCatcher] LLM call failed: {type(e).__name__}: {e}")
         return None
 
 
-# ── File write ────────────────────────────────────────────────────────────────
+# ── Reshape ───────────────────────────────────────────────────────────────────
 
-def _actions_file(subject: str) -> Path:
-    date_str = tz_now().strftime("%Y-%m-%d")
-    path = DATA_DIR / "testing" / subject.lower() / "actions" / f"{date_str}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _append_to_file(record: str, subject: str) -> None:
-    try:
-        path = _actions_file(subject)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(record + "\n")
-    except Exception as e:
-        log_error("ContextDeductor", "file write failed", exc=e)
+def _reshape(raw_list: list) -> dict:
+    """
+    Convert [{Object: "Ember", Type: "Person", Hair: [...]}, ...]
+    into     {"Ember": {"Type": "Person", "Hair": [...]}, ...}
+    """
+    result = {}
+    for entry in raw_list:
+        name = entry.get("Object")
+        if not name:
+            continue
+        result[name] = {k: v for k, v in entry.items() if k != "Object"}
+    return result
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -133,30 +126,34 @@ class DescriptorCatcher:
 
     async def extract(
         self,
-        user_message:   str,
-        thread:         str,
-        subject:        str,
-        session_file:   str,
-    ) -> Optional[str]:
-        print("DESCRIPTOR NUDGED")
+        user_message: str,
+        thread:       str,
+        subject:      str,
+        session_file: str,
+    ) -> Optional[dict]:
+        print("[DescriptorCatcher] extract called")
         if not user_message.strip():
             return None
         try:
             prompt  = _build_prompt(user_message, thread)
-            context = await _call_llm(prompt)
+            raw_str = await _call_llm(prompt)
 
-            if not context:
-                log_event("ContextDeductor", "NO_CONTEXT_EXTRACTED",
+            if not raw_str:
+                log_event("DescriptorCatcher", "NO_CONTEXT_EXTRACTED",
                     subject=subject,
                     session=session_file,
                 )
                 return None
 
-            return context
+            raw_list = json.loads(raw_str)
+            if not isinstance(raw_list, list) or len(raw_list) == 0:
+                return None
+
+            return _reshape(raw_list)
 
         except Exception as e:
-            log_error("ContextDeductor", "extract failed", exc=e)
-            print(f"[ContextDeductor] extract failed: {type(e).__name__}: {e}")
+            log_error("DescriptorCatcher", "extract failed", exc=e)
+            print(f"[DescriptorCatcher] extract failed: {type(e).__name__}: {e}")
             return None
 
 

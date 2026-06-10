@@ -36,6 +36,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from core.timezone import tz_now as thisNow
 
 # ── Log directory ─────────────────────────────────────────────────────────────
 # Resolve relative to this file so it works from any working directory.
@@ -94,10 +95,8 @@ def _now_str() -> str:
         from core.timezone import tz_now
         return tz_now().strftime("%Y-%m-%d %H:%M:%S %Z")
     except Exception:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
+        return thisNow() 
+    
 def _resolve_component(component: str) -> str:
     """Normalise component name. Unknown components → System log."""
     # Case-insensitive match against known components
@@ -195,7 +194,7 @@ def read_todays_log(component: str) -> str:
         today = tz_now().strftime("%Y-%m-%d")
     except Exception:
         from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(timezone.mtn).strftime("%Y-%m-%d")
 
     path = get_log_path(component)
     if not path.exists():
