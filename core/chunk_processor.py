@@ -228,7 +228,7 @@ class ChunkProcessor:
         print(f"[DEBUG] chunk: {chunk}")
 
         # ── 2. Descriptors + behaviors + wellness in parallel ─────────────────
-        descriptor_dict, behavior_results, wellness_signals = await asyncio.gather(
+        descriptor_dict, behavior_results, wellness_signals, _ = await asyncio.gather(
             describer.extract(
                 user_message=text,
                 thread=text,
