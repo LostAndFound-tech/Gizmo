@@ -974,16 +974,18 @@ function switchSession(sid) {
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let ws            = null;
-let connected     = false;
-let thinking      = false;
-let currentChunks = [];
-let currentMsgEl  = null;
-let fronters      = [];
-let primaryHost   = '';
-let voiceBoxCount = 0;
+let ws                = null;
+let connected         = false;
+let thinking          = false;
+let currentChunks     = [];
+let currentMsgEl      = null;
+let fronters          = [];
+let primaryHost       = '';
+let voiceBoxCount     = 0;
 let pendingHostIdentification = false;
-let pendingMessage = null;  // queued if connection drops mid-send
+let pendingMessage    = null;   // queued if connection drops mid-send
+let pendingSceneResume = false; // waiting for user's yes/no on scene re-entry
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
   if (ws && ws.readyState === WebSocket.CONNECTING) return;
@@ -999,6 +1001,36 @@ function connect() {
     setTimeout(connect, 3000);
     return;
   }
+
+  ws.onopen = () => {
+    connected = true;
+    setStatus('connected');
+    console.log('[ws] connected');
+
+    if (window._keepalive) clearInterval(window._keepalive);
+    window._keepalive = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 25000);
+
+    // Check for an active scene on reconnect (only if we already know who's here)
+    if (primaryHost) {
+      ws.send(JSON.stringify({
+        type:       'check_scene',
+        session_id: SESSION_ID,
+        headmate:   primaryHost,
+      }));
+    }
+
+    if (pendingMessage) {
+      console.log('[ws] draining queued message');
+      ws.send(JSON.stringify(pendingMessage));
+      pendingMessage = null;
+      thinking = true;
+      setSendEnabled(false);
+    }
+  };
 
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
@@ -1022,6 +1054,15 @@ function connect() {
 function handleIncoming(msg) {
   if (msg.type === 'pong') return;
 
+  // ── Scene reconnect offer ─────────────────────────────────────────────────
+  if (msg.type === 'scene_check') {
+    if (msg.has_scene && msg.reconnect_message) {
+      appendMessage('gizmo', 'Gizmo', msg.reconnect_message, 'gizmo');
+      pendingSceneResume = true;
+    }
+    return;
+  }
+
   if (msg.type === 'session_restored') {
     // Switch to the new branch session ID
     if (msg.session_id) {
@@ -1034,6 +1075,12 @@ function handleIncoming(msg) {
       fronters    = msg.hosts.map(h => h.toLowerCase());
       updatePrimaryLabel(msg.hosts[0]);
       updateFronterChips();
+      // Now that we know the host, check for an active scene
+      ws.send(JSON.stringify({
+        type:       'check_scene',
+        session_id: SESSION_ID,
+        headmate:   primaryHost,
+      }));
     }
     return;
   }
@@ -1307,6 +1354,12 @@ function send() {
     },
   };
 
+  // If we're waiting on a scene resume answer, tag the payload accordingly
+  if (pendingSceneResume) {
+    payload.type = 'scene_resume_answer';
+    pendingSceneResume = false;
+  }
+
   // If not connected, queue it
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     console.warn('[send] not connected, queuing message');
@@ -1569,9 +1622,8 @@ async function loadSessions() {
       const mood    = s.mood || '—';
       const hosts   = (s.hosts || []).map(h => h.charAt(0).toUpperCase() + h.slice(1)).join(', ');
 
-      // A session is a branch if its ID contains more than one underscore segment after 'sess_'
       const isBranch = (s.id.match(/_/g) || []).length > 1;
-      const depth    = (s.id.match(/_/g) || []).length - 1; // nesting depth
+      const depth    = (s.id.match(/_/g) || []).length - 1;
       const indent   = '↳ '.repeat(depth > 1 ? depth - 1 : depth > 0 ? 1 : 0);
       el.innerHTML = `
         <div class="session-date">${indent}${dateStr} ${timeStr}</div>
@@ -1648,7 +1700,7 @@ async function openSession(sessionId) {
       </div>` : ''}
 
       <div class="detail-section" style="margin-top:8px">
-        <button onclick="continueSession('${sid}')" style="
+        <button onclick="continueSession('${sessionId}')" style="
           background:var(--accent-lo);
           border:1px solid var(--accent)66;
           border-radius:var(--radius);
@@ -1658,7 +1710,7 @@ async function openSession(sessionId) {
           padding:8px 18px;
           cursor:pointer;
           transition:all 0.15s;
-        " onmouseover="this.style.background='var(--accent)22'" 
+        " onmouseover="this.style.background='var(--accent)22'"
            onmouseout="this.style.background='var(--accent-lo)'">
           continue this conversation →
         </button>

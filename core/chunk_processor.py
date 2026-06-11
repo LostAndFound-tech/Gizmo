@@ -26,6 +26,8 @@ from core.Descriptor_catcher import descriptor_catcher as describer
 from core.BehaviorCatcher import behaviorcatcher as behavior
 from core.wellness import wellness_collector as wellness
 import core.librarian as librarian
+from core.scene_tracker import scene_tracker as scene
+
 
 
 # ── Subject discovery ─────────────────────────────────────────────────────────
@@ -245,6 +247,7 @@ class ChunkProcessor:
                 chunk_id=chunk_id,
                 registry=self.registry,
             ),
+            scene.update(chunk=chunk, chunk_id=chunk_id, name=self.host, session_id=self.session_id),
         )
 
         descriptor_dict  = descriptor_dict  or {}

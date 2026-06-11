@@ -20,6 +20,7 @@ from typing import Optional
 
 from core.log import log_event, log_error
 import core.librarian as librarian
+from core.scene_tracker import scene_tracker
 
 
 # ── Tag extraction from chunk ─────────────────────────────────────────────────
@@ -71,7 +72,9 @@ def _assemble_brief(
     fronters = context.get("fronters", [host])
     parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
     parts.append(f"REGISTER: {register}")
-
+    scene_brief = scene_tracker.get_scene_brief(host)
+    if scene_brief:
+        parts.append(f"\nSCENE STATE:\n{scene_brief}")
     # What was just said — only the current user message, not the full exchange history
     parts.append(f"\nWHAT JUST HAPPENED:\n{user_message.strip()}")
 
