@@ -133,17 +133,7 @@ class AgentSimple:
                 return
 
             # ── Passive mode ──────────────────────────────────────────────────
-            yield json.dumps({
-                "status":   "ok",
-                "subjects": [k for k in processor.registry.keys() if not k.startswith("_")],
-                "chunks":   len(processor.results),
-                "metadata": {
-                    "descriptors": last_result.get("descriptors", {}) if last_result else {},
-                    "behaviors":   last_result.get("behaviors",   []) if last_result else [],
-                    "wellness":    last_result.get("wellness",     []) if last_result else [],
-                    "partial":     last_result.get("partial", False)   if last_result else False,
-                }
-            }, indent=2)
+            yield ""
 
         except Exception as e:
             log_error("AgentSimple", "respond failed", exc=e)

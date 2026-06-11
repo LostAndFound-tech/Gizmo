@@ -990,7 +990,10 @@ function connect() {
   setStatus('');
   console.log('[ws] connecting to', WS_URL);
   try {
-    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}/ws`);
+    const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    const proto   = location.protocol === 'https:' ? 'wss' : 'ws';
+    const port    = isLocal ? ':10000' : '';
+    ws = new WebSocket(`${proto}://${location.hostname}${port}/ws`);
   } catch (e) {
     console.error('[ws] failed to create WebSocket:', e);
     setTimeout(connect, 3000);
