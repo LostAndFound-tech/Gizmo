@@ -103,11 +103,14 @@ class AgentSimple:
                 if result:
                     chunk_result = result
 
-            # In chat mode, only flush at natural end — don't force flush every message
-            # In passive mode, flush so transcript processing completes fully
-            if not _chat_mode:
-                final_chunk = await processor.flush()
-                chunk_result = final_chunk or chunk_result
+            # Always flush — chat mode needs immediate response on single messages,
+            # passive mode needs complete processing of transcript chunks
+            final_chunk = await processor.flush()
+            print(f"[DEBUG] flush result: {final_chunk}", flush=True)
+            print(f"[DEBUG] chunk_result: {chunk_result}", flush=True)
+            print(f"[DEBUG] processor.results: {len(processor.results)}", flush=True)
+            chunk_result = final_chunk or chunk_result
+            chunk_result = final_chunk or chunk_result
 
             last_result = chunk_result or (processor.results[-1] if processor.results else None)
 
