@@ -23,8 +23,8 @@ from core.responder import responder as _responder
 
 # ── Mode state ────────────────────────────────────────────────────────────────
 
-_chat_mode: bool                       = False
-_processor: Optional["ChunkProcessor"] = None
+_chat_mode: bool                              = False
+_processors: dict[str, "ChunkProcessor"]      = {}  # keyed by session_id
 
 
 class AgentSimple:
@@ -39,7 +39,7 @@ class AgentSimple:
         chunk_size:  int   = 8,
         timeout_sec: float = 10.0,
     ) -> AsyncGenerator[str, None]:
-        global _chat_mode, _processor
+        global _chat_mode, _processors
         t_start = time.monotonic()
         ctx  = context if context is not None else {}
         host = ctx.get("current_host") or "unknown"
@@ -82,18 +82,29 @@ class AgentSimple:
                 return
 
             # ── Chunk pipeline ────────────────────────────────────────────────
-            if _processor is None:
-                _processor = ChunkProcessor(
+            # In chat mode: fresh processor per message — no buffer bleed between
+            # exchanges. Extraction only; conversational context lives in history.
+            # In passive mode: persistent processor per session so transcript
+            # lines accumulate into proper chunks.
+            if _chat_mode:
+                processor = ChunkProcessor(
                     session_id=session_id,
                     host=host,
                     chunk_size=chunk_size,
                     timeout_sec=timeout_sec,
                 )
-            processor = _processor
-            processor = _processor
+            else:
+                if session_id not in _processors:
+                    _processors[session_id] = ChunkProcessor(
+                        session_id=session_id,
+                        host=host,
+                        chunk_size=chunk_size,
+                        timeout_sec=timeout_sec,
+                    )
+                processor = _processors[session_id]
+
             if host and host != "unknown":
                 processor.host = host
-                print("DEBUG: processor.host:", processor.host)
 
             lines = [l for l in user_message.splitlines() if l.strip()]
 
@@ -103,13 +114,9 @@ class AgentSimple:
                 if result:
                     chunk_result = result
 
-            # Always flush — chat mode needs immediate response on single messages,
-            # passive mode needs complete processing of transcript chunks
+            # Always flush — in chat mode this fires the extraction on the current
+            # message only (fresh processor). In passive mode flushes any partial.
             final_chunk = await processor.flush()
-            print(f"[DEBUG] flush result: {final_chunk}", flush=True)
-            print(f"[DEBUG] chunk_result: {chunk_result}", flush=True)
-            print(f"[DEBUG] processor.results: {len(processor.results)}", flush=True)
-            chunk_result = final_chunk or chunk_result
             chunk_result = final_chunk or chunk_result
 
             last_result = chunk_result or (processor.results[-1] if processor.results else None)
@@ -143,6 +150,11 @@ class AgentSimple:
             print(f"[AgentSimple] {type(e).__name__}: {e}", flush=True)
             yield json.dumps({"status": "error", "message": str(e)})
 
+
+
+    def end_session(self, session_id: str) -> None:
+        """Clean up processor when a session ends."""
+        _processors.pop(session_id, None)
 
 
 agent_simple = AgentSimple()

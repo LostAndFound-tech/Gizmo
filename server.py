@@ -260,6 +260,12 @@ class GizmoServer:
                 self._connections.pop(session_id, None)
                 _session_history.pop(session_id, None)
                 _pending_scene_resume.pop(session_id, None)
+                # Clean up per-session chunk processor
+                try:
+                    from core.agent_simple import agent_simple
+                    agent_simple.end_session(session_id)
+                except Exception:
+                    pass
                 log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
             return ws
 
