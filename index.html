@@ -1051,6 +1051,14 @@ function connect() {
       }
     }, 12000);
 
+    // Reset stuck UI state on reconnect — if we have a pending message
+    // we're about to send so stay locked, otherwise unlock immediately
+    if (!pendingMessage) {
+      thinking = false;
+      setSendEnabled(true);
+      hideThinking();
+    }
+
     // Check for an active scene on reconnect (only if we already know who's here)
     if (primaryHost) {
       ws.send(JSON.stringify({
@@ -1099,6 +1107,15 @@ function connect() {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     console.log('[ws] page visible — checking connection');
+
+    // Always reset stuck UI state when returning to the app
+    // If a response was in-flight when we left, it's gone — unlock the UI
+    if (!pendingMessage) {
+      thinking = false;
+      setSendEnabled(true);
+      hideThinking();
+    }
+
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
       console.log('[ws] reconnecting on visibility restore');
       connect();
