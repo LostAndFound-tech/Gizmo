@@ -959,14 +959,50 @@ function getOrCreateSessionId() {
 
 let SESSION_ID = getOrCreateSessionId();
 
-function switchSession(sid) {
+async function switchSession(sid) {
   SESSION_ID = sid;
   sessionStorage.setItem('gizmo_session_id', sid);
+
   // Clear current messages
   const msgs = document.getElementById('messages');
-  msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">continuing session...</div></div>';
+  msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">loading conversation...</div></div>';
   currentChunks = [];
   currentMsgEl  = null;
+
+  // Fetch and render history
+  try {
+    const res  = await fetch(`/sessions/${sid}`);
+    const data = await res.json();
+
+    msgs.innerHTML = '';
+
+    const messages = data.messages || [];
+    if (!messages.length) {
+      msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">no messages yet</div></div>';
+    } else {
+      messages.forEach(m => {
+        if (m.role === 'user') {
+          const name = (m.speaker || 'you').replace(/^\w/, c => c.toUpperCase());
+          appendMessage('user', name, m.content, 'user');
+        } else {
+          appendMessage('gizmo', 'Gizmo', m.content, 'gizmo');
+        }
+      });
+    }
+
+    // Restore host from session
+    if (data.hosts && data.hosts.length) {
+      primaryHost = data.hosts[0].toLowerCase();
+      fronters    = data.hosts.map(h => h.toLowerCase());
+      updatePrimaryLabel(data.hosts[0]);
+      updateFronterChips();
+    }
+
+  } catch(e) {
+    console.error('[switchSession] failed to load history:', e);
+    msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">could not load history</div></div>';
+  }
+
   // Tell server to restore this session
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'restore_session', session_id: sid }));
@@ -988,7 +1024,8 @@ let pendingSceneResume = false; // waiting for user's yes/no on scene re-entry
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
-  if (ws && ws.readyState === WebSocket.CONNECTING) return;
+  // Don't stack connection attempts
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
   setStatus('');
   console.log('[ws] connecting to', WS_URL);
   try {
@@ -1012,7 +1049,7 @@ function connect() {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'ping' }));
       }
-    }, 25000);
+    }, 12000);
 
     // Check for an active scene on reconnect (only if we already know who's here)
     if (primaryHost) {
@@ -1039,10 +1076,15 @@ function connect() {
 
   ws.onclose = (e) => {
     connected = false;
+    thinking  = false;
+    setSendEnabled(true);
     setStatus('');
     console.log('[ws] closed, code:', e.code);
     if (window._keepalive) clearInterval(window._keepalive);
-    setTimeout(connect, 2000);
+    // Don't reconnect if page is hidden — visibilitychange will handle it
+    if (!document.hidden) {
+      setTimeout(connect, 1500);
+    }
   };
 
   ws.onerror = (e) => {
@@ -1050,6 +1092,35 @@ function connect() {
     setStatus('error');
   };
 }
+
+// ── Visibility-based reconnect ────────────────────────────────────────────────
+// When user returns to the tab/app after backgrounding, reconnect immediately
+// rather than waiting for the onclose handler to eventually fire.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    console.log('[ws] page visible — checking connection');
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      console.log('[ws] reconnecting on visibility restore');
+      connect();
+    } else if (ws.readyState === WebSocket.OPEN) {
+      // Connection looks alive — send a ping to verify it's actually still open
+      try {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      } catch(e) {
+        console.warn('[ws] ping failed on visibility restore, reconnecting');
+        connect();
+      }
+    }
+  }
+});
+
+// Also handle page focus as a fallback for browsers that don't fire visibilitychange
+window.addEventListener('focus', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.log('[ws] window focused, reconnecting');
+    connect();
+  }
+});
 
 function handleIncoming(msg) {
   if (msg.type === 'pong') return;

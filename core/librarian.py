@@ -222,66 +222,93 @@ def _merge_into(existing: dict, incoming: dict) -> dict:
 
 
 def merge_descriptors(name: str, new_data: dict, subfolder: str = "descriptors") -> None:
+    """
+    Merge descriptor data for a person, object, or location.
+    All types get deep merge — people are just as rich as locations.
+    Lists dedup. Dicts recurse. Scalars keep existing.
+    """
     rel_path = f"{subfolder}/{name.lower()}.json"
     existing = _read_file(rel_path) or {}
-    merged   = _merge_into(existing, new_data)
+    merged   = _deep_merge_descriptor(existing, new_data)
     _write_json(rel_path, merged)
     print(f"[librarian] merged descriptors for {name}")
 
+
+def _deep_merge_descriptor(existing: dict, incoming: dict) -> dict:
+    """
+    Deep merge for any descriptor file — people, locations, objects.
+    Lists get deduped. Dicts get recursively merged. Scalars keep existing unless missing.
+    This means rich nested data accumulates correctly over time:
+    - Jess's collar gets details added without overwriting what's known
+    - The lobby's tank gets octopus names without losing existing entries
+    - Relationships accumulate notes without duplicating
+    """
+    for key, value in incoming.items():
+        if key not in existing:
+            existing[key] = value
+        elif isinstance(existing[key], dict) and isinstance(value, dict):
+            existing[key] = _deep_merge_descriptor(existing[key], value)
+        elif isinstance(existing[key], list) and isinstance(value, list):
+            existing[key] = _safe_dedup(existing[key], value)
+        # Scalars — keep existing (Type, owner, floor_number, color etc don't change)
+    return existing
+
 # ── Behavior merge ────────────────────────────────────────────────────────────
 
-def _normalize_personality(personality: dict) -> dict:
-    if not personality:
-        return personality
-    max_count = max(v["count"] for v in personality.values())
-    if max_count == 0:
-        return personality
-    for trait in personality.values():
-        trait["weight"] = round(trait["count"] / max_count, 4)
-    return personality
+def get_known_traits(name: str, subfolder: str = "behaviors") -> dict:
+    """
+    Return the existing Personality structure for a person.
+    Passed into BehaviorCatcher so the LLM avoids duplicating known traits.
+    Returns {} if no file exists yet.
+    """
+    data = _read_file(f"{subfolder}/{name.lower()}.json") or {}
+    return data.get("Personality", {})
 
 
 def merge_behaviors(name: str, new_data: dict, subfolder: str = "behaviors") -> None:
     """
     Merge incoming behavior data for a person.
 
-    - Personality  → weighted store with tags, count per trait, normalize after every merge
-    - Episodes     → append action→reaction pairs with tags
-    - Scalar fields → keep existing
+    Personality structure: Personality[mood][category][trait] = {"count": N}
+    - mood:     emotional state when the trait was observed
+    - category: type of trait (relational, communication, emotional, etc.)
+    - trait:    specific descriptive observation
+
+    Episodes → append action→reaction pairs with tags
+    Scalar fields → keep existing
     """
     rel_path = f"{subfolder}/{name.lower()}.json"
     existing = _read_file(rel_path) or {}
 
     for key, value in new_data.items():
 
-        # ── Weighted personality traits ───────────────────────────────────────
+        # ── Nested personality traits: mood → category → trait ────────────────
         if key == "Personality" and isinstance(value, list):
             if "Personality" not in existing:
                 existing["Personality"] = {}
+
             for trait_entry in value:
-                # Accept both plain strings and {"trait": ..., "tags": [...]}
-                if isinstance(trait_entry, dict):
-                    trait = trait_entry.get("trait", "")
-                    tags  = trait_entry.get("tags", [])
-                else:
-                    trait = trait_entry
-                    tags  = []
+                if not isinstance(trait_entry, dict):
+                    continue
+
+                mood     = trait_entry.get("mood", "unknown").lower().strip()
+                category = trait_entry.get("category", "general").lower().strip()
+                trait    = trait_entry.get("trait", "").strip()
 
                 if not trait:
                     continue
 
-                if trait in existing["Personality"]:
-                    existing["Personality"][trait]["count"] += 1
-                    # Merge tags
-                    existing_tags = existing["Personality"][trait].get("tags", [])
-                    existing["Personality"][trait]["tags"] = _safe_dedup(existing_tags, tags)
+                # Navigate/create mood → category → trait
+                personality = existing["Personality"]
+                if mood not in personality:
+                    personality[mood] = {}
+                if category not in personality[mood]:
+                    personality[mood][category] = {}
+
+                if trait in personality[mood][category]:
+                    personality[mood][category][trait]["count"] += 1
                 else:
-                    existing["Personality"][trait] = {
-                        "count":  1,
-                        "weight": 1.0,
-                        "tags":   tags,
-                    }
-            existing["Personality"] = _normalize_personality(existing["Personality"])
+                    personality[mood][category][trait] = {"count": 1}
 
         # ── Action→reaction episode log ───────────────────────────────────────
         elif key == "Episodes" and isinstance(value, list):

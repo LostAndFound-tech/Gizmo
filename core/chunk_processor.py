@@ -24,10 +24,10 @@ from typing import Optional
 from core.log import log_event, log_error
 from core.Descriptor_catcher import descriptor_catcher as describer
 from core.BehaviorCatcher import behaviorcatcher as behavior
-from core.wellness import wellness_collector as wellness
-import core.librarian as librarian
+from core.wellness_router import wellness_router as wellness
 from core.scene_tracker import scene_tracker as scene
-
+from core.preference_catcher import preference_catcher
+import core.librarian as librarian
 
 
 # ── Subject discovery ─────────────────────────────────────────────────────────
@@ -228,7 +228,20 @@ class ChunkProcessor:
         print(f"[DEBUG] chunk: {chunk}")
 
         # ── 2. Descriptors + behaviors + wellness in parallel ─────────────────
-        descriptor_dict, behavior_results, wellness_signals, _ = await asyncio.gather(
+        # Read known traits and episodes before LLM calls — passed to BehaviorCatcher
+        # so it avoids duplicating traits and episodes already on file
+        known_traits   = {}
+        known_episodes = []
+        for subject_name in [k for k in self.registry.keys() if not k.startswith("_")]:
+            traits = librarian.get_known_traits(subject_name)
+            if traits:
+                known_traits[subject_name] = traits
+        # Pass episodes for the primary host
+        if self.host and self.host != "unknown":
+            host_data = librarian._read_file(f"behaviors/{self.host.lower()}.json") or {}
+            known_episodes = host_data.get("Episodes", [])
+
+        descriptor_dict, behavior_results, wellness_signals, _, pref_result = await asyncio.gather(
             describer.extract(
                 user_message=text,
                 thread=text,
@@ -241,13 +254,25 @@ class ChunkProcessor:
                 subject=self.host,
                 session_file=self.session_id,
                 pending_actions=self.action_buffer,
+                known_traits=known_traits,
+                known_episodes=known_episodes,
             ),
-            wellness.collect(
+            wellness.process(
                 chunk=chunk,
                 chunk_id=chunk_id,
                 registry=self.registry,
             ),
-            scene.update(chunk=chunk, chunk_id=chunk_id, name=self.host, session_id=self.session_id),
+            scene.update(
+                chunk=chunk,
+                chunk_id=chunk_id,
+                name=self.host,
+                session_id=self.session_id,
+            ),
+            preference_catcher.extract(
+                chunk=chunk,
+                session_id=self.session_id,
+                registry=self.registry,
+            ),
         )
 
         descriptor_dict  = descriptor_dict  or {}
@@ -272,14 +297,15 @@ class ChunkProcessor:
             self.action_buffer = _remove_matched(self.action_buffer, behavior_results)
 
         result = {
-            "chunk_id":       chunk_id,
-            "chunk":          chunk,
-            "partial":        partial,
-            "subjects":       [k for k in self.registry.keys() if not k.startswith("_")],
-            "descriptors":    descriptor_dict,
-            "behaviors":      behavior_results,
-            "wellness":       wellness_signals,
-            "pending_buffer": len(self.action_buffer),
+            "chunk_id":            chunk_id,
+            "chunk":               chunk,
+            "partial":             partial,
+            "subjects":            [k for k in self.registry.keys() if not k.startswith("_")],
+            "descriptors":         descriptor_dict,
+            "behaviors":           behavior_results,
+            "wellness":            wellness_signals,
+            "preferences":         pref_result or {},
+            "pending_buffer":      len(self.action_buffer),
         }
 
         self.results.append(result)

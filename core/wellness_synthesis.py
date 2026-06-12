@@ -246,39 +246,90 @@ def _safe_parse(raw: str, name: str) -> Optional[dict | list]:
 # ── File helpers ──────────────────────────────────────────────────────────────
 
 def _list_wellness_files() -> list[str]:
+    """
+    Find all names with wellness data.
+    New structure: wellness/{name}/ subdirectories
+    Also checks behaviors/ for names with behavioral data only.
+    Skips classifications/ and system/.
+    """
     names = set()
-    for subfolder in ("wellness", "behaviors"):
-        folder = librarian._full_path(subfolder)
-        if not os.path.isdir(folder):
-            continue
-        for fname in os.listdir(folder):
-            if fname.endswith(".json") and fname != "classifications":
+
+    # New structure — wellness/{name}/ directories
+    wellness_root = librarian._full_path("wellness")
+    if os.path.isdir(wellness_root):
+        for entry in os.listdir(wellness_root):
+            full = os.path.join(wellness_root, entry)
+            if os.path.isdir(full) and entry not in ("classifications", "system"):
+                names.add(entry)
+
+    # Legacy flat files — wellness/{name}.json (old pipeline)
+    if os.path.isdir(wellness_root):
+        for fname in os.listdir(wellness_root):
+            if fname.endswith(".json") and fname not in ("classifications",):
                 names.add(fname[:-5])
+
+    # Behaviors — names with behavioral data but maybe no wellness yet
+    behaviors_root = librarian._full_path("behaviors")
+    if os.path.isdir(behaviors_root):
+        for fname in os.listdir(behaviors_root):
+            if fname.endswith(".json"):
+                names.add(fname[:-5])
+
+    # Strip known non-person names
+    names.discard("gizmo")
+    names.discard("system")
+
     print(f"[WellnessSynthesis] found names: {names}")
     return list(names)
 
 
-def _read_wellness(name: str) -> Optional[dict]:
-    return librarian._read_file(f"wellness/{name}.json")
+def _read_wellness(name: str) -> dict:
+    """
+    Read all wellness signals for a person.
+    New structure: wellness/{name}/{domain}.json — merged into one dict keyed by domain.
+    Falls back to legacy flat file wellness/{name}.json if no directory exists.
+    Returns {} if nothing found.
+    """
+    # New structure — per-domain files in wellness/{name}/
+    person_dir = librarian._full_path(f"wellness/{name.lower()}")
+    if os.path.isdir(person_dir):
+        merged = {}
+        for fname in os.listdir(person_dir):
+            if not fname.endswith(".json"):
+                continue
+            domain = fname[:-5]
+            data   = librarian._read_file(f"wellness/{name.lower()}/{fname}")
+            if data and isinstance(data.get("signals"), list):
+                merged[domain] = data["signals"]
+        if merged:
+            return merged
+
+    # Legacy fallback — flat wellness/{name}.json
+    legacy = librarian._read_file(f"wellness/{name}.json")
+    if legacy:
+        return legacy
+
+    return {}
 
 
 def _read_behaviors(name: str) -> Optional[dict]:
-    return librarian._read_file(f"behaviors/{name}.json")
+    return librarian._read_file(f"behaviors/{name.lower()}.json")
 
 
 def _read_prior(name: str) -> Optional[dict]:
-    return librarian._read_file(f"wellness/classifications/{name}.json")
+    return librarian._read_file(f"wellness/classifications/{name.lower()}.json")
 
 
 def _write_classification(name: str, classification: dict) -> None:
-    existing = librarian._read_file(f"wellness/classifications/{name}.json")
+    n = name.lower()
+    existing = librarian._read_file(f"wellness/classifications/{n}.json")
     if existing:
         ts = existing.get("last_synthesized", datetime.now(timezone.utc).isoformat())
         ts_clean = ts.replace(":", "-").replace(".", "-")[:19]
-        librarian._write_json(f"wellness/classifications/archive/{name}_{ts_clean}.json", existing)
-        print(f"[WellnessSynthesis] archived previous classification for {name}")
-    librarian._write_json(f"wellness/classifications/{name}.json", classification)
-    print(f"[WellnessSynthesis] classification written for {name}")
+        librarian._write_json(f"wellness/classifications/archive/{n}_{ts_clean}.json", existing)
+        print(f"[WellnessSynthesis] archived previous classification for {n}")
+    librarian._write_json(f"wellness/classifications/{n}.json", classification)
+    print(f"[WellnessSynthesis] classification written for {n}")
 
 
 # ── Group pass ────────────────────────────────────────────────────────────────
@@ -341,7 +392,11 @@ class WellnessSynthesis:
 
         signals   = _read_wellness(name) or {}
         behaviors = _read_behaviors(name) or {}
-        total     = sum(len(v) for v in signals.values() if isinstance(v, list))
+        # Count all signals across all domains
+        total = sum(
+            len(v) for v in signals.values()
+            if isinstance(v, list)
+        )
 
         print(f"[WellnessSynthesis] {name}: {total} wellness signals, behaviors: {bool(behaviors)}")
 

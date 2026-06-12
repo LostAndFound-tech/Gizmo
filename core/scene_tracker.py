@@ -3,6 +3,7 @@ core/scene_tracker.py
 
 Always-on scene state manager. Runs parallel to behavior/wellness on every chunk.
 Tracks who is present, where they are, what they're doing, and what's been established.
+Tracks goals and the situations that arise around them, with scene snapshots.
 Writes back new discoveries to location descriptor files.
 Handles reconnect by offering a natural scene re-entry hook.
 
@@ -27,12 +28,36 @@ Scene file schema:
   },
   "established_facts": ["Jess can't be hurt here"],
   "open_threads": ["Jess was trying to name the octopi, hadn't settled on anything yet"],
+  "goals": [
+    {
+      "id": "goal_001",
+      "goal": "get tacos",
+      "status": "open",
+      "opened_at": "2026-06-11T22:14:00Z",
+      "resolved_at": null,
+      "situations": [
+        {
+          "id": "sit_001",
+          "description": "stranger won't stop talking to Jess at the counter",
+          "status": "open",
+          "opened_at": "2026-06-11T22:17:00Z",
+          "resolved_at": null,
+          "scene_snapshot": {
+            "location_name": "taco stand",
+            "characters": {},
+            "what_is_happening": "Jess is trying to order, stranger won't take a hint"
+          }
+        }
+      ]
+    }
+  ],
   "session_ref": "sessions/jess_20260611_2241.json"
 }
 """
 
 import json
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -73,7 +98,27 @@ Omit fields with no updates. Return {} if nothing changed.
         }
       }
     }
-  }
+  },
+  "goals": [
+    {
+      "id": "goal_001",
+      "goal": "get tacos",
+      "status": "open | resolved | abandoned",
+      "new_situations": [
+        {
+          "description": "stranger won't stop talking to Jess at the counter",
+          "snapshot": true
+        }
+      ],
+      "resolved_situations": ["sit_001"]
+    }
+  ],
+  "new_goals": [
+    {
+      "goal": "find somewhere to sit",
+      "status": "open"
+    }
+  ]
 }
 
 Rules:
@@ -88,6 +133,17 @@ Rules:
 - Characters present: only include characters actually mentioned or active in this chunk
 - Do not invent. Only record what the text actually establishes.
 - Gizmo is a character in scenes — include him if his position or state is established
+
+GOALS:
+- new_goals: goals that emerged in this chunk that don't already exist
+- goals: updates to EXISTING goals only — use their existing id
+  - status: update to "resolved" or "abandoned" if the goal was completed or dropped
+  - new_situations: new complications or obstacles that arose around this goal in this chunk
+    - set snapshot: true to capture the current scene state at this moment
+  - resolved_situations: list situation IDs that were resolved in this chunk
+- A goal is resolved when what they set out to do is accomplished
+- A situation is resolved when that specific obstacle is overcome
+- Only include goals and situations where something actually changed
 """.strip()
 
 _RECONNECT_SYSTEM = """
@@ -96,6 +152,7 @@ You have an active scene that was interrupted. Your job is to offer a natural re
 
 Rules:
 - Use one specific detail from the scene to make it feel like real memory, not a system resuming
+- If there are open goals, reference one — "did you ever get those tacos?"
 - Keep it light and casual — you're checking in, not announcing a system state
 - Give them an easy out if they don't want to continue
 - If they say yes, you'll pick up from last_message
@@ -168,8 +225,29 @@ def _archive_scene(name: str, scene: dict) -> None:
 
 
 def _read_location(location_ref: str) -> Optional[dict]:
-    """Read a location descriptor file."""
     return librarian._read_file(location_ref)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _make_snapshot(scene: dict) -> dict:
+    """Capture a lightweight snapshot of the current scene state."""
+    return {
+        "location_name":    scene.get("location_name"),
+        "what_is_happening": scene.get("what_is_happening"),
+        "characters":       {
+            k: {
+                "position":     v.get("position"),
+                "action_state": v.get("action_state"),
+                "ephemeral":    v.get("ephemeral", []),
+            }
+            for k, v in scene.get("characters", {}).items()
+        },
+        "established_facts": scene.get("established_facts", []),
+        "snapshot_at":       _now(),
+    }
 
 
 # ── Deep merge for location discoveries ──────────────────────────────────────
@@ -188,26 +266,18 @@ def _deep_merge(base: dict, updates: dict) -> dict:
 
 
 def _apply_location_discovery(location_ref: str, path: str, updates: dict) -> None:
-    """
-    Write new discoveries back into the location descriptor file.
-    path is dot-notation e.g. "Floors.lobby.tank"
-    """
     try:
         location = librarian._read_file(location_ref) or {}
         keys = path.split(".")
-
-        # Navigate to the target node, creating dicts as needed
         node = location
         for key in keys[:-1]:
             if key not in node or not isinstance(node[key], dict):
                 node[key] = {}
             node = node[key]
-
         last_key = keys[-1]
         if last_key not in node or not isinstance(node[last_key], dict):
             node[last_key] = {}
         node[last_key] = _deep_merge(node[last_key], updates)
-
         librarian._write_json(location_ref, location)
         print(f"[SceneTracker] wrote discovery to {location_ref} at {path}")
     except Exception as e:
@@ -217,20 +287,16 @@ def _apply_location_discovery(location_ref: str, path: str, updates: dict) -> No
 # ── Scene history on location file ───────────────────────────────────────────
 
 def _record_scene_on_location(location_ref: str, name: str, session_ref: str, summary: str) -> None:
-    """Append a scene history entry to the location descriptor file."""
     try:
         location = librarian._read_file(location_ref) or {}
         if "scene_history" not in location:
             location["scene_history"] = []
-
         entry = {
-            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "headmate": name,
-            "summary": summary,
+            "date":         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "headmate":     name,
+            "summary":      summary,
             "conversation": session_ref,
         }
-
-        # Avoid duplicate entries for the same session
         existing_refs = [e.get("conversation") for e in location["scene_history"]]
         if session_ref not in existing_refs:
             location["scene_history"].append(entry)
@@ -240,14 +306,89 @@ def _record_scene_on_location(location_ref: str, name: str, session_ref: str, su
         log_error("SceneTracker", "scene history write failed", exc=e)
 
 
+# ── Goal helpers ──────────────────────────────────────────────────────────────
+
+def _merge_goals(scene: dict, updates: dict) -> dict:
+    """
+    Merge goal updates and new goals into the scene.
+    Handles new situations (with optional snapshots), resolved situations,
+    and goal status changes.
+    """
+    now = _now()
+    goals = scene.setdefault("goals", [])
+
+    # Index existing goals by id for fast lookup
+    goals_by_id = {g["id"]: g for g in goals}
+
+    # ── Updates to existing goals ─────────────────────────────────────────────
+    for goal_update in updates.get("goals", []):
+        gid = goal_update.get("id")
+        if not gid or gid not in goals_by_id:
+            continue
+
+        goal = goals_by_id[gid]
+
+        # Status change
+        new_status = goal_update.get("status")
+        if new_status and new_status != goal.get("status"):
+            goal["status"] = new_status
+            if new_status in ("resolved", "abandoned"):
+                goal["resolved_at"] = now
+
+        # New situations
+        for sit in goal_update.get("new_situations", []):
+            situation = {
+                "id":          f"sit_{uuid.uuid4().hex[:8]}",
+                "description": sit.get("description", ""),
+                "status":      "open",
+                "opened_at":   now,
+                "resolved_at": None,
+            }
+            if sit.get("snapshot"):
+                situation["scene_snapshot"] = _make_snapshot(scene)
+            goal.setdefault("situations", []).append(situation)
+            print(f"[SceneTracker] new situation under goal {gid}: {situation['description']}")
+
+        # Resolved situations
+        resolved_ids = set(goal_update.get("resolved_situations", []))
+        for sit in goal.get("situations", []):
+            if sit["id"] in resolved_ids and sit["status"] == "open":
+                sit["status"]      = "resolved"
+                sit["resolved_at"] = now
+                print(f"[SceneTracker] situation {sit['id']} resolved")
+
+    # ── New goals ─────────────────────────────────────────────────────────────
+    for new_goal in updates.get("new_goals", []):
+        goal_text = new_goal.get("goal", "").strip()
+        if not goal_text:
+            continue
+        # Deduplicate — don't add if a very similar goal already exists
+        existing_texts = {g["goal"].lower() for g in goals}
+        if goal_text.lower() in existing_texts:
+            continue
+        goal = {
+            "id":          f"goal_{uuid.uuid4().hex[:8]}",
+            "goal":        goal_text,
+            "status":      new_goal.get("status", "open"),
+            "opened_at":   now,
+            "resolved_at": None,
+            "situations":  [],
+        }
+        goals.append(goal)
+        print(f"[SceneTracker] new goal: {goal_text}")
+
+    scene["goals"] = goals
+    return scene
+
+
 # ── Merge updates into scene ──────────────────────────────────────────────────
 
 def _merge_scene_update(scene: dict, updates: dict) -> dict:
     """Merge LLM-returned updates into the existing scene state."""
 
     for key, value in updates.items():
-        if key == "location_discoveries":
-            # Handle separately — writes to location file, not scene file
+        if key in ("location_discoveries", "goals", "new_goals"):
+            # Handled separately
             continue
 
         elif key == "characters" and isinstance(value, dict):
@@ -266,7 +407,6 @@ def _merge_scene_update(scene: dict, updates: dict) -> dict:
             scene["established_facts"] = existing
 
         elif key == "open_threads" and isinstance(value, list):
-            # Replace open threads — they're current state, not accumulation
             scene["open_threads"] = value
 
         else:
@@ -295,10 +435,11 @@ class SceneTracker:
 
         try:
             scene = _read_scene(name) or {
-                "status": "active",
-                "characters": {},
+                "status":           "active",
+                "characters":       {},
                 "established_facts": [],
-                "open_threads": [],
+                "open_threads":     [],
+                "goals":            [],
             }
 
             prompt = (
@@ -315,23 +456,26 @@ class SceneTracker:
             if not updates:
                 return scene
 
-            # Handle location discoveries before merging
+            # Handle location discoveries
             discoveries = updates.pop("location_discoveries", None)
             if discoveries and scene.get("location"):
-                path    = discoveries.get("path", "")
+                path         = discoveries.get("path", "")
                 updates_data = discoveries.get("updates", {})
                 if path and updates_data:
                     _apply_location_discovery(scene["location"], path, updates_data)
 
-            # Merge updates into scene
+            # Merge goals (before general merge so snapshot uses pre-update scene state)
+            scene = _merge_goals(scene, updates)
+
+            # Merge everything else
             scene = _merge_scene_update(scene, updates)
             scene["status"]       = "active"
-            scene["last_updated"] = datetime.now(timezone.utc).isoformat()
+            scene["last_updated"] = _now()
             scene["session_ref"]  = f"sessions/{name.lower()}_{session_id}.json"
 
             _write_scene(name, scene)
 
-            # Record on location file if we have one
+            # Record on location file
             if scene.get("location") and scene.get("what_is_happening"):
                 _record_scene_on_location(
                     scene["location"],
@@ -340,10 +484,12 @@ class SceneTracker:
                     scene["what_is_happening"],
                 )
 
+            open_goals = [g for g in scene.get("goals", []) if g.get("status") == "open"]
             log_event("SceneTracker", "UPDATED",
                 name=name,
                 chunk_id=chunk_id,
                 threads=len(scene.get("open_threads", [])),
+                open_goals=len(open_goals),
             )
 
             return scene
@@ -363,19 +509,13 @@ class SceneTracker:
             scene = _read_scene(name)
             if not scene or scene.get("status") != "active":
                 return None
-
             message = await _call_reconnect(scene, name)
             return message
-
         except Exception as e:
             log_error("SceneTracker", "reconnect check failed", exc=e)
             return None
 
     def confirm_resume(self, name: str) -> Optional[dict]:
-        """
-        Called when headmate confirms they want to resume.
-        Returns the full scene state for injection into responder context.
-        """
         scene = _read_scene(name)
         if scene and scene.get("status") == "active":
             print(f"[SceneTracker] resuming scene for {name}")
@@ -383,10 +523,6 @@ class SceneTracker:
         return None
 
     def pause_scene(self, name: str) -> None:
-        """
-        Called when headmate declines to resume, or explicitly ends a scene.
-        Keeps the scene on disk but marks it paused.
-        """
         scene = _read_scene(name)
         if scene:
             scene["status"] = "paused"
@@ -394,9 +530,6 @@ class SceneTracker:
             print(f"[SceneTracker] scene paused for {name}")
 
     def end_scene(self, name: str) -> None:
-        """
-        Archive and clear the active scene for a headmate.
-        """
         scene = _read_scene(name)
         if scene:
             _archive_scene(name, scene)
@@ -406,7 +539,7 @@ class SceneTracker:
     def get_scene_brief(self, name: str) -> Optional[str]:
         """
         Return a compact scene brief for injection into the responder context.
-        Fetches location descriptor if available.
+        Includes open goals and their active situations.
         """
         scene = _read_scene(name)
         if not scene or scene.get("status") not in ("active",):
@@ -444,6 +577,17 @@ class SceneTracker:
 
         if scene.get("open_threads"):
             parts.append("OPEN THREADS: " + "; ".join(scene["open_threads"]))
+
+        # Goals — open ones only, with their active situations
+        open_goals = [g for g in scene.get("goals", []) if g.get("status") == "open"]
+        if open_goals:
+            goal_lines = []
+            for goal in open_goals:
+                goal_lines.append(f"  → {goal['goal']}")
+                active_sits = [s for s in goal.get("situations", []) if s.get("status") == "open"]
+                for sit in active_sits:
+                    goal_lines.append(f"      ⚡ {sit['description']}")
+            parts.append("ACTIVE GOALS:\n" + "\n".join(goal_lines))
 
         if scene.get("last_message"):
             parts.append(f"LAST BEAT: {scene['last_message']}")

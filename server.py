@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import time
 from typing import Optional
@@ -23,12 +24,84 @@ THINKING_DELAY  = 0.3
 CHUNK_SIZE      = 8
 MAX_MESSAGE_LEN = 8000
 
+# ── Session persistence ───────────────────────────────────────────────────────
+
+_DATA_DIR = os.getenv("DATA_DIR", "./data")
+_SESSIONS_DIR = os.path.join(_DATA_DIR, "sessions")
+
+
+def _sessions_dir() -> str:
+    os.makedirs(_SESSIONS_DIR, exist_ok=True)
+    return _SESSIONS_DIR
+
+
+def _session_path(session_id: str) -> str:
+    return os.path.join(_sessions_dir(), f"{session_id}.json")
+
+
+def _load_session(session_id: str) -> Optional[dict]:
+    path = _session_path(session_id)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"[Sessions] failed to load {session_id}: {e}")
+        return None
+
+
+def _save_session(session_id: str, data: dict) -> None:
+    try:
+        path = _session_path(session_id)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[Sessions] failed to save {session_id}: {e}")
+
+
+def _list_sessions() -> list[dict]:
+    """Return session metadata sorted by last_active descending."""
+    try:
+        d = _sessions_dir()
+        results = []
+        for fname in os.listdir(d):
+            if not fname.endswith(".json"):
+                continue
+            path = os.path.join(d, fname)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                results.append({
+                    "id":          data.get("session_id", fname[:-5]),
+                    "opened_at":   data.get("opened_at", 0),
+                    "last_active": data.get("last_active", 0),
+                    "hosts":       data.get("hosts", []),
+                    "tags":        data.get("tags", []),
+                    "topics":      data.get("topics", []),
+                    "mood":        data.get("mood"),
+                    "summary":     data.get("summary"),
+                    "notable":     data.get("notable", []),
+                    "emotion_arc": data.get("emotion_arc", []),
+                })
+            except Exception:
+                continue
+        results.sort(key=lambda x: x["last_active"], reverse=True)
+        return results
+    except Exception as e:
+        print(f"[Sessions] list failed: {e}")
+        return []
+
 _SPEECH_RE   = re.compile(r'^\[?([A-Za-z][A-Za-z0-9_\- ]{0,30})\]?\s*:\s*(.+)', re.DOTALL)
 _ACTION_RE   = re.compile(r'^\*(.+)\*$', re.DOTALL)
 _DIRECTED_RE = re.compile(r'\b(to|at|@)\s+([A-Za-z][A-Za-z0-9_\- ]{0,20})\b', re.IGNORECASE)
 
 _seen_messages:   dict[str, float]       = {}
 _session_history: dict[str, list[dict]] = {}
+
+# Tracks which sessions are waiting on a scene resume answer
+# session_id -> headmate name
+_pending_scene_resume: dict[str, str] = {}
 
 
 def _is_duplicate(session_id: str, content: str) -> bool:
@@ -119,6 +192,18 @@ def _time_of_day(hour: int) -> str:
     return "night"
 
 
+def _is_yes(text: str) -> bool:
+    """Loose yes-detection for scene resume answers."""
+    t = text.strip().lower()
+    return any(w in t for w in ("yes", "yeah", "yep", "sure", "ok", "okay", "yea", "let's", "lets", "continue", "pick up", "resume"))
+
+
+def _is_no(text: str) -> bool:
+    """Loose no-detection for scene resume answers."""
+    t = text.strip().lower()
+    return any(w in t for w in ("no", "nah", "nope", "not", "skip", "later", "don't", "dont", "pass", "forget"))
+
+
 async def run_single_pipeline(message, session_id, headmate, context, history) -> str:
     from core.agent_simple import agent_simple as agent
     try:
@@ -159,7 +244,7 @@ class GizmoServer:
             return web.Response(text='{"status":"ok"}', content_type="application/json")
 
         async def handle_ws(request):
-            ws = web.WebSocketResponse()
+            ws = web.WebSocketResponse(heartbeat=15.0)
             await ws.prepare(request)
             session_id = f"sess_{id(ws):016x}"
             self._connections[session_id] = ws
@@ -174,12 +259,36 @@ class GizmoServer:
             finally:
                 self._connections.pop(session_id, None)
                 _session_history.pop(session_id, None)
+                _pending_scene_resume.pop(session_id, None)
                 log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
             return ws
 
-        app.router.add_get("/",       handle_index)
-        app.router.add_get("/health", handle_health)
-        app.router.add_get("/ws",     handle_ws)
+        async def handle_sessions(request):
+            sessions = _list_sessions()
+            return web.Response(
+                text=json.dumps({"sessions": sessions}),
+                content_type="application/json",
+            )
+
+        async def handle_session_detail(request):
+            sid  = request.match_info["session_id"]
+            data = _load_session(sid)
+            if not data:
+                return web.Response(
+                    status=404,
+                    text=json.dumps({"error": "not found"}),
+                    content_type="application/json",
+                )
+            return web.Response(
+                text=json.dumps(data),
+                content_type="application/json",
+            )
+
+        app.router.add_get("/",                       handle_index)
+        app.router.add_get("/health",                 handle_health)
+        app.router.add_get("/sessions",               handle_sessions)
+        app.router.add_get("/sessions/{session_id}",  handle_session_detail)
+        app.router.add_get("/ws",                     handle_ws)
 
         log_event("GizmoServer", "STARTING", host=host, port=port)
         runner = web.AppRunner(app)
@@ -202,11 +311,82 @@ class GizmoServer:
         if msg_type == "ping":
             await self._send(websocket, {"type": "pong"})
             return
+
         if msg_type == "message":
             await self._handle_chat_message(websocket, sid, msg)
             return
 
+        if msg_type == "check_scene":
+            await self._handle_check_scene(websocket, sid, msg)
+            return
+
+        if msg_type == "scene_resume_answer":
+            await self._handle_scene_resume_answer(websocket, sid, msg)
+            return
+
         log_event("GizmoServer", "MSG_TYPE_IGNORED", type=msg_type, session=sid[:8])
+
+    async def _handle_check_scene(self, websocket, session_id: str, msg: dict) -> None:
+        """
+        Client connects (or reconnects) and checks whether there's an active scene.
+        If yes, generate Gizmo's re-entry offer and send it back.
+        """
+        from core.scene_tracker import scene_tracker
+
+        headmate = msg.get("headmate", "").strip().lower()
+        if not headmate:
+            await self._send(websocket, {"type": "scene_check", "has_scene": False})
+            return
+
+        try:
+            reconnect_msg = await scene_tracker.check_reconnect(headmate)
+            if reconnect_msg:
+                # Park the pending resume so the next message from this session
+                # is interpreted as a yes/no answer
+                _pending_scene_resume[session_id] = headmate
+                await self._send(websocket, {
+                    "type":              "scene_check",
+                    "has_scene":         True,
+                    "reconnect_message": reconnect_msg,
+                })
+                log_event("GizmoServer", "SCENE_CHECK_HIT",
+                    session=session_id[:8], headmate=headmate)
+            else:
+                await self._send(websocket, {"type": "scene_check", "has_scene": False})
+
+        except Exception as e:
+            log_error("GizmoServer", "scene check failed", exc=e)
+            await self._send(websocket, {"type": "scene_check", "has_scene": False})
+
+    async def _handle_scene_resume_answer(self, websocket, session_id: str, msg: dict) -> None:
+        """
+        User answered Gizmo's re-entry offer. Route to confirm or pause.
+        Then fall through to normal chat handling with scene context loaded.
+        """
+        from core.scene_tracker import scene_tracker
+
+        headmate = _pending_scene_resume.pop(session_id, None)
+        if not headmate:
+            # No pending resume — treat as a normal message
+            await self._handle_chat_message(websocket, session_id, msg)
+            return
+
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = assemble_scene_text(content)
+
+        if _is_yes(content):
+            scene_tracker.confirm_resume(headmate)
+            log_event("GizmoServer", "SCENE_RESUMED", session=session_id[:8], headmate=headmate)
+        elif _is_no(content):
+            scene_tracker.pause_scene(headmate)
+            log_event("GizmoServer", "SCENE_PAUSED", session=session_id[:8], headmate=headmate)
+        else:
+            # Ambiguous — resume the scene, let Gizmo handle it naturally
+            scene_tracker.confirm_resume(headmate)
+
+        # Now handle as a normal chat message so Gizmo actually responds
+        await self._handle_chat_message(websocket, session_id, msg)
 
     async def _handle_chat_message(self, websocket, session_id: str, msg: dict) -> None:
         content  = msg.get("content", "")
@@ -261,6 +441,14 @@ class GizmoServer:
         await asyncio.sleep(THINKING_DELAY)
         await self._send(websocket, {"type": "thinking"})
 
+        # Load from disk if not in memory (e.g. after server restart)
+        if session_id not in _session_history:
+            saved = _load_session(session_id)
+            if saved:
+                _session_history[session_id] = [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in saved.get("messages", [])
+                ]
         history = _session_history.get(session_id, [])
 
         try:
@@ -277,9 +465,60 @@ class GizmoServer:
             await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
             return
 
+        now = time.time()
         history.append({"role": "user",      "content": raw_text})
         history.append({"role": "assistant", "content": response})
         _session_history[session_id] = history
+
+        # ── Persist session to disk ───────────────────────────────────────────
+        saved = _load_session(session_id) or {
+            "session_id": session_id,
+            "opened_at":  now,
+            "hosts":      [],
+            "tags":       [],
+            "messages":   [],
+            "mood":       None,
+            "summary":    None,
+            "topics":     [],
+            "notable":    [],
+            "emotion_arc": [],
+        }
+        saved["last_active"] = now
+        # Merge hosts
+        if headmate and headmate not in saved["hosts"]:
+            saved["hosts"].append(headmate)
+        for h in context.get("fronters", []):
+            if h and h not in saved["hosts"]:
+                saved["hosts"].append(h)
+        # Append messages with speaker and timestamp
+        saved["messages"].append({
+            "role":    "user",
+            "speaker": headmate or "unknown",
+            "content": raw_text,
+            "ts":      now,
+        })
+        saved["messages"].append({
+            "role":    "assistant",
+            "speaker": "gizmo",
+            "content": response,
+            "ts":      now,
+        })
+        _save_session(session_id, saved)
+
+        # ── Scene state update ────────────────────────────────────────────────
+        # Run after response so the full exchange (user + Gizmo) informs the scene
+        if headmate:
+            try:
+                from core.scene_tracker import scene_tracker
+                exchange_lines = raw_text.splitlines() + [f"Gizmo: {response}"]
+                asyncio.create_task(scene_tracker.update(
+                    chunk=exchange_lines,
+                    chunk_id=session_id,
+                    name=headmate,
+                    session_id=session_id,
+                ))
+            except Exception as e:
+                log_error("GizmoServer", "scene update failed", exc=e)
 
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
