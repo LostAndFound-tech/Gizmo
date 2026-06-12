@@ -551,8 +551,8 @@ class GizmoServer:
                 log_error("GizmoServer", "scene update failed", exc=e)
 
         # Use the current live socket keyed by CLIENT session ID
-        # so if mobile reconnected mid-generation, response goes to the new socket
-        live_ws = _live_sockets.get(sid, _live_sockets.get(session_id, websocket))
+        # session_id here is already the client-provided sid (passed from _handle_message)
+        live_ws = _live_sockets.get(session_id, websocket)
 
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(live_ws, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
