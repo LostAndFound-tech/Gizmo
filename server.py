@@ -103,6 +103,10 @@ _session_history: dict[str, list[dict]] = {}
 # session_id -> headmate name
 _pending_scene_resume: dict[str, str] = {}
 
+# Live WebSocket registry — session_id -> current active websocket
+# Updated on every new connection, used to deliver responses to the right socket
+_live_sockets: dict[str, object] = {}
+
 
 def _is_duplicate(session_id: str, content: str) -> bool:
     key = hashlib.md5(f"{session_id}:{content}".encode()).hexdigest()
@@ -249,6 +253,8 @@ class GizmoServer:
             session_id = f"sess_{id(ws):016x}"
             self._connections[session_id] = ws
             log_event("GizmoServer", "CONNECTION_OPENED", session=session_id[:8])
+            # Register this socket — may replace a stale one from a previous connection
+            _live_sockets[session_id] = ws
             try:
                 async for msg in ws:
                     from aiohttp import WSMsgType
@@ -260,6 +266,7 @@ class GizmoServer:
                 self._connections.pop(session_id, None)
                 _session_history.pop(session_id, None)
                 _pending_scene_resume.pop(session_id, None)
+                _live_sockets.pop(session_id, None)
                 # Clean up per-session chunk processor
                 try:
                     from core.agent_simple import agent_simple
@@ -313,6 +320,11 @@ class GizmoServer:
 
         msg_type = msg.get("type", "message")
         sid      = msg.get("session_id", session_id)
+
+        # Register this websocket against the client session ID
+        # so responses can find the current live socket even after reconnect
+        if sid and sid != session_id:
+            _live_sockets[sid] = websocket
 
         if msg_type == "ping":
             await self._send(websocket, {"type": "pong"})
@@ -538,8 +550,12 @@ class GizmoServer:
             except Exception as e:
                 log_error("GizmoServer", "scene update failed", exc=e)
 
+        # Use the current live socket keyed by CLIENT session ID
+        # so if mobile reconnected mid-generation, response goes to the new socket
+        live_ws = _live_sockets.get(sid, _live_sockets.get(session_id, websocket))
+
         for i in range(0, len(response), CHUNK_SIZE):
-            await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
+            await self._send(live_ws, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)
 
         # Clear pending_response — chunks delivered successfully
@@ -551,7 +567,7 @@ class GizmoServer:
         except Exception:
             pass
 
-        await self._send(websocket, {"type": "done", "session_id": session_id, "current_host": headmate or ""})
+        await self._send(live_ws, {"type": "done", "session_id": session_id, "current_host": headmate or ""})
 
         log_event("GizmoServer", "RESPONSE_SENT",
             session=session_id[:8], words=len(response.split()), multi=multi)
