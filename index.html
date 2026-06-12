@@ -1096,9 +1096,9 @@ function connect() {
           showThinking();
         }
       }, 500);
-    } else if (primaryHost && !_overAnHour) {
-      // No pending client message — check if Gizmo had an unanswered message
-      // in the previous session that never made it back
+    } else if (primaryHost && _downtime > 0 && !_overAnHour) {
+      // Only check unsent on genuine reconnects (_downtime > 0)
+      // not on the very first connection of a session
       ws.send(JSON.stringify({
         type:       'check_unsent',
         session_id: SESSION_ID,
