@@ -270,10 +270,9 @@ class GizmoServer:
                 self._connections.pop(session_id, None)
                 _session_history.pop(session_id, None)
                 _pending_scene_resume.pop(session_id, None)
-                # Only remove from live_sockets if this socket is still current
-                client_sid = _server_to_client_sid.pop(session_id, None)
-                if client_sid and _live_sockets.get(client_sid) is ws:
-                    _live_sockets.pop(client_sid, None)
+                # Don't remove from _live_sockets on disconnect —
+                # the next reconnect will overwrite it with the new socket
+                _server_to_client_sid.pop(session_id, None)
                 # Clean up per-session chunk processor
                 try:
                     from core.agent_simple import agent_simple
