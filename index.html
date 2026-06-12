@@ -1021,6 +1021,7 @@ let voiceBoxCount     = 0;
 let pendingHostIdentification = false;
 let pendingMessage    = null;   // queued if connection drops mid-send
 let pendingSceneResume = false; // waiting for user's yes/no on scene re-entry
+let _disconnectedAt    = null;    // timestamp of last disconnect
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {
@@ -1059,14 +1060,29 @@ function connect() {
       hideThinking();
     }
 
-    // Check for an active scene on reconnect (only if we already know who's here)
-    if (primaryHost) {
+    const _downtime = _disconnectedAt ? Date.now() - _disconnectedAt : 0;
+    _disconnectedAt = null;
+    const _overAnHour = _downtime > 3600000;
+
+    if (_overAnHour) {
+      // Been gone too long — drop stale queued message, start fresh
+      if (pendingMessage) {
+        console.log('[ws] dropping stale queued message — over an hour offline');
+        pendingMessage = null;
+        thinking = false;
+        setSendEnabled(true);
+        hideThinking();
+      }
+      // No scene resume offer for stale sessions
+    } else if (primaryHost && _downtime > 60000 && !pendingMessage) {
+      // Within the hour, no pending message — offer scene resume if active
       ws.send(JSON.stringify({
         type:       'check_scene',
         session_id: SESSION_ID,
         headmate:   primaryHost,
       }));
     }
+    // If pendingMessage exists and within the hour, it drains below naturally
 
     if (pendingMessage) {
       console.log('[ws] draining queued message');
@@ -1087,6 +1103,7 @@ function connect() {
     thinking  = false;
     setSendEnabled(true);
     setStatus('');
+    _disconnectedAt = Date.now();
     console.log('[ws] closed, code:', e.code);
     if (window._keepalive) clearInterval(window._keepalive);
     // Don't reconnect if page is hidden — visibilitychange will handle it
@@ -1116,18 +1133,15 @@ document.addEventListener('visibilitychange', () => {
       hideThinking();
     }
 
-    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-      console.log('[ws] reconnecting on visibility restore');
-      connect();
-    } else if (ws.readyState === WebSocket.OPEN) {
-      // Connection looks alive — send a ping to verify it's actually still open
-      try {
-        ws.send(JSON.stringify({ type: 'ping' }));
-      } catch(e) {
-        console.warn('[ws] ping failed on visibility restore, reconnecting');
-        connect();
-      }
+    // Force fresh connection — don't trust stale socket state after backgrounding
+    if (ws) {
+      ws.onclose = null;
+      ws.onerror = null;
+      try { ws.close(); } catch(e) {}
+      ws = null;
     }
+    connected = false;
+    connect();
   }
 });
 

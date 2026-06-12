@@ -499,16 +499,37 @@ class SceneTracker:
             print(f"[SceneTracker] update failed: {type(e).__name__}: {e}")
             return None
 
-    async def check_reconnect(self, name: str) -> Optional[str]:
+    async def check_reconnect(self, name: str, max_age_hours: float = 1.0) -> Optional[str]:
         """
-        Called on session start. If an active scene exists, returns a
-        natural re-entry message Gizmo can open with.
-        Returns None if no active scene.
+        Called on session start. If an active scene exists AND was recently
+        updated, returns a natural re-entry message Gizmo can open with.
+        Returns None if no active scene or scene is too stale to resume.
+        max_age_hours: how old a scene can be before we stop offering resume (default 1 hour).
         """
         try:
             scene = _read_scene(name)
             if not scene or scene.get("status") != "active":
                 return None
+
+            # Check recency — don't offer resume on ancient scenes
+            last_updated = scene.get("last_updated")
+            if last_updated:
+                try:
+                    from datetime import datetime, timezone
+                    updated_at = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+                    age_hours  = (datetime.now(timezone.utc) - updated_at).total_seconds() / 3600
+                    if age_hours > max_age_hours:
+                        print(f"[SceneTracker] scene for {name} is {age_hours:.1f}h old — skipping resume offer")
+                        return None
+                except Exception:
+                    pass
+
+            # Also require at least one open thread or goal to make the offer meaningful
+            has_threads = bool(scene.get("open_threads"))
+            has_goals   = any(g.get("status") == "open" for g in scene.get("goals", []))
+            if not has_threads and not has_goals:
+                return None
+
             message = await _call_reconnect(scene, name)
             return message
         except Exception as e:
