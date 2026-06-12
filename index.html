@@ -1085,11 +1085,25 @@ function connect() {
     // If pendingMessage exists and within the hour, it drains below naturally
 
     if (pendingMessage) {
-      console.log('[ws] draining queued message');
-      ws.send(JSON.stringify(pendingMessage));
+      console.log('[ws] draining queued message in 500ms');
+      const _queued = pendingMessage;
       pendingMessage = null;
-      thinking = true;
-      setSendEnabled(false);
+      setTimeout(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(_queued));
+          thinking = true;
+          setSendEnabled(false);
+          showThinking();
+        }
+      }, 500);
+    } else if (primaryHost && !_overAnHour) {
+      // No pending client message — check if Gizmo had an unanswered message
+      // in the previous session that never made it back
+      ws.send(JSON.stringify({
+        type:       'check_unsent',
+        session_id: SESSION_ID,
+        headmate:   primaryHost,
+      }));
     }
   };
 
@@ -1155,6 +1169,16 @@ window.addEventListener('focus', () => {
 
 function handleIncoming(msg) {
   if (msg.type === 'pong') return;
+
+  // ── Unsent response from previous session ────────────────────────────────
+  if (msg.type === 'unsent_response') {
+    if (msg.response) {
+      // Gizmo had a response that never made it — render it now
+      appendMessage('gizmo', 'Gizmo', msg.response, 'gizmo');
+      lastGizmoMsgEl = document.querySelector('.message.gizmo:last-child');
+    }
+    return;
+  }
 
   // ── Scene reconnect offer ─────────────────────────────────────────────────
   if (msg.type === 'scene_check') {

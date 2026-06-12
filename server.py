@@ -330,6 +330,10 @@ class GizmoServer:
             await self._handle_scene_resume_answer(websocket, sid, msg)
             return
 
+        if msg_type == "check_unsent":
+            await self._handle_check_unsent(websocket, sid, msg)
+            return
+
         log_event("GizmoServer", "MSG_TYPE_IGNORED", type=msg_type, session=sid[:8])
 
     async def _handle_check_scene(self, websocket, session_id: str, msg: dict) -> None:
@@ -534,6 +538,81 @@ class GizmoServer:
 
         log_event("GizmoServer", "RESPONSE_SENT",
             session=session_id[:8], words=len(response.split()), multi=multi)
+
+    async def _handle_check_unsent(self, websocket, session_id: str, msg: dict) -> None:
+        """
+        Check if the last message in this session has a Gizmo response.
+        If the last message is from the user with no assistant response following,
+        re-run it and send the response back.
+        """
+        headmate = msg.get("headmate", "").strip().lower()
+        saved    = _load_session(session_id)
+        if not saved:
+            return
+
+        messages = saved.get("messages", [])
+        if not messages:
+            return
+
+        # Check if last message is from user with no assistant response after it
+        last = messages[-1]
+        if last.get("role") != "user":
+            return  # Last message was from assistant — nothing unsent
+
+        # Last message was user, no response — re-run it
+        raw_text = last.get("content", "")
+        if not raw_text:
+            return
+
+        log_event("GizmoServer", "RESENDING_UNSENT",
+            session=session_id[:8], headmate=headmate)
+
+        await asyncio.sleep(THINKING_DELAY)
+        await self._send(websocket, {"type": "thinking"})
+
+        context  = {"current_host": headmate, "fronters": [headmate]}
+        history  = _session_history.get(session_id, [])
+
+        # Load from disk if not in memory
+        if not history:
+            history = [
+                {"role": m["role"], "content": m["content"]}
+                for m in messages[:-1]  # exclude the unanswered message
+            ]
+
+        try:
+            response = await run_single_pipeline(
+                message=raw_text,
+                session_id=session_id,
+                headmate=headmate,
+                context=context,
+                history=history,
+            )
+        except Exception as e:
+            log_error("GizmoServer", "resend failed", exc=e)
+            return
+
+        if not response:
+            return
+
+        # Update session
+        history.append({"role": "user",      "content": raw_text})
+        history.append({"role": "assistant", "content": response})
+        _session_history[session_id] = history
+
+        # Update session file — add assistant response
+        saved["messages"].append({
+            "role":    "assistant",
+            "speaker": "gizmo",
+            "content": response,
+            "ts":      time.time(),
+        })
+        saved["last_active"] = time.time()
+        _save_session(session_id, saved)
+
+        await self._send(websocket, {"type": "unsent_response", "response": response})
+        log_event("GizmoServer", "UNSENT_DELIVERED",
+            session=session_id[:8], words=len(response.split()))
 
     async def _send(self, websocket, data: dict) -> None:
         try:
