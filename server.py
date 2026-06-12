@@ -103,9 +103,13 @@ _session_history: dict[str, list[dict]] = {}
 # session_id -> headmate name
 _pending_scene_resume: dict[str, str] = {}
 
-# Live WebSocket registry — session_id -> current active websocket
+# Live WebSocket registry — client_session_id -> current active websocket
 # Updated on every new connection, used to deliver responses to the right socket
 _live_sockets: dict[str, object] = {}
+
+# Maps server socket session_id -> client session_id
+# So we can clean up _live_sockets correctly on disconnect
+_server_to_client_sid: dict[str, str] = {}
 
 
 def _is_duplicate(session_id: str, content: str) -> bool:
@@ -266,7 +270,10 @@ class GizmoServer:
                 self._connections.pop(session_id, None)
                 _session_history.pop(session_id, None)
                 _pending_scene_resume.pop(session_id, None)
-                _live_sockets.pop(session_id, None)
+                # Only remove from live_sockets if this socket is still current
+                client_sid = _server_to_client_sid.pop(session_id, None)
+                if client_sid and _live_sockets.get(client_sid) is ws:
+                    _live_sockets.pop(client_sid, None)
                 # Clean up per-session chunk processor
                 try:
                     from core.agent_simple import agent_simple
@@ -325,6 +332,7 @@ class GizmoServer:
         # so responses can find the current live socket even after reconnect
         if sid and sid != session_id:
             _live_sockets[sid] = websocket
+            _server_to_client_sid[session_id] = sid
 
         if msg_type == "ping":
             await self._send(websocket, {"type": "pong"})
