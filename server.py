@@ -515,6 +515,14 @@ class GizmoServer:
         })
         _save_session(session_id, saved)
 
+        # ── Save response to session before sending ──────────────────────────
+        # Write pending_response to disk so reconnect can deliver it if chunks
+        # don't make it to the client (e.g. mobile connection dropped mid-send)
+        saved_for_pending = _load_session(session_id) or {}
+        saved_for_pending["pending_response"] = response
+        saved_for_pending["pending_response_ts"] = time.time()
+        _save_session(session_id, saved_for_pending)
+
         # ── Scene state update ────────────────────────────────────────────────
         # Run after response so the full exchange (user + Gizmo) informs the scene
         if headmate:
@@ -534,6 +542,15 @@ class GizmoServer:
             await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)
 
+        # Clear pending_response — chunks delivered successfully
+        try:
+            delivered = _load_session(session_id) or {}
+            delivered.pop("pending_response", None)
+            delivered.pop("pending_response_ts", None)
+            _save_session(session_id, delivered)
+        except Exception:
+            pass
+
         await self._send(websocket, {"type": "done", "session_id": session_id, "current_host": headmate or ""})
 
         log_event("GizmoServer", "RESPONSE_SENT",
@@ -541,25 +558,36 @@ class GizmoServer:
 
     async def _handle_check_unsent(self, websocket, session_id: str, msg: dict) -> None:
         """
-        Check if the last message in this session has a Gizmo response.
-        If the last message is from the user with no assistant response following,
-        re-run it and send the response back.
+        On reconnect, check for:
+        1. A generated response that never made it to the client (pending_response)
+        2. A user message with no response at all (re-run needed)
         """
         headmate = msg.get("headmate", "").strip().lower()
         saved    = _load_session(session_id)
         if not saved:
             return
 
+        # ── Case 1: Response was generated but chunks didn't reach client ─────
+        pending = saved.get("pending_response", "").strip()
+        if pending:
+            log_event("GizmoServer", "DELIVERING_PENDING",
+                session=session_id[:8], headmate=headmate, words=len(pending.split()))
+            await self._send(websocket, {"type": "unsent_response", "response": pending})
+            # Clear it
+            saved.pop("pending_response", None)
+            saved.pop("pending_response_ts", None)
+            _save_session(session_id, saved)
+            return
+
+        # ── Case 2: User message with no response at all ──────────────────────
         messages = saved.get("messages", [])
         if not messages:
             return
 
-        # Check if last message is from user with no assistant response after it
         last = messages[-1]
         if last.get("role") != "user":
-            return  # Last message was from assistant — nothing unsent
+            return  # Last message was from assistant — nothing to do
 
-        # Last message was user, no response — re-run it
         raw_text = last.get("content", "")
         if not raw_text:
             return
@@ -570,14 +598,13 @@ class GizmoServer:
         await asyncio.sleep(THINKING_DELAY)
         await self._send(websocket, {"type": "thinking"})
 
-        context  = {"current_host": headmate, "fronters": [headmate]}
-        history  = _session_history.get(session_id, [])
+        context = {"current_host": headmate, "fronters": [headmate]}
+        history = _session_history.get(session_id, [])
 
-        # Load from disk if not in memory
         if not history:
             history = [
                 {"role": m["role"], "content": m["content"]}
-                for m in messages[:-1]  # exclude the unanswered message
+                for m in messages[:-1]
             ]
 
         try:
@@ -595,12 +622,10 @@ class GizmoServer:
         if not response:
             return
 
-        # Update session
         history.append({"role": "user",      "content": raw_text})
         history.append({"role": "assistant", "content": response})
         _session_history[session_id] = history
 
-        # Update session file — add assistant response
         saved["messages"].append({
             "role":    "assistant",
             "speaker": "gizmo",
@@ -608,6 +633,8 @@ class GizmoServer:
             "ts":      time.time(),
         })
         saved["last_active"] = time.time()
+        saved.pop("pending_response", None)
+        saved.pop("pending_response_ts", None)
         _save_session(session_id, saved)
 
         await self._send(websocket, {"type": "unsent_response", "response": response})
