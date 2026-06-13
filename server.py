@@ -1,6 +1,13 @@
 """
 server.py
 Gizmo's WebSocket server. Bare bones testing branch.
+
+Mobile reconnect fixes:
+- _live_sockets updated immediately on ANY message type (not just "message")
+- check_unsent registers new socket before checking, so in-flight pipeline
+  delivers to the new socket naturally when it finishes
+- pending_response write happens before pipeline starts (keyed on user message hash)
+  so reconnect can detect "pipeline running" vs "response lost"
 """
 
 from __future__ import annotations
@@ -100,16 +107,19 @@ _seen_messages:   dict[str, float]       = {}
 _session_history: dict[str, list[dict]] = {}
 
 # Tracks which sessions are waiting on a scene resume answer
-# session_id -> headmate name
 _pending_scene_resume: dict[str, str] = {}
 
 # Live WebSocket registry — client_session_id -> current active websocket
-# Updated on every new connection, used to deliver responses to the right socket
+# Updated on every incoming message (any type), not just "message" type.
+# This ensures reconnect registers the new socket before check_unsent runs.
 _live_sockets: dict[str, object] = {}
 
 # Maps server socket session_id -> client session_id
-# So we can clean up _live_sockets correctly on disconnect
 _server_to_client_sid: dict[str, str] = {}
+
+# Tracks in-flight pipelines — client_session_id -> asyncio.Task
+# So reconnect can detect "still thinking" and wait rather than giving up
+_pipeline_tasks: dict[str, asyncio.Task] = {}
 
 
 def _is_duplicate(session_id: str, content: str) -> bool:
@@ -201,13 +211,11 @@ def _time_of_day(hour: int) -> str:
 
 
 def _is_yes(text: str) -> bool:
-    """Loose yes-detection for scene resume answers."""
     t = text.strip().lower()
     return any(w in t for w in ("yes", "yeah", "yep", "sure", "ok", "okay", "yea", "let's", "lets", "continue", "pick up", "resume"))
 
 
 def _is_no(text: str) -> bool:
-    """Loose no-detection for scene resume answers."""
     t = text.strip().lower()
     return any(w in t for w in ("no", "nah", "nope", "not", "skip", "later", "don't", "dont", "pass", "forget"))
 
@@ -254,32 +262,28 @@ class GizmoServer:
         async def handle_ws(request):
             ws = web.WebSocketResponse(heartbeat=15.0)
             await ws.prepare(request)
-            session_id = f"sess_{id(ws):016x}"
-            self._connections[session_id] = ws
-            log_event("GizmoServer", "CONNECTION_OPENED", session=session_id[:8])
-            # Register this socket — may replace a stale one from a previous connection
-            _live_sockets[session_id] = ws
+            server_sid = f"sess_{id(ws):016x}"
+            self._connections[server_sid] = ws
+            log_event("GizmoServer", "CONNECTION_OPENED", session=server_sid[:8])
             try:
                 async for msg in ws:
                     from aiohttp import WSMsgType
                     if msg.type == WSMsgType.TEXT:
-                        await self._handle_message(ws, session_id, msg.data)
+                        await self._handle_message(ws, server_sid, msg.data)
                     elif msg.type == WSMsgType.ERROR:
                         log_error("GizmoServer", f"ws error: {ws.exception()}", exc=None)
             finally:
-                self._connections.pop(session_id, None)
-                _session_history.pop(session_id, None)
-                _pending_scene_resume.pop(session_id, None)
-                # Don't remove from _live_sockets on disconnect —
-                # the next reconnect will overwrite it with the new socket
-                _server_to_client_sid.pop(session_id, None)
-                # Clean up per-session chunk processor
+                self._connections.pop(server_sid, None)
+                client_sid = _server_to_client_sid.pop(server_sid, None)
+                _session_history.pop(server_sid, None)
+                _pending_scene_resume.pop(server_sid, None)
+                # Don't remove from _live_sockets — next reconnect overwrites it
                 try:
                     from core.agent_simple import agent_simple
-                    agent_simple.end_session(session_id)
+                    agent_simple.end_session(server_sid)
                 except Exception:
                     pass
-                log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
+                log_event("GizmoServer", "CONNECTION_CLOSED", session=server_sid[:8])
             return ws
 
         async def handle_sessions(request):
@@ -317,7 +321,7 @@ class GizmoServer:
         log_event("GizmoServer", "LISTENING", host=host, port=port)
         await asyncio.Future()
 
-    async def _handle_message(self, websocket, session_id: str, raw_msg: str) -> None:
+    async def _handle_message(self, websocket, server_sid: str, raw_msg: str) -> None:
         try:
             msg = json.loads(raw_msg)
         except json.JSONDecodeError:
@@ -325,13 +329,16 @@ class GizmoServer:
             return
 
         msg_type = msg.get("type", "message")
-        sid      = msg.get("session_id", session_id)
+        # Client session ID — stable across reconnects
+        sid = msg.get("session_id", server_sid)
 
-        # Register this websocket against the client session ID
-        # so responses can find the current live socket even after reconnect
-        if sid and sid != session_id:
+        # ── Register live socket immediately, regardless of message type ──────
+        # This is the fix: reconnect sends check_unsent first, which means
+        # the socket must be registered before we check for pending responses
+        # or in-flight pipelines, otherwise they deliver to the dead socket.
+        if sid:
             _live_sockets[sid] = websocket
-            _server_to_client_sid[session_id] = sid
+            _server_to_client_sid[server_sid] = sid
 
         if msg_type == "ping":
             await self._send(websocket, {"type": "pong"})
@@ -356,10 +363,6 @@ class GizmoServer:
         log_event("GizmoServer", "MSG_TYPE_IGNORED", type=msg_type, session=sid[:8])
 
     async def _handle_check_scene(self, websocket, session_id: str, msg: dict) -> None:
-        """
-        Client connects (or reconnects) and checks whether there's an active scene.
-        If yes, generate Gizmo's re-entry offer and send it back.
-        """
         from core.scene_tracker import scene_tracker
 
         headmate = msg.get("headmate", "").strip().lower()
@@ -370,8 +373,6 @@ class GizmoServer:
         try:
             reconnect_msg = await scene_tracker.check_reconnect(headmate)
             if reconnect_msg:
-                # Park the pending resume so the next message from this session
-                # is interpreted as a yes/no answer
                 _pending_scene_resume[session_id] = headmate
                 await self._send(websocket, {
                     "type":              "scene_check",
@@ -388,15 +389,10 @@ class GizmoServer:
             await self._send(websocket, {"type": "scene_check", "has_scene": False})
 
     async def _handle_scene_resume_answer(self, websocket, session_id: str, msg: dict) -> None:
-        """
-        User answered Gizmo's re-entry offer. Route to confirm or pause.
-        Then fall through to normal chat handling with scene context loaded.
-        """
         from core.scene_tracker import scene_tracker
 
         headmate = _pending_scene_resume.pop(session_id, None)
         if not headmate:
-            # No pending resume — treat as a normal message
             await self._handle_chat_message(websocket, session_id, msg)
             return
 
@@ -411,10 +407,8 @@ class GizmoServer:
             scene_tracker.pause_scene(headmate)
             log_event("GizmoServer", "SCENE_PAUSED", session=session_id[:8], headmate=headmate)
         else:
-            # Ambiguous — resume the scene, let Gizmo handle it naturally
             scene_tracker.confirm_resume(headmate)
 
-        # Now handle as a normal chat message so Gizmo actually responds
         await self._handle_chat_message(websocket, session_id, msg)
 
     async def _handle_chat_message(self, websocket, session_id: str, msg: dict) -> None:
@@ -470,7 +464,6 @@ class GizmoServer:
         await asyncio.sleep(THINKING_DELAY)
         await self._send(websocket, {"type": "thinking"})
 
-        # Load from disk if not in memory (e.g. after server restart)
         if session_id not in _session_history:
             saved = _load_session(session_id)
             if saved:
@@ -480,29 +473,11 @@ class GizmoServer:
                 ]
         history = _session_history.get(session_id, [])
 
-        try:
-            response = await run_single_pipeline(
-                message=raw_text,
-                session_id=session_id,
-                headmate=headmate,
-                context=context,
-                history=history,
-            )
-        except Exception as e:
-            import traceback
-            print(f"[PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
-            await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
-            return
-
-        now = time.time()
-        history.append({"role": "user",      "content": raw_text})
-        history.append({"role": "assistant", "content": response})
-        _session_history[session_id] = history
-
-        # ── Persist session to disk ───────────────────────────────────────────
-        saved = _load_session(session_id) or {
+        # ── Mark pipeline as in-flight before starting ────────────────────────
+        # Write a sentinel so check_unsent knows "still thinking" vs "response lost"
+        saved_pre = _load_session(session_id) or {
             "session_id": session_id,
-            "opened_at":  now,
+            "opened_at":  time.time(),
             "hosts":      [],
             "tags":       [],
             "messages":   [],
@@ -512,38 +487,78 @@ class GizmoServer:
             "notable":    [],
             "emotion_arc": [],
         }
-        saved["last_active"] = now
-        # Merge hosts
-        if headmate and headmate not in saved["hosts"]:
-            saved["hosts"].append(headmate)
+        saved_pre["pipeline_running"] = True
+        saved_pre["pipeline_started"] = time.time()
+        # Append the user message now so reconnect can find it even mid-pipeline
+        now = time.time()
+        saved_pre["last_active"] = now
+        if headmate and headmate not in saved_pre.get("hosts", []):
+            saved_pre.setdefault("hosts", []).append(headmate)
         for h in context.get("fronters", []):
-            if h and h not in saved["hosts"]:
-                saved["hosts"].append(h)
-        # Append messages with speaker and timestamp
-        saved["messages"].append({
-            "role":    "user",
-            "speaker": headmate or "unknown",
-            "content": raw_text,
-            "ts":      now,
-        })
-        saved["messages"].append({
+            if h and h not in saved_pre.get("hosts", []):
+                saved_pre["hosts"].append(h)
+        # Only append if not already the last user message (avoid duplicates on retry)
+        messages = saved_pre.get("messages", [])
+        if not messages or messages[-1].get("content") != raw_text or messages[-1].get("role") != "user":
+            saved_pre.setdefault("messages", []).append({
+                "role":    "user",
+                "speaker": headmate or "unknown",
+                "content": raw_text,
+                "ts":      now,
+            })
+        _save_session(session_id, saved_pre)
+
+        try:
+            # Run pipeline as a tracked task so check_unsent can detect it
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(run_single_pipeline(
+                message=raw_text,
+                session_id=session_id,
+                headmate=headmate,
+                context=context,
+                history=history,
+            ))
+            _pipeline_tasks[session_id] = task
+            response = await task
+        except Exception as e:
+            import traceback
+            print(f"[PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
+            # Clear pipeline sentinel on failure
+            try:
+                fail_saved = _load_session(session_id) or {}
+                fail_saved.pop("pipeline_running", None)
+                fail_saved.pop("pipeline_started", None)
+                _save_session(session_id, fail_saved)
+            except Exception:
+                pass
+            _pipeline_tasks.pop(session_id, None)
+            await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
+            return
+        finally:
+            _pipeline_tasks.pop(session_id, None)
+
+        history.append({"role": "user",      "content": raw_text})
+        history.append({"role": "assistant", "content": response})
+        _session_history[session_id] = history
+
+        # ── Persist full session ──────────────────────────────────────────────
+        saved = _load_session(session_id) or saved_pre
+        saved["last_active"] = time.time()
+        saved.pop("pipeline_running", None)
+        saved.pop("pipeline_started", None)
+        # Append assistant response
+        saved.setdefault("messages", []).append({
             "role":    "assistant",
             "speaker": "gizmo",
             "content": response,
-            "ts":      now,
+            "ts":      time.time(),
         })
+        # Write pending_response so reconnect can deliver if chunks don't make it
+        saved["pending_response"]    = response
+        saved["pending_response_ts"] = time.time()
         _save_session(session_id, saved)
 
-        # ── Save response to session before sending ──────────────────────────
-        # Write pending_response to disk so reconnect can deliver it if chunks
-        # don't make it to the client (e.g. mobile connection dropped mid-send)
-        saved_for_pending = _load_session(session_id) or {}
-        saved_for_pending["pending_response"] = response
-        saved_for_pending["pending_response_ts"] = time.time()
-        _save_session(session_id, saved_for_pending)
-
         # ── Scene state update ────────────────────────────────────────────────
-        # Run after response so the full exchange (user + Gizmo) informs the scene
         if headmate:
             try:
                 from core.scene_tracker import scene_tracker
@@ -557,15 +572,16 @@ class GizmoServer:
             except Exception as e:
                 log_error("GizmoServer", "scene update failed", exc=e)
 
-        # Use the current live socket keyed by CLIENT session ID
-        # session_id here is already the client-provided sid (passed from _handle_message)
+        # ── Deliver via current live socket ───────────────────────────────────
+        # By the time we get here, a reconnect may have updated _live_sockets[session_id]
+        # to the new socket. Use it.
         live_ws = _live_sockets.get(session_id, websocket)
 
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(live_ws, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)
 
-        # Clear pending_response — chunks delivered successfully
+        # Clear pending_response — delivered successfully
         try:
             delivered = _load_session(session_id) or {}
             delivered.pop("pending_response", None)
@@ -582,34 +598,55 @@ class GizmoServer:
     async def _handle_check_unsent(self, websocket, session_id: str, msg: dict) -> None:
         """
         On reconnect, check for:
-        1. A generated response that never made it to the client (pending_response)
-        2. A user message with no response at all (re-run needed)
+        1. Pipeline still running — wait for it, deliver when done
+        2. Response generated but chunks never reached client (pending_response)
+        3. User message with no response at all — re-run pipeline
         """
         headmate = msg.get("headmate", "").strip().lower()
-        saved    = _load_session(session_id)
+
+        # ── Case 1: Pipeline still running ────────────────────────────────────
+        # The socket was already registered in _handle_message before we got here.
+        # The running pipeline will use _live_sockets[session_id] to deliver,
+        # which now points to this new socket. Just wait and let it land.
+        task = _pipeline_tasks.get(session_id)
+        if task and not task.done():
+            log_event("GizmoServer", "RECONNECT_PIPELINE_RUNNING",
+                session=session_id[:8], headmate=headmate)
+            await self._send(websocket, {"type": "thinking"})
+            # Wait up to 90s for the pipeline to finish
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=90.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            # Pipeline delivers via _live_sockets — nothing else needed here
+            return
+
+        saved = _load_session(session_id)
         if not saved:
             return
 
-        # ── Case 1: Response was generated but chunks didn't reach client ─────
+        # ── Case 2: Response generated but not delivered ──────────────────────
         pending = saved.get("pending_response", "").strip()
         if pending:
             log_event("GizmoServer", "DELIVERING_PENDING",
                 session=session_id[:8], headmate=headmate, words=len(pending.split()))
-            await self._send(websocket, {"type": "unsent_response", "response": pending})
-            # Clear it
+            for i in range(0, len(pending), CHUNK_SIZE):
+                await self._send(websocket, {"type": "chunk", "content": pending[i:i+CHUNK_SIZE]})
+                await asyncio.sleep(0)
+            await self._send(websocket, {"type": "done", "session_id": session_id, "current_host": headmate})
             saved.pop("pending_response", None)
             saved.pop("pending_response_ts", None)
             _save_session(session_id, saved)
             return
 
-        # ── Case 2: User message with no response at all ──────────────────────
+        # ── Case 3: User message with no response ─────────────────────────────
         messages = saved.get("messages", [])
         if not messages:
             return
 
         last = messages[-1]
         if last.get("role") != "user":
-            return  # Last message was from assistant — nothing to do
+            return
 
         raw_text = last.get("content", "")
         if not raw_text:
@@ -656,11 +693,17 @@ class GizmoServer:
             "ts":      time.time(),
         })
         saved["last_active"] = time.time()
-        saved.pop("pending_response", None)
+        saved.pop("pending_response",    None)
         saved.pop("pending_response_ts", None)
+        saved.pop("pipeline_running",    None)
+        saved.pop("pipeline_started",    None)
         _save_session(session_id, saved)
 
-        await self._send(websocket, {"type": "unsent_response", "response": response})
+        for i in range(0, len(response), CHUNK_SIZE):
+            await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
+            await asyncio.sleep(0)
+        await self._send(websocket, {"type": "done", "session_id": session_id, "current_host": headmate})
+
         log_event("GizmoServer", "UNSENT_DELIVERED",
             session=session_id[:8], words=len(response.split()))
 
