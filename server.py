@@ -576,7 +576,7 @@ class GizmoServer:
         # By the time we get here, a reconnect may have updated _live_sockets[session_id]
         # to the new socket. Use it.
         live_ws = _live_sockets.get(session_id, websocket)
-
+        print(f"[DEBUG DELIVER] session_id={session_id} live_ws_id={id(live_ws)} ws_id={id(websocket)} match={live_ws is websocket}", flush=True)
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(live_ws, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)
