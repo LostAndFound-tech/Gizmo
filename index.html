@@ -677,17 +677,60 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
 
-  // Page visible again — force fresh connection
   console.log('[ws] page visible — reconnecting');
-  if (ws) {
-    ws.onopen  = null;
-    ws.onclose = null;
-    ws.onerror = null;
-    try { ws.close(); } catch(e) {}
-    ws = null;
+  _pipelineWasActive = _pipelineWasActive || thinking;
+
+  // Don't kill the old socket immediately — the server pipeline may finish
+  // and try to deliver to it before the new socket registers.
+  // Instead: open a new socket, and only close the old one once the new one
+  // is open and has registered itself with the server via check_unsent.
+  const oldWs = ws;
+
+  // Clear all handlers on the old socket so it goes silent — we don't want
+  // its onclose firing and triggering another reconnect cycle
+  if (oldWs) {
+    oldWs.onopen    = null;
+    oldWs.onmessage = null;
+    oldWs.onclose   = null;
+    oldWs.onerror   = null;
   }
+
+  // Reset connection state so connect() will proceed
+  ws        = null;
   connected = false;
-  connect();
+
+  // Build the new socket manually so we can close the old one at the right moment
+  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+  if (_keepalive)      { clearInterval(_keepalive);     _keepalive = null; }
+
+  setStatus('reconnecting');
+  showReconnectBanner();
+
+  try {
+    const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    const proto   = location.protocol === 'https:' ? 'wss' : 'ws';
+    const port    = isLocal ? ':10000' : '';
+    ws = new WebSocket(`${proto}://${location.hostname}${port}/ws`);
+  } catch(e) {
+    console.error('[ws] failed to create WebSocket:', e);
+    scheduleReconnect(RECONNECT_NORMAL_MS);
+    return;
+  }
+
+  ws.onopen = () => {
+    // New socket is open — NOW close the old one
+    // Any in-flight pipeline delivery to oldWs is now lost,
+    // but check_unsent on the new socket will recover it
+    if (oldWs) {
+      try { oldWs.close(); } catch(e) {}
+    }
+    // Hand off to normal onOpen
+    _onOpen();
+  };
+
+  ws.onmessage = (e) => handleIncoming(JSON.parse(e.data));
+  ws.onclose   = _onClose;
+  ws.onerror   = (e) => { console.error('[ws] error:', e); setStatus('error'); };
 });
 
 window.addEventListener('focus', () => {
