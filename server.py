@@ -604,6 +604,17 @@ class GizmoServer:
         """
         headmate = msg.get("headmate", "").strip().lower()
 
+        # If headmate is empty (e.g. mobile reconnect before primaryHost was set),
+        # fall back to the first host recorded in the session file
+        if not headmate:
+            _saved_peek = _load_session(session_id)
+            if _saved_peek:
+                hosts = _saved_peek.get("hosts", [])
+                if hosts:
+                    headmate = hosts[0].lower()
+                    log_event("GizmoServer", "HEADMATE_RECOVERED_FROM_SESSION",
+                        session=session_id[:8], headmate=headmate)
+
         # ── Case 1: Pipeline still running ────────────────────────────────────
         # The socket was already registered in _handle_message before we got here.
         # The running pipeline will use _live_sockets[session_id] to deliver,

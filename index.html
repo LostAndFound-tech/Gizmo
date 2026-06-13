@@ -1074,13 +1074,14 @@ function connect() {
         hideThinking();
       }
       // No scene resume offer for stale sessions
-    } else if (primaryHost && _downtime > 60000 && !pendingMessage) {
-      // Within the hour, no pending message — offer scene resume if active
-      ws.send(JSON.stringify({
-        type:       'check_scene',
-        session_id: SESSION_ID,
-        headmate:   primaryHost,
-      }));
+      } else if (!_overAnHour) {
+    // Check for unsent responses on reconnect
+    // Send even if primaryHost is empty — server recovers headmate from session file
+    ws.send(JSON.stringify({
+      type:       'check_unsent',
+      session_id: SESSION_ID,
+      headmate:   primaryHost || '',
+    }));
     }
     // If pendingMessage exists and within the hour, it drains below naturally
 
