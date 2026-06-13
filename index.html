@@ -38,22 +38,15 @@
     overflow: hidden;
   }
 
-  /* ── Layout ── */
   #shell {
     display: grid;
     grid-template-columns: 0fr 1fr 0fr;
     height: 100vh;
     transition: grid-template-columns 0.25s ease;
   }
-  #shell.sidebar-open {
-    grid-template-columns: 280px 1fr 0fr;
-  }
-  #shell.prompt-open {
-    grid-template-columns: 0fr 1fr 420px;
-  }
-  #shell.sidebar-open.prompt-open {
-    grid-template-columns: 280px 1fr 420px;
-  }
+  #shell.sidebar-open { grid-template-columns: 280px 1fr 0fr; }
+  #shell.prompt-open  { grid-template-columns: 0fr 1fr 420px; }
+  #shell.sidebar-open.prompt-open { grid-template-columns: 280px 1fr 420px; }
 
   #app {
     display: grid;
@@ -62,7 +55,6 @@
     min-width: 0;
   }
 
-  /* ── Sidebar ── */
   #sidebar {
     background: var(--surface);
     border-right: 1px solid var(--border);
@@ -81,334 +73,141 @@
     flex-shrink: 0;
   }
 
-  #sidebar-title {
-    font-family: var(--serif);
-    font-size: 15px;
-    color: var(--text-mid);
-  }
+  #sidebar-title { font-family: var(--serif); font-size: 15px; color: var(--text-mid); }
 
   #sidebar-close {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 16px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    transition: color 0.15s;
+    background: none; border: none; color: var(--text-dim); cursor: pointer;
+    font-size: 16px; padding: 2px 6px; border-radius: 4px; transition: color 0.15s;
   }
   #sidebar-close:hover { color: var(--text); }
 
   #session-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex: 1; overflow-y: auto; padding: 8px;
+    display: flex; flex-direction: column; gap: 4px;
   }
   #session-list::-webkit-scrollbar { width: 3px; }
   #session-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
   .session-item {
-    padding: 10px 12px;
-    border-radius: 8px;
-    border: 1px solid transparent;
-    cursor: pointer;
-    transition: all 0.15s;
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
+    padding: 10px 12px; border-radius: 8px; border: 1px solid transparent;
+    cursor: pointer; transition: all 0.15s; display: flex; flex-direction: column; gap: 3px;
   }
-  .session-item:hover {
-    background: var(--bg);
-    border-color: var(--border);
-  }
-  .session-item.active {
-    background: var(--accent-lo);
-    border-color: var(--accent)44;
-  }
+  .session-item:hover { background: var(--bg); border-color: var(--border); }
+  .session-item.active { background: var(--accent-lo); border-color: var(--accent)44; }
 
-  .session-date {
-    font-size: 10px;
-    color: var(--text-dim);
-  }
-  .session-mood {
-    font-size: 12px;
-    color: var(--text-mid);
-  }
-  .session-topics {
-    font-size: 11px;
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
+  .session-date  { font-size: 10px; color: var(--text-dim); }
+  .session-mood  { font-size: 12px; color: var(--text-mid); }
+  .session-topics { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-  /* ── Session detail panel ── */
   #session-detail {
-    display: none;
-    position: fixed;
-    top: 0; left: 280px; right: 0; bottom: 0;
-    background: var(--bg)ee;
-    z-index: 100;
-    padding: 32px;
-    overflow-y: auto;
+    display: none; position: fixed; top: 0; left: 280px; right: 0; bottom: 0;
+    background: var(--bg)ee; z-index: 100; padding: 32px; overflow-y: auto;
     animation: fadeIn 0.2s ease;
   }
   #session-detail.visible { display: block; }
 
   #detail-close {
-    position: absolute;
-    top: 16px; right: 20px;
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 4px 10px;
-    transition: all 0.15s;
+    position: absolute; top: 16px; right: 20px;
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text-dim); cursor: pointer; font-family: var(--mono);
+    font-size: 12px; padding: 4px 10px; transition: all 0.15s;
   }
   #detail-close:hover { color: var(--text); border-color: var(--border-hi); }
 
-  #detail-content {
-    max-width: 600px;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-  }
+  #detail-content { max-width: 600px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
 
-  .detail-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
+  .detail-section { display: flex; flex-direction: column; gap: 8px; }
+  .detail-label { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+  .detail-text { font-size: 13px; line-height: 1.7; color: var(--text); }
 
-  .detail-label {
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
+  #arc-chart { width: 100%; height: 80px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); }
 
-  .detail-text {
-    font-size: 13px;
-    line-height: 1.7;
-    color: var(--text);
-  }
-
-  /* Emotion arc chart */
-  #arc-chart {
-    width: 100%;
-    height: 80px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-  }
-
-  /* ── Header ── */
   header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 20px;
-    border-bottom: 1px solid var(--border);
-    gap: 12px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 20px; border-bottom: 1px solid var(--border); gap: 12px;
   }
 
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .logo {
-    font-family: var(--serif);
-    font-size: 20px;
-    color: var(--accent);
-    letter-spacing: 0.02em;
-  }
+  .header-left { display: flex; align-items: center; gap: 10px; }
+  .logo { font-family: var(--serif); font-size: 20px; color: var(--accent); letter-spacing: 0.02em; }
 
   .status-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--border-hi);
-    transition: background 0.3s;
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--border-hi); transition: background 0.3s;
   }
-  .status-dot.connected   { background: var(--gizmo); box-shadow: 0 0 6px var(--gizmo); }
-  .status-dot.thinking    { background: var(--thinking); animation: pulse 1s infinite; }
-  .status-dot.error       { background: var(--error); }
+  .status-dot.connected  { background: var(--gizmo); box-shadow: 0 0 6px var(--gizmo); }
+  .status-dot.thinking   { background: var(--thinking); animation: pulse 1s infinite; }
+  .status-dot.error      { background: var(--error); }
+  .status-dot.reconnecting { background: var(--accent); animation: pulse 0.6s infinite; }
 
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50%       { opacity: 0.3; }
   }
 
-  .fronters-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: 1;
-  }
+  .fronters-bar { display: flex; align-items: center; gap: 6px; flex: 1; }
 
   .fronter-chip {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 20px;
-    border: 1px solid var(--border);
-    color: var(--text-mid);
-    background: var(--surface);
-    cursor: pointer;
-    transition: all 0.15s;
-    user-select: none;
+    font-size: 11px; padding: 2px 8px; border-radius: 20px;
+    border: 1px solid var(--border); color: var(--text-mid);
+    background: var(--surface); cursor: pointer; transition: all 0.15s; user-select: none;
   }
-  .fronter-chip.active {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--accent-lo);
-  }
-  .fronter-chip:hover { border-color: var(--border-hi); }
+  .fronter-chip.active { border-color: var(--accent); color: var(--accent); background: var(--accent-lo); }
+  .fronter-chip:hover  { border-color: var(--border-hi); }
 
-  /* ── Messages ── */
   #messages {
-    overflow-y: auto;
-    padding: 24px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-    scroll-behavior: smooth;
+    overflow-y: auto; padding: 24px 20px;
+    display: flex; flex-direction: column; gap: 20px; scroll-behavior: smooth;
   }
-
   #messages::-webkit-scrollbar { width: 4px; }
   #messages::-webkit-scrollbar-track { background: transparent; }
   #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-  .message {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    animation: fadeIn 0.2s ease;
-  }
+  .message { display: flex; flex-direction: column; gap: 4px; animation: fadeIn 0.2s ease; }
 
   @keyframes fadeIn {
     from { opacity: 0; transform: translateY(6px); }
     to   { opacity: 1; transform: translateY(0); }
   }
 
-  .message-meta {
-    font-size: 11px;
-    color: var(--text-dim);
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .message-speaker {
-    color: var(--text-mid);
-    font-weight: 500;
-  }
+  .message-meta { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 8px; }
+  .message-speaker { color: var(--text-mid); font-weight: 500; }
   .message-speaker.gizmo  { color: var(--gizmo); }
   .message-speaker.action { color: var(--text-dim); font-style: italic; }
-
   .message-time { font-size: 10px; }
 
   .message-body {
-    padding: 10px 14px;
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    background: var(--surface);
-    line-height: 1.65;
-    white-space: pre-wrap;
-    word-break: break-word;
+    padding: 10px 14px; border-radius: var(--radius); border: 1px solid var(--border);
+    background: var(--surface); line-height: 1.65; white-space: pre-wrap; word-break: break-word;
   }
-
-  .message.user .message-body {
-    background: var(--surface);
-    border-color: var(--border);
-  }
-
-  .message.gizmo .message-body {
-    background: var(--gizmo-lo);
-    border-color: var(--gizmo)44;
-    color: var(--text);
-  }
-
+  .message.user  .message-body { background: var(--surface); border-color: var(--border); }
+  .message.gizmo .message-body { background: var(--gizmo-lo); border-color: var(--gizmo)44; color: var(--text); }
   .message.action .message-body {
-    background: transparent;
-    border-color: transparent;
-    color: var(--text-dim);
-    font-style: italic;
-    font-size: 13px;
-    padding: 4px 14px;
+    background: transparent; border-color: transparent;
+    color: var(--text-dim); font-style: italic; font-size: 13px; padding: 4px 14px;
   }
 
-  /* Multi-part exchange grouping */
   .exchange-group {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--surface);
-    animation: fadeIn 0.2s ease;
+    display: flex; flex-direction: column; gap: 8px; padding: 12px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface); animation: fadeIn 0.2s ease;
   }
-
   .exchange-group-label {
-    font-size: 10px;
-    color: var(--text-dim);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    margin-bottom: 4px;
+    font-size: 10px; color: var(--text-dim); letter-spacing: 0.06em;
+    text-transform: uppercase; margin-bottom: 4px;
   }
+  .exchange-part { display: flex; flex-direction: column; gap: 2px; }
+  .exchange-part-speaker { font-size: 11px; font-weight: 500; color: var(--text-mid); }
+  .exchange-part-content { color: var(--text); line-height: 1.6; }
+  .exchange-part-content.action { color: var(--text-dim); font-style: italic; }
 
-  .exchange-part {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .exchange-part-speaker {
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-mid);
-  }
-
-  .exchange-part-content {
-    color: var(--text);
-    line-height: 1.6;
-  }
-
-  .exchange-part-content.action {
-    color: var(--text-dim);
-    font-style: italic;
-  }
-
-  /* Thinking indicator */
   .thinking-indicator {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-dim);
-    font-size: 12px;
-    padding: 8px 14px;
-    animation: fadeIn 0.2s ease;
+    display: flex; align-items: center; gap: 10px;
+    color: var(--text-dim); font-size: 12px; padding: 8px 14px; animation: fadeIn 0.2s ease;
   }
-
-  .thinking-dots {
-    display: flex;
-    gap: 4px;
-  }
+  .thinking-dots { display: flex; gap: 4px; }
   .thinking-dots span {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--thinking);
-    animation: bounce 1.2s infinite;
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--thinking); animation: bounce 1.2s infinite;
   }
   .thinking-dots span:nth-child(2) { animation-delay: 0.15s; }
   .thinking-dots span:nth-child(3) { animation-delay: 0.30s; }
@@ -418,503 +217,249 @@
     40%            { transform: translateY(-4px); opacity: 1; }
   }
 
-  /* ── Input area ── */
+  /* Reconnecting banner */
+  #reconnect-banner {
+    display: none;
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    background: var(--surface); border: 1px solid var(--accent)66;
+    border-radius: 20px; padding: 6px 16px;
+    font-size: 11px; color: var(--accent);
+    z-index: 200; animation: fadeIn 0.2s ease;
+  }
+  #reconnect-banner.visible { display: block; }
+
   #input-area {
-    border-top: 1px solid var(--border);
-    padding: 12px 20px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+    border-top: 1px solid var(--border); padding: 12px 20px 16px;
+    display: flex; flex-direction: column; gap: 8px;
   }
 
-  /* Voice boxes container */
-  #voice-boxes {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
+  #voice-boxes { display: flex; flex-direction: column; gap: 6px; }
 
-  /* Single voice box */
   .voice-box {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: flex-start;
-    gap: 8px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 8px 10px;
-    transition: border-color 0.15s;
+    display: grid; grid-template-columns: auto 1fr auto;
+    align-items: flex-start; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 8px 10px; transition: border-color 0.15s;
   }
+  .voice-box:focus-within { border-color: var(--border-hi); }
+  .voice-box.primary:focus-within { border-color: var(--accent)66; }
 
-  .voice-box:focus-within {
-    border-color: var(--border-hi);
-  }
-
-  .voice-box.primary:focus-within {
-    border-color: var(--accent)66;
-  }
-
-  .voice-label {
-    font-size: 11px;
-    color: var(--text-dim);
-    padding-top: 3px;
-    min-width: 60px;
-    cursor: text;
-  }
-
-  .voice-label.editable {
-    color: var(--accent);
-    cursor: pointer;
-    border-bottom: 1px dashed var(--accent)44;
-  }
-
+  .voice-label { font-size: 11px; color: var(--text-dim); padding-top: 3px; min-width: 60px; cursor: text; }
+  .voice-label.editable { color: var(--accent); cursor: pointer; border-bottom: 1px dashed var(--accent)44; }
   .voice-label input {
-    background: transparent;
-    border: none;
-    outline: none;
-    color: var(--accent);
-    font-family: var(--mono);
-    font-size: 11px;
-    width: 70px;
+    background: transparent; border: none; outline: none;
+    color: var(--accent); font-family: var(--mono); font-size: 11px; width: 70px;
   }
 
   .voice-textarea {
-    background: transparent;
-    border: none;
-    outline: none;
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 14px;
-    resize: none;
-    line-height: 1.6;
-    min-height: 22px;
-    max-height: 200px;
-    overflow-y: auto;
-    width: 100%;
+    background: transparent; border: none; outline: none;
+    color: var(--text); font-family: var(--mono); font-size: 14px;
+    resize: none; line-height: 1.6; min-height: 22px; max-height: 200px;
+    overflow-y: auto; width: 100%;
   }
-
   .voice-textarea::placeholder { color: var(--text-dim); }
 
   .voice-type-toggle {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: 12px;
-    padding: 2px 4px;
-    border-radius: 4px;
-    transition: all 0.15s;
-    align-self: flex-start;
-    margin-top: 2px;
-    font-family: var(--mono);
+    background: none; border: none; cursor: pointer; color: var(--text-dim);
+    font-size: 12px; padding: 2px 4px; border-radius: 4px; transition: all 0.15s;
+    align-self: flex-start; margin-top: 2px; font-family: var(--mono);
   }
-
-  .voice-type-toggle:hover {
-    color: var(--text-mid);
-    background: var(--border);
-  }
-
+  .voice-type-toggle:hover { color: var(--text-mid); background: var(--border); }
   .voice-type-toggle.action { color: var(--text-dim); font-style: italic; }
 
-  /* Remove box button */
   .remove-voice {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--border-hi);
-    font-size: 14px;
-    padding: 2px;
-    transition: color 0.15s;
-    align-self: flex-start;
-    margin-top: 1px;
+    background: none; border: none; cursor: pointer; color: var(--border-hi);
+    font-size: 14px; padding: 2px; transition: color 0.15s;
+    align-self: flex-start; margin-top: 1px;
   }
   .remove-voice:hover { color: var(--error); }
 
-  /* Silent presence indicator */
-  .voice-box.silent {
-    opacity: 0.6;
-    border-style: dashed;
-  }
+  .voice-box.silent { opacity: 0.6; border-style: dashed; }
+  .voice-box.silent .voice-textarea { color: var(--text-dim); font-style: italic; }
 
-  .voice-box.silent .voice-textarea {
-    color: var(--text-dim);
-    font-style: italic;
-  }
-
-  /* ── Input controls row ── */
   #input-controls {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
   }
 
   #add-voice-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    background: none;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius);
-    color: var(--text-dim);
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 5px 10px;
-    cursor: pointer;
-    transition: all 0.15s;
+    display: flex; align-items: center; gap: 5px;
+    background: none; border: 1px dashed var(--border); border-radius: var(--radius);
+    color: var(--text-dim); font-family: var(--mono); font-size: 12px;
+    padding: 5px 10px; cursor: pointer; transition: all 0.15s;
   }
+  #add-voice-btn:hover { border-color: var(--border-hi); color: var(--text-mid); }
 
-  #add-voice-btn:hover {
-    border-color: var(--border-hi);
-    color: var(--text-mid);
-  }
-
-  .controls-right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  #char-count {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
+  .controls-right { display: flex; align-items: center; gap: 8px; }
+  #char-count { font-size: 11px; color: var(--text-dim); }
 
   #send-btn {
-    background: var(--accent-lo);
-    border: 1px solid var(--accent)66;
-    border-radius: var(--radius);
-    color: var(--accent);
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 6px 14px;
-    cursor: pointer;
-    transition: all 0.15s;
-    letter-spacing: 0.03em;
+    background: var(--accent-lo); border: 1px solid var(--accent)66;
+    border-radius: var(--radius); color: var(--accent);
+    font-family: var(--mono); font-size: 12px; padding: 6px 14px;
+    cursor: pointer; transition: all 0.15s; letter-spacing: 0.03em;
   }
+  #send-btn:hover { background: var(--accent)22; border-color: var(--accent); }
+  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  #send-btn:hover {
-    background: var(--accent)22;
-    border-color: var(--accent);
-  }
-
-  #send-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  /* ── Hint bar ── */
   #hint {
-    font-size: 10px;
-    color: var(--text-dim);
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
+    font-size: 10px; color: var(--text-dim); display: flex; gap: 16px; flex-wrap: wrap;
   }
-
   .hint-item kbd {
-    background: var(--border);
-    border-radius: 3px;
-    padding: 0 4px;
-    font-family: var(--mono);
-    font-size: 10px;
+    background: var(--border); border-radius: 3px; padding: 0 4px;
+    font-family: var(--mono); font-size: 10px;
   }
 
-  /* ── Scrollbar ── */
   .voice-textarea::-webkit-scrollbar { width: 3px; }
-  .voice-textarea::-webkit-scrollbar-thumb {
-    background: var(--border);
-    border-radius: 2px;
-  }
+  .voice-textarea::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-  /* ── Empty state ── */
   #empty-state {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    color: var(--text-dim);
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px; color: var(--text-dim);
   }
-
-  #empty-state .big { font-family: var(--serif); font-size: 32px; color: var(--border-hi); }
+  #empty-state .big   { font-family: var(--serif); font-size: 32px; color: var(--border-hi); }
   #empty-state .small { font-size: 12px; }
 
-  /* ── Prompt panel ── */
   #prompt-panel {
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-    display: none;
-    flex-direction: column;
-    overflow: hidden;
-    min-width: 0;
-    height: 100vh;
+    background: var(--surface); border-left: 1px solid var(--border);
+    display: none; flex-direction: column; overflow: hidden; min-width: 0; height: 100vh;
   }
-
-  #shell.prompt-open #prompt-panel {
-    display: flex;
-  }
+  #shell.prompt-open #prompt-panel { display: flex; }
 
   #prompt-panel-header {
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-shrink: 0;
-    gap: 8px;
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 8px;
   }
-
-  #prompt-panel-title {
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-
-  .prompt-panel-btns {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
+  #prompt-panel-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+  .prompt-panel-btns { display: flex; align-items: center; gap: 6px; }
 
   #prompt-panel-close {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 16px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    transition: color 0.15s;
+    background: none; border: none; color: var(--text-dim); cursor: pointer;
+    font-size: 16px; padding: 2px 6px; border-radius: 4px; transition: color 0.15s;
   }
   #prompt-panel-close:hover { color: var(--text); }
 
-  /* Tabs */
-  #prompt-tabs {
-    display: flex;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
+  #prompt-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 
   .prompt-tab {
-    flex: 1;
-    padding: 8px 4px;
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--text-dim);
-    font-family: var(--mono);
-    font-size: 11px;
-    cursor: pointer;
-    transition: all 0.15s;
-    letter-spacing: 0.05em;
+    flex: 1; padding: 8px 4px; background: none; border: none;
+    border-bottom: 2px solid transparent; color: var(--text-dim);
+    font-family: var(--mono); font-size: 11px; cursor: pointer;
+    transition: all 0.15s; letter-spacing: 0.05em;
   }
   .prompt-tab:hover { color: var(--text-mid); }
-  .prompt-tab.active {
-    color: var(--accent);
-    border-bottom-color: var(--accent);
-  }
+  .prompt-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-  /* Sections */
   #prompt-sections {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+    flex: 1; overflow-y: auto; padding: 12px;
+    display: flex; flex-direction: column; gap: 10px;
   }
   #prompt-sections::-webkit-scrollbar { width: 3px; }
   #prompt-sections::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-  .prompt-section {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
+  .prompt-section { display: flex; flex-direction: column; gap: 4px; }
   .prompt-section-label {
-    font-size: 10px;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-dim);
+    display: flex; align-items: center; justify-content: space-between;
   }
-
-  .prompt-section-label span {
-    color: var(--border-hi);
-    font-size: 9px;
-    cursor: pointer;
-    transition: color 0.15s;
-  }
+  .prompt-section-label span { color: var(--border-hi); font-size: 9px; cursor: pointer; transition: color 0.15s; }
   .prompt-section-label span:hover { color: var(--text-mid); }
 
   .prompt-section textarea {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 11px;
-    line-height: 1.55;
-    padding: 8px 10px;
-    resize: vertical;
-    min-height: 60px;
-    max-height: 600px;
-    width: 100%;
-    transition: border-color 0.15s;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 1.55;
+    padding: 8px 10px; resize: vertical; min-height: 60px; max-height: 600px;
+    width: 100%; transition: border-color 0.15s;
   }
-  .prompt-section textarea:focus {
-    outline: none;
-    border-color: var(--border-hi);
-  }
-  .prompt-section textarea.modified {
-    border-color: var(--accent)66;
-    background: var(--accent-lo);
-  }
+  .prompt-section textarea:focus { outline: none; border-color: var(--border-hi); }
+  .prompt-section textarea.modified { border-color: var(--accent)66; background: var(--accent-lo); }
 
-  /* Footer */
   #prompt-footer {
-    padding: 10px 12px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    flex-shrink: 0;
+    padding: 10px 12px; border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
   }
 
   #regenerate-btn {
-    background: var(--accent-lo);
-    border: 1px solid var(--accent)66;
-    border-radius: var(--radius);
-    color: var(--accent);
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 8px 14px;
-    cursor: pointer;
-    transition: all 0.15s;
-    width: 100%;
+    background: var(--accent-lo); border: 1px solid var(--accent)66; border-radius: var(--radius);
+    color: var(--accent); font-family: var(--mono); font-size: 12px;
+    padding: 8px 14px; cursor: pointer; transition: all 0.15s; width: 100%;
   }
-  #regenerate-btn:hover {
-    background: var(--accent)22;
-    border-color: var(--accent);
-  }
-  #regenerate-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
+  #regenerate-btn:hover { background: var(--accent)22; border-color: var(--accent); }
+  #regenerate-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  #prompt-status {
-    font-size: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    min-height: 14px;
-  }
+  #prompt-status { font-size: 10px; color: var(--text-dim); text-align: center; min-height: 14px; }
 
-  /* Prompt toggle button in header */
   #prompt-toggle-btn {
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text-dim);
-    font-family: var(--mono);
-    font-size: 10px;
-    padding: 3px 8px;
-    cursor: pointer;
-    transition: all 0.15s;
-    letter-spacing: 0.04em;
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text-dim); font-family: var(--mono); font-size: 10px;
+    padding: 3px 8px; cursor: pointer; transition: all 0.15s; letter-spacing: 0.04em;
   }
-  #prompt-toggle-btn:hover {
-    border-color: var(--border-hi);
-    color: var(--text-mid);
-  }
-  #prompt-toggle-btn.active {
-    border-color: var(--accent)66;
-    color: var(--accent);
-    background: var(--accent-lo);
-  }
+  #prompt-toggle-btn:hover { border-color: var(--border-hi); color: var(--text-mid); }
+  #prompt-toggle-btn.active { border-color: var(--accent)66; color: var(--accent); background: var(--accent-lo); }
 </style>
 </head>
 <body>
 <div id="shell">
 
-  <!-- Sidebar -->
   <div id="sidebar">
     <div id="sidebar-header">
       <span id="sidebar-title">conversations</span>
       <button id="sidebar-close" onclick="toggleSidebar()">×</button>
     </div>
     <div id="session-list">
-      <div style="color:var(--text-dim);font-size:12px;padding:12px;text-align:center;">
-        loading...
-      </div>
+      <div style="color:var(--text-dim);font-size:12px;padding:12px;text-align:center;">loading...</div>
     </div>
   </div>
 
-  <!-- Session detail overlay -->
   <div id="session-detail">
     <button id="detail-close" onclick="closeDetail()">close</button>
     <div id="detail-content"></div>
   </div>
 
-  <!-- Main app -->
   <div id="app">
-
-    <!-- Header -->
     <header>
       <div class="header-left">
-        <button onclick="toggleSidebar()" style="background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:16px;padding:2px 6px;border-radius:4px;transition:color 0.15s;" title="conversation history">☰</button>
+        <button onclick="toggleSidebar()" style="background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:16px;padding:2px 6px;border-radius:4px;transition:color 0.15s;">☰</button>
         <div class="status-dot" id="status-dot"></div>
         <span class="logo">Gizmo</span>
       </div>
       <div class="fronters-bar" id="fronters-bar"></div>
-      <button id="prompt-toggle-btn" onclick="togglePromptPanel()" title="prompt inspector">prompt</button>
+      <button id="prompt-toggle-btn" onclick="togglePromptPanel()">prompt</button>
     </header>
 
-  <!-- Messages -->
-  <div id="messages">
-    <div id="empty-state">
-      <div class="big">~</div>
-      <div class="small">no messages yet</div>
-    </div>
-  </div>
-
-  <!-- Input -->
-  <div id="input-area">
-    <div id="voice-boxes">
-      <!-- Primary voice box — JS will enhance this, but fallback works too -->
-      <div class="voice-box primary" id="primary-box" data-type="speech">
-        <div class="voice-label" id="primary-label">you</div>
-        <textarea class="voice-textarea" id="primary-textarea" rows="1"
-          placeholder="say something..."
-          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send();}"
-          oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,200)+'px';updateCharCount();detectNamePrefix(this);"
-        ></textarea>
-        <div></div>
+    <div id="messages">
+      <div id="empty-state">
+        <div class="big">~</div>
+        <div class="small">no messages yet</div>
       </div>
     </div>
-    <div id="input-controls">
-      <button id="add-voice-btn" onclick="addVoiceBox()">+ add voice</button>
-      <div class="controls-right">
-        <span id="char-count"></span>
-        <button id="send-btn" onclick="send()">send ↵</button>
+
+    <div id="input-area">
+      <div id="voice-boxes">
+        <div class="voice-box primary" id="primary-box" data-type="speech">
+          <div class="voice-label" id="primary-label">you</div>
+          <textarea class="voice-textarea" id="primary-textarea" rows="1"
+            placeholder="say something..."
+            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send();}"
+            oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,200)+'px';updateCharCount();detectNamePrefix(this);"
+          ></textarea>
+          <div></div>
+        </div>
+      </div>
+      <div id="input-controls">
+        <button id="add-voice-btn" onclick="addVoiceBox()">+ add voice</button>
+        <div class="controls-right">
+          <span id="char-count"></span>
+          <button id="send-btn" onclick="send()">send ↵</button>
+        </div>
+      </div>
+      <div id="hint">
+        <span class="hint-item"><kbd>↵</kbd> send &nbsp; <kbd>shift+↵</kbd> newline</span>
+        <span class="hint-item"><kbd>[Name]:</kbd> set speaker &nbsp; <kbd>*action*</kbd> stage direction</span>
+        <span class="hint-item">silent voice = present, no message</span>
       </div>
     </div>
-    <div id="hint">
-      <span class="hint-item"><kbd>↵</kbd> send &nbsp; <kbd>shift+↵</kbd> newline</span>
-      <span class="hint-item"><kbd>[Name]:</kbd> set speaker &nbsp; <kbd>*action*</kbd> stage direction</span>
-      <span class="hint-item">silent voice = present, no message</span>
-    </div>
   </div>
 
-  </div>
-
-  <!-- Prompt panel — direct child of #shell, third grid column -->
   <div id="prompt-panel">
     <div id="prompt-panel-header">
       <span id="prompt-panel-title">prompt inspector</span>
@@ -922,7 +467,6 @@
         <button id="prompt-panel-close" onclick="togglePromptPanel()">×</button>
       </div>
     </div>
-
     <div id="prompt-tabs">
       <button class="prompt-tab active" onclick="switchPromptTab('general')">general</button>
       <button class="prompt-tab" onclick="switchPromptTab('psyche')">psyche</button>
@@ -930,9 +474,7 @@
       <button class="prompt-tab" onclick="switchPromptTab('thinking')">thinking</button>
       <button class="prompt-tab" onclick="switchPromptTab('extractor')">extractor</button>
     </div>
-
     <div id="prompt-sections"></div>
-
     <div id="prompt-footer">
       <button id="regenerate-btn" onclick="regenerate()" disabled>regenerate ↺</button>
       <div id="prompt-status"></div>
@@ -941,13 +483,17 @@
 
 </div>
 
+<!-- Reconnecting banner -->
+<div id="reconnect-banner">reconnecting...</div>
+
 <script>
 // ── Config ────────────────────────────────────────────────────────────────────
-const WS_URL = location.protocol === 'https:'
-  ? `wss://${location.hostname}/ws`
-  : `ws://${location.hostname}:10000/ws`;
 
-// Client owns the session ID — persists across reconnects
+const QUEUE_TTL_MS  = 10 * 60 * 1000; // 10 minutes — drop queued messages after this
+const RECONNECT_FAST_MS  = 200;   // reconnect delay when pipeline is in-flight
+const RECONNECT_NORMAL_MS = 1500; // reconnect delay otherwise
+const PING_INTERVAL_MS   = 12000;
+
 function getOrCreateSessionId() {
   let sid = sessionStorage.getItem('gizmo_session_id');
   if (!sid) {
@@ -959,56 +505,6 @@ function getOrCreateSessionId() {
 
 let SESSION_ID = getOrCreateSessionId();
 
-async function switchSession(sid) {
-  SESSION_ID = sid;
-  sessionStorage.setItem('gizmo_session_id', sid);
-
-  // Clear current messages
-  const msgs = document.getElementById('messages');
-  msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">loading conversation...</div></div>';
-  currentChunks = [];
-  currentMsgEl  = null;
-
-  // Fetch and render history
-  try {
-    const res  = await fetch(`/sessions/${sid}`);
-    const data = await res.json();
-
-    msgs.innerHTML = '';
-
-    const messages = data.messages || [];
-    if (!messages.length) {
-      msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">no messages yet</div></div>';
-    } else {
-      messages.forEach(m => {
-        if (m.role === 'user') {
-          const name = (m.speaker || 'you').replace(/^\w/, c => c.toUpperCase());
-          appendMessage('user', name, m.content, 'user');
-        } else {
-          appendMessage('gizmo', 'Gizmo', m.content, 'gizmo');
-        }
-      });
-    }
-
-    // Restore host from session
-    if (data.hosts && data.hosts.length) {
-      primaryHost = data.hosts[0].toLowerCase();
-      fronters    = data.hosts.map(h => h.toLowerCase());
-      updatePrimaryLabel(data.hosts[0]);
-      updateFronterChips();
-    }
-
-  } catch(e) {
-    console.error('[switchSession] failed to load history:', e);
-    msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">could not load history</div></div>';
-  }
-
-  // Tell server to restore this session
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'restore_session', session_id: sid }));
-  }
-}
-
 // ── State ─────────────────────────────────────────────────────────────────────
 let ws                = null;
 let connected         = false;
@@ -1019,174 +515,203 @@ let fronters          = [];
 let primaryHost       = '';
 let voiceBoxCount     = 0;
 let pendingHostIdentification = false;
-let pendingMessage    = null;   // queued if connection drops mid-send
-let pendingSceneResume = false; // waiting for user's yes/no on scene re-entry
-let _disconnectedAt    = null;    // timestamp of last disconnect
+let lastGizmoMsgEl    = null;
+let pendingSceneResume = false;
+
+// ── Message queue — survives reconnects, expires after TTL ───────────────────
+// { payload, queued_at }
+let _messageQueue = null;
+
+function _enqueue(payload) {
+  _messageQueue = { payload, queued_at: Date.now() };
+  console.log('[queue] message enqueued');
+}
+
+function _dequeue() {
+  if (!_messageQueue) return null;
+  const age = Date.now() - _messageQueue.queued_at;
+  if (age > QUEUE_TTL_MS) {
+    console.log('[queue] message expired, dropping');
+    _messageQueue = null;
+    // Unlock UI — the message is gone
+    thinking = false;
+    setSendEnabled(true);
+    hideThinking();
+    return null;
+  }
+  const payload = _messageQueue.payload;
+  _messageQueue = null;
+  return payload;
+}
+
+// ── Connection tracking ───────────────────────────────────────────────────────
+let _disconnectedAt   = null;
+let _reconnectTimer   = null;
+let _keepalive        = null;
+let _pipelineWasActive = false; // true if thinking=true when socket dropped
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
+
 function connect() {
-  // Don't stack connection attempts
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
-  setStatus('');
-  console.log('[ws] connecting to', WS_URL);
+
+  // Clear any pending reconnect timer
+  if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+
+  setStatus('reconnecting');
+  showReconnectBanner();
+
   try {
     const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
     const proto   = location.protocol === 'https:' ? 'wss' : 'ws';
     const port    = isLocal ? ':10000' : '';
     ws = new WebSocket(`${proto}://${location.hostname}${port}/ws`);
-  } catch (e) {
+  } catch(e) {
     console.error('[ws] failed to create WebSocket:', e);
-    setTimeout(connect, 3000);
+    scheduleReconnect(RECONNECT_NORMAL_MS);
     return;
   }
 
-  ws.onopen = () => {
-    connected = true;
-    setStatus('connected');
-    console.log('[ws] connected');
-
-    if (window._keepalive) clearInterval(window._keepalive);
-    window._keepalive = setInterval(() => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ping' }));
-      }
-    }, 12000);
-
-    // Reset stuck UI state on reconnect — if we have a pending message
-    // we're about to send so stay locked, otherwise unlock immediately
-    if (!pendingMessage) {
-      thinking = false;
-      setSendEnabled(true);
-      hideThinking();
-    }
-
-    const _downtime = _disconnectedAt ? Date.now() - _disconnectedAt : 0;
-    _disconnectedAt = null;
-    const _overAnHour = _downtime > 3600000;
-
-    if (_overAnHour) {
-      // Been gone too long — drop stale queued message, start fresh
-      if (pendingMessage) {
-        console.log('[ws] dropping stale queued message — over an hour offline');
-        pendingMessage = null;
-        thinking = false;
-        setSendEnabled(true);
-        hideThinking();
-      }
-      // No scene resume offer for stale sessions
-      } else if (!_overAnHour) {
-    // Check for unsent responses on reconnect
-    // Send even if primaryHost is empty — server recovers headmate from session file
-    ws.send(JSON.stringify({
-      type:       'check_unsent',
-      session_id: SESSION_ID,
-      headmate:   primaryHost || '',
-    }));
-    }
-    // If pendingMessage exists and within the hour, it drains below naturally
-
-    if (pendingMessage) {
-      console.log('[ws] draining queued message in 500ms');
-      const _queued = pendingMessage;
-      pendingMessage = null;
-      setTimeout(() => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(_queued));
-          thinking = true;
-          setSendEnabled(false);
-          showThinking();
-        }
-      }, 500);
-    } else if (primaryHost && !_overAnHour) {
-      // Check for unsent responses on reconnect
-      ws.send(JSON.stringify({
-        type:       'check_unsent',
-        session_id: SESSION_ID,
-        headmate:   primaryHost,
-      }));
-    }
-  };
-
-  ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    handleIncoming(msg);
-  };
-
-  ws.onclose = (e) => {
-    connected = false;
-    thinking  = false;
-    setSendEnabled(true);
-    setStatus('');
-    _disconnectedAt = Date.now();
-    console.log('[ws] closed, code:', e.code);
-    if (window._keepalive) clearInterval(window._keepalive);
-    // Don't reconnect if page is hidden — visibilitychange will handle it
-    if (!document.hidden) {
-      setTimeout(connect, 1500);
-    }
-  };
-
-  ws.onerror = (e) => {
-    console.error('[ws] error:', e);
-    setStatus('error');
-  };
+  ws.onopen = _onOpen;
+  ws.onmessage = (e) => handleIncoming(JSON.parse(e.data));
+  ws.onclose = _onClose;
+  ws.onerror = (e) => { console.error('[ws] error:', e); setStatus('error'); };
 }
 
-// ── Visibility-based reconnect ────────────────────────────────────────────────
-// When user returns to the tab/app after backgrounding, reconnect immediately
-// rather than waiting for the onclose handler to eventually fire.
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    // Page going to background — mark disconnect time now
-    // Mobile may not fire onclose before the connection dies
-    if (!_disconnectedAt) _disconnectedAt = Date.now();
-    return;
-  }
-  if (!document.hidden) {
-    console.log('[ws] page visible — checking connection');
+function _onOpen() {
+  connected = true;
+  setStatus('connected');
+  hideReconnectBanner();
+  console.log('[ws] connected');
 
-    // Always reset stuck UI state when returning to the app
-    // If a response was in-flight when we left, it's gone — unlock the UI
-    if (!pendingMessage) {
+  // Restart keepalive
+  if (_keepalive) clearInterval(_keepalive);
+  _keepalive = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ping' }));
+    }
+  }, PING_INTERVAL_MS);
+
+  const downtime = _disconnectedAt ? Date.now() - _disconnectedAt : 0;
+  _disconnectedAt = null;
+  const overAnHour = downtime > 3600000;
+
+  if (overAnHour) {
+    // Stale — drop queued message, unlock UI
+    if (_messageQueue) {
+      console.log('[ws] over an hour offline, dropping queued message');
+      _messageQueue = null;
       thinking = false;
       setSendEnabled(true);
       hideThinking();
     }
-
-    // Force fresh connection — don't trust stale socket state after backgrounding
-    if (ws) {
-      ws.onclose = null;
-      ws.onerror = null;
-      try { ws.close(); } catch(e) {}
-      ws = null;
-    }
-    connected = false;
-    connect();
+    return;
   }
+
+  // Drain queued message first — takes priority over check_unsent
+  const queued = _dequeue();
+  if (queued) {
+    console.log('[ws] draining queued message');
+    setTimeout(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify(queued));
+        } catch(e) {
+          console.error('[ws] drain failed:', e);
+          _enqueue(queued); // re-queue
+          scheduleReconnect(RECONNECT_FAST_MS);
+        }
+      }
+    }, 300);
+    return;
+  }
+
+  // No queued message — check for unsent server response
+  ws.send(JSON.stringify({
+    type:       'check_unsent',
+    session_id: SESSION_ID,
+    headmate:   primaryHost || '',
+  }));
+
+  // If pipeline was active when we dropped, show thinking immediately
+  if (_pipelineWasActive) {
+    thinking = true;
+    setSendEnabled(false);
+    showThinking();
+  }
+}
+
+function _onClose(e) {
+  connected = false;
+  if (_keepalive) { clearInterval(_keepalive); _keepalive = null; }
+  _disconnectedAt = _disconnectedAt || Date.now();
+
+  // Was a pipeline running when the socket dropped?
+  _pipelineWasActive = thinking;
+
+  console.log('[ws] closed, code:', e.code, 'thinking:', thinking);
+  setStatus('');
+
+  if (document.hidden) {
+    // Page is backgrounded — reconnect when it comes back
+    return;
+  }
+
+  // Reconnect fast if pipeline was active (response is on its way)
+  const delay = _pipelineWasActive ? RECONNECT_FAST_MS : RECONNECT_NORMAL_MS;
+  scheduleReconnect(delay);
+}
+
+function scheduleReconnect(delay) {
+  if (_reconnectTimer) clearTimeout(_reconnectTimer);
+  _reconnectTimer = setTimeout(() => {
+    _reconnectTimer = null;
+    connect();
+  }, delay);
+}
+
+// ── Visibility handling — mobile app switching ────────────────────────────────
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    _disconnectedAt = _disconnectedAt || Date.now();
+    return;
+  }
+
+  // Page visible again — force fresh connection
+  console.log('[ws] page visible — reconnecting');
+  if (ws) {
+    ws.onopen  = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    try { ws.close(); } catch(e) {}
+    ws = null;
+  }
+  connected = false;
+  connect();
 });
 
-// Also handle page focus as a fallback for browsers that don't fire visibilitychange
 window.addEventListener('focus', () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.log('[ws] window focused, reconnecting');
     connect();
   }
 });
 
+// ── Incoming messages ─────────────────────────────────────────────────────────
 function handleIncoming(msg) {
   if (msg.type === 'pong') return;
 
-  // ── Unsent response from previous session ────────────────────────────────
   if (msg.type === 'unsent_response') {
+    hideThinking();
+    thinking = false;
+    setSendEnabled(true);
+    _pipelineWasActive = false;
     if (msg.response) {
-      // Gizmo had a response that never made it — render it now
       appendMessage('gizmo', 'Gizmo', msg.response, 'gizmo');
       lastGizmoMsgEl = document.querySelector('.message.gizmo:last-child');
     }
     return;
   }
 
-  // ── Scene reconnect offer ─────────────────────────────────────────────────
   if (msg.type === 'scene_check') {
     if (msg.has_scene && msg.reconnect_message) {
       appendMessage('gizmo', 'Gizmo', msg.reconnect_message, 'gizmo');
@@ -1196,18 +721,15 @@ function handleIncoming(msg) {
   }
 
   if (msg.type === 'session_restored') {
-    // Switch to the new branch session ID
     if (msg.session_id) {
       SESSION_ID = msg.session_id;
       sessionStorage.setItem('gizmo_session_id', msg.session_id);
     }
-    // Restore fronter chips — Gizmo's opening comes via chunk/done
     if (msg.hosts && msg.hosts.length) {
       primaryHost = msg.hosts[0].toLowerCase();
       fronters    = msg.hosts.map(h => h.toLowerCase());
       updatePrimaryLabel(msg.hosts[0]);
       updateFronterChips();
-      // Now that we know the host, check for an active scene
       ws.send(JSON.stringify({
         type:       'check_scene',
         session_id: SESSION_ID,
@@ -1220,24 +742,25 @@ function handleIncoming(msg) {
   if (msg.type === 'thinking') {
     setStatus('thinking');
     showThinking();
+    thinking = true;
+    setSendEnabled(false);
     return;
   }
 
   if (msg.type === 'chunk') {
     hideThinking();
     setStatus('connected');
+    _pipelineWasActive = false;
     if (!currentMsgEl) {
       currentMsgEl = appendMessage('gizmo', 'Gizmo', '', 'gizmo');
     }
     currentChunks.push(msg.content);
-    const fullText = currentChunks.join('');
-    currentMsgEl.querySelector('.message-body').textContent = fullText;
+    currentMsgEl.querySelector('.message-body').textContent = currentChunks.join('');
     scrollBottom();
     return;
   }
 
   if (msg.type === 'done') {
-    // Check if response was a "who are you?" question
     const fullResponse = currentChunks.join('').toLowerCase();
     const isAskingHost = (
       fullResponse.includes("who am i talking to") ||
@@ -1245,205 +768,46 @@ function handleIncoming(msg) {
       fullResponse.includes("is that you,") ||
       fullResponse.includes("don't think we've met")
     );
-    if (isAskingHost) {
-      pendingHostIdentification = true;
-    }
-
-    // Track last Gizmo message for replacement on regenerate
+    if (isAskingHost) pendingHostIdentification = true;
     if (currentMsgEl) lastGizmoMsgEl = currentMsgEl;
-
     currentMsgEl  = null;
     currentChunks = [];
     thinking      = false;
+    _pipelineWasActive = false;
     setSendEnabled(true);
     scrollBottom();
     return;
   }
 
-  if (msg.type === 'prompt_sections') {
-    handlePromptSections(msg);
-    return;
-  }
-
-  if (msg.type === 'regenerated') {
-    handleRegenerated(msg);
-    return;
-  }
+  if (msg.type === 'prompt_sections') { handlePromptSections(msg); return; }
+  if (msg.type === 'regenerated')     { handleRegenerated(msg);    return; }
 
   if (msg.type === 'error') {
     hideThinking();
     setStatus('error');
-    appendMessage('gizmo', 'Gizmo', `[error: ${msg.message}]`, 'gizmo');
+    thinking = false;
+    _pipelineWasActive = false;
     setSendEnabled(true);
+    appendMessage('gizmo', 'Gizmo', `[error: ${msg.message}]`, 'gizmo');
     return;
-  }
-}
-
-// ── Voice boxes ───────────────────────────────────────────────────────────────
-function detectNamePrefix(textarea) {
-  const match = textarea.value.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:/);
-  if (match) {
-    const name = match[1].trim();
-    document.getElementById('primary-label').textContent = name;
-    primaryHost = name.toLowerCase();
-    updateFronterChips();
-  }
-}
-
-function initPrimaryBox() {
-  // If HTML fallback already rendered the primary box, just wire it up
-  const existing = document.getElementById('primary-textarea');
-  if (existing) {
-    existing.focus();
-    return;
-  }
-  // Otherwise create it dynamically
-  const box = createVoiceBox(true);
-  document.getElementById('voice-boxes').appendChild(box);
-  box.querySelector('.voice-textarea').focus();
-}
-
-function createVoiceBox(isPrimary = false) {
-  voiceBoxCount++;
-  const id = `vbox-${voiceBoxCount}`;
-
-  const box = document.createElement('div');
-  box.className = `voice-box${isPrimary ? ' primary' : ''}`;
-  box.dataset.id = id;
-  box.dataset.type = 'speech'; // speech | action | silent
-
-  const label = document.createElement('div');
-  label.className = `voice-label${isPrimary ? '' : ' editable'}`;
-
-  if (isPrimary) {
-    label.textContent = primaryHost || 'you';
-    label.title = 'primary speaker (set with [Name]: prefix)';
-  } else {
-    // Editable name for secondary voices
-    const nameInput = document.createElement('input');
-    nameInput.type        = 'text';
-    nameInput.placeholder = 'name';
-    nameInput.value       = '';
-    nameInput.maxLength   = 30;
-    nameInput.addEventListener('input', updateCharCount);
-    label.appendChild(nameInput);
-  }
-
-  const textarea = document.createElement('textarea');
-  textarea.className   = 'voice-textarea';
-  textarea.rows        = 1;
-  textarea.placeholder = isPrimary ? 'say something...' : 'what did they say?';
-
-  // Auto-resize
-  textarea.addEventListener('input', () => {
-    textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-    updateCharCount();
-
-    // Detect [Name]: prefix on primary box
-    if (isPrimary) {
-      const match = textarea.value.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:/);
-      if (match) {
-        const detectedName = match[1].trim();
-        label.textContent = detectedName;
-        primaryHost = detectedName.toLowerCase();
-        updateFronterChips();
-      }
-    }
-  });
-
-  // Keyboard handling
-  textarea.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  });
-
-  // Type toggle (speech / action / silent)
-  const typeBtn = document.createElement('button');
-  typeBtn.className = 'voice-type-toggle';
-  typeBtn.textContent = '~';
-  typeBtn.title = 'toggle: speech / action / silent';
-  typeBtn.onclick = () => cycleType(box, typeBtn, textarea);
-
-  const right = document.createElement('div');
-  right.style.cssText = 'display:flex;flex-direction:column;gap:4px;align-items:flex-end;';
-  right.appendChild(typeBtn);
-
-  if (!isPrimary) {
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'remove-voice';
-    removeBtn.textContent = '×';
-    removeBtn.title = 'remove this voice';
-    removeBtn.onclick = () => {
-      box.remove();
-      updateCharCount();
-    };
-    right.appendChild(removeBtn);
-  }
-
-  box.appendChild(label);
-  box.appendChild(textarea);
-  box.appendChild(right);
-
-  return box;
-}
-
-function addVoiceBox() {
-  const container = document.getElementById('voice-boxes');
-  const box = createVoiceBox(false);
-  container.appendChild(box);
-  box.querySelector('.voice-textarea').focus();
-}
-
-function cycleType(box, btn, textarea) {
-  const types = ['speech', 'action', 'silent'];
-  const icons  = ['~', '*', '○'];
-  const hints  = ['say something...', '*does something*', '(present, silent)'];
-
-  let idx = types.indexOf(box.dataset.type);
-  idx = (idx + 1) % types.length;
-
-  box.dataset.type    = types[idx];
-  btn.textContent     = icons[idx];
-  btn.className       = `voice-type-toggle${idx === 1 ? ' action' : ''}`;
-  textarea.placeholder = hints[idx];
-
-  if (types[idx] === 'silent') {
-    box.classList.add('silent');
-    textarea.disabled = true;
-  } else {
-    box.classList.remove('silent');
-    textarea.disabled = false;
-    textarea.focus();
   }
 }
 
 // ── Send ──────────────────────────────────────────────────────────────────────
 function send() {
-  console.log('[send] connected:', connected, 'thinking:', thinking, 'ws state:', ws?.readyState);
   if (thinking) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.warn('[send] WebSocket not open, readyState:', ws?.readyState);
-    setStatus('error');
-    connect();
-    return;
-  }
 
-  // Try dynamic voice boxes first, fall back to static primary textarea
   const dynamicBoxes = document.querySelectorAll('.voice-box');
   const staticTA     = document.getElementById('primary-textarea');
-
-  const parts    = [];
-  let   hasContent = false;
+  const parts        = [];
+  let   hasContent   = false;
 
   if (dynamicBoxes.length > 0) {
     dynamicBoxes.forEach((box) => {
-      const isPrimary  = box.classList.contains('primary');
-      const type       = box.dataset.type || 'speech';
-      const textarea   = box.querySelector('.voice-textarea') || (isPrimary ? staticTA : null);
-      const content    = textarea ? textarea.value.trim() : '';
+      const isPrimary = box.classList.contains('primary');
+      const type      = box.dataset.type || 'speech';
+      const textarea  = box.querySelector('.voice-textarea') || (isPrimary ? staticTA : null);
+      const content   = textarea ? textarea.value.trim() : '';
 
       let name = '';
       if (isPrimary) {
@@ -1471,13 +835,11 @@ function send() {
 
   if (!hasContent) return;
 
-  // Render outbound exchange
   renderOutboundExchange(parts);
 
-  // Build payload
   const isMulti = parts.filter(p => p.content_type !== 'presence').length > 1;
   const payload = {
-    type:       'message',
+    type:       pendingSceneResume ? 'scene_resume_answer' : 'message',
     session_id: SESSION_ID,
     content:    isMulti ? parts : (parts[0]?.content || ''),
     context: {
@@ -1485,48 +847,23 @@ function send() {
       fronters:     fronters,
     },
   };
+  if (pendingSceneResume) pendingSceneResume = false;
 
-  // If we're waiting on a scene resume answer, tag the payload accordingly
-  if (pendingSceneResume) {
-    payload.type = 'scene_resume_answer';
-    pendingSceneResume = false;
-  }
-
-  // If not connected, queue it
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.warn('[send] not connected, queuing message');
-    pendingMessage = payload;
-    connect();
-    return;
-  }
-
-  try {
-    ws.send(JSON.stringify(payload));
-  } catch (e) {
-    console.error('[send] failed:', e);
-    pendingMessage = payload;
-    connect();
-    return;
-  }
-
-  // Clear inputs
+  // Clear inputs immediately
   document.querySelectorAll('.voice-box:not(.primary)').forEach(b => b.remove());
-  const allTAs = document.querySelectorAll('.voice-textarea, #primary-textarea');
-  allTAs.forEach(ta => {
+  document.querySelectorAll('.voice-textarea, #primary-textarea').forEach(ta => {
     if (!ta.closest('.voice-box.silent')) {
       ta.value = '';
       ta.style.height = 'auto';
     }
   });
 
-  // If Gizmo was asking who's there, try to extract the name from the answer
   if (pendingHostIdentification && parts.length > 0) {
-    const content = parts[0]?.content || '';
-    const detected = extractNameFromAnswer(content);
+    const detected = extractNameFromAnswer(parts[0]?.content || '');
     if (detected) {
       primaryHost = detected.toLowerCase();
       updatePrimaryLabel(detected);
-      fronters    = [primaryHost];
+      fronters = [primaryHost];
       updateFronterChips();
       pendingHostIdentification = false;
     }
@@ -1536,79 +873,178 @@ function send() {
   setSendEnabled(false);
   updateCharCount();
   hideEmpty();
+
+  // Try to send — queue on failure
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.warn('[send] not connected, queuing');
+    _enqueue(payload);
+    connect();
+    return;
+  }
+
+  try {
+    ws.send(JSON.stringify(payload));
+    showThinking();
+  } catch(e) {
+    console.error('[send] failed, queuing:', e);
+    _enqueue(payload);
+    connect();
+  }
+}
+
+// ── Voice boxes ───────────────────────────────────────────────────────────────
+function detectNamePrefix(textarea) {
+  const match = textarea.value.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:/);
+  if (match) {
+    const name = match[1].trim();
+    document.getElementById('primary-label').textContent = name;
+    primaryHost = name.toLowerCase();
+    updateFronterChips();
+  }
+}
+
+function initPrimaryBox() {
+  const existing = document.getElementById('primary-textarea');
+  if (existing) { existing.focus(); return; }
+  const box = createVoiceBox(true);
+  document.getElementById('voice-boxes').appendChild(box);
+  box.querySelector('.voice-textarea').focus();
+}
+
+function createVoiceBox(isPrimary = false) {
+  voiceBoxCount++;
+  const box = document.createElement('div');
+  box.className   = `voice-box${isPrimary ? ' primary' : ''}`;
+  box.dataset.type = 'speech';
+
+  const label = document.createElement('div');
+  label.className = `voice-label${isPrimary ? '' : ' editable'}`;
+
+  if (isPrimary) {
+    label.textContent = primaryHost || 'you';
+  } else {
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text'; nameInput.placeholder = 'name'; nameInput.maxLength = 30;
+    nameInput.addEventListener('input', updateCharCount);
+    label.appendChild(nameInput);
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.className   = 'voice-textarea';
+  textarea.rows        = 1;
+  textarea.placeholder = isPrimary ? 'say something...' : 'what did they say?';
+
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+    updateCharCount();
+    if (isPrimary) {
+      const match = textarea.value.match(/^\[?([A-Za-z][A-Za-z0-9_\- ]{0,29})\]?\s*:/);
+      if (match) {
+        label.textContent = match[1].trim();
+        primaryHost = match[1].trim().toLowerCase();
+        updateFronterChips();
+      }
+    }
+  });
+
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  const typeBtn = document.createElement('button');
+  typeBtn.className = 'voice-type-toggle';
+  typeBtn.textContent = '~';
+  typeBtn.onclick = () => cycleType(box, typeBtn, textarea);
+
+  const right = document.createElement('div');
+  right.style.cssText = 'display:flex;flex-direction:column;gap:4px;align-items:flex-end;';
+  right.appendChild(typeBtn);
+
+  if (!isPrimary) {
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-voice';
+    removeBtn.textContent = '×';
+    removeBtn.onclick = () => { box.remove(); updateCharCount(); };
+    right.appendChild(removeBtn);
+  }
+
+  box.appendChild(label);
+  box.appendChild(textarea);
+  box.appendChild(right);
+  return box;
+}
+
+function addVoiceBox() {
+  const box = createVoiceBox(false);
+  document.getElementById('voice-boxes').appendChild(box);
+  box.querySelector('.voice-textarea').focus();
+}
+
+function cycleType(box, btn, textarea) {
+  const types = ['speech', 'action', 'silent'];
+  const icons  = ['~', '*', '○'];
+  const hints  = ['say something...', '*does something*', '(present, silent)'];
+  let idx = types.indexOf(box.dataset.type);
+  idx = (idx + 1) % types.length;
+  box.dataset.type    = types[idx];
+  btn.textContent     = icons[idx];
+  btn.className       = `voice-type-toggle${idx === 1 ? ' action' : ''}`;
+  textarea.placeholder = hints[idx];
+  if (types[idx] === 'silent') {
+    box.classList.add('silent'); textarea.disabled = true;
+  } else {
+    box.classList.remove('silent'); textarea.disabled = false; textarea.focus();
+  }
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function renderOutboundExchange(parts) {
   const speechParts = parts.filter(p => p.content_type !== 'presence');
-
   if (speechParts.length === 1) {
     const p    = speechParts[0];
     const name = (p.headmate || primaryHost || 'you').replace(/^\w/, c => c.toUpperCase());
-    const type = p.content_type === 'action' ? 'action' : 'user';
-    appendMessage(type, name, p.content, type);
+    appendMessage(p.content_type === 'action' ? 'action' : 'user', name, p.content, p.content_type === 'action' ? 'action' : 'user');
     return;
   }
-
-  // Multi-part — render as exchange group
   const group = document.createElement('div');
   group.className = 'exchange-group';
-
   const label = document.createElement('div');
-  label.className   = 'exchange-group-label';
+  label.className = 'exchange-group-label';
   label.textContent = `exchange · ${speechParts.length} voices`;
   group.appendChild(label);
-
   speechParts.forEach(p => {
     const part = document.createElement('div');
     part.className = 'exchange-part';
-
     const name = (p.headmate || 'unknown').replace(/^\w/, c => c.toUpperCase());
-
     const speaker = document.createElement('div');
-    speaker.className   = 'exchange-part-speaker';
-    speaker.textContent = name;
-    part.appendChild(speaker);
-
+    speaker.className = 'exchange-part-speaker'; speaker.textContent = name;
     const content = document.createElement('div');
-    content.className   = `exchange-part-content${p.content_type === 'action' ? ' action' : ''}`;
+    content.className = `exchange-part-content${p.content_type === 'action' ? ' action' : ''}`;
     content.textContent = p.content_type === 'action' ? `*${p.content}*` : p.content;
-    part.appendChild(content);
-
+    part.appendChild(speaker); part.appendChild(content);
     group.appendChild(part);
   });
-
   document.getElementById('messages').appendChild(group);
   scrollBottom();
 }
 
 function appendMessage(role, speaker, text, type) {
   hideEmpty();
-
   const msg = document.createElement('div');
   msg.className = `message ${type}`;
-
   const meta = document.createElement('div');
   meta.className = 'message-meta';
-
   const speakerEl = document.createElement('span');
-  speakerEl.className   = `message-speaker ${type}`;
+  speakerEl.className = `message-speaker ${type}`;
   speakerEl.textContent = speaker;
-
   const timeEl = document.createElement('span');
-  timeEl.className   = 'message-time';
+  timeEl.className = 'message-time';
   timeEl.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-  meta.appendChild(speakerEl);
-  meta.appendChild(timeEl);
-
+  meta.appendChild(speakerEl); meta.appendChild(timeEl);
   const body = document.createElement('div');
-  body.className   = 'message-body';
-  body.textContent = text;
-
-  msg.appendChild(meta);
-  msg.appendChild(body);
-
+  body.className = 'message-body'; body.textContent = text;
+  msg.appendChild(meta); msg.appendChild(body);
   document.getElementById('messages').appendChild(msg);
   scrollBottom();
   return msg;
@@ -1617,13 +1053,8 @@ function appendMessage(role, speaker, text, type) {
 function showThinking() {
   hideThinking();
   const el = document.createElement('div');
-  el.className = 'thinking-indicator';
-  el.id = 'thinking-el';
-  el.innerHTML = `
-    <span class="message-speaker gizmo">Gizmo</span>
-    <div class="thinking-dots">
-      <span></span><span></span><span></span>
-    </div>`;
+  el.className = 'thinking-indicator'; el.id = 'thinking-el';
+  el.innerHTML = `<span class="message-speaker gizmo">Gizmo</span><div class="thinking-dots"><span></span><span></span><span></span></div>`;
   document.getElementById('messages').appendChild(el);
   scrollBottom();
 }
@@ -1633,8 +1064,15 @@ function hideThinking() {
   if (el) el.remove();
 }
 
+function showReconnectBanner() {
+  document.getElementById('reconnect-banner').classList.add('visible');
+}
+
+function hideReconnectBanner() {
+  document.getElementById('reconnect-banner').classList.remove('visible');
+}
+
 function extractNameFromAnswer(text) {
-  // "it's jess" / "jess" / "i'm jess" / "this is jess"
   const patterns = [
     /(?:it'?s|i'?m|this is|call me|my name is)\s+([A-Za-z][A-Za-z0-9_\- ]{0,20})/i,
     /^([A-Za-z][A-Za-z0-9_\- ]{0,20})(?:\s*[!.,]|$)/,
@@ -1648,71 +1086,75 @@ function extractNameFromAnswer(text) {
 
 function updatePrimaryLabel(name) {
   const label = document.querySelector('.voice-box.primary .voice-label');
-  if (label) {
-    label.textContent = name;
-  }
+  if (label && !label.querySelector('input')) label.textContent = name;
 }
 
 // ── Fronter chips ─────────────────────────────────────────────────────────────
 function updateFronterChips() {
   const bar = document.getElementById('fronters-bar');
   bar.innerHTML = '';
-
-  const all = Array.from(new Set([
-    ...(primaryHost ? [primaryHost] : []),
-    ...fronters,
-  ]));
-
+  const all = Array.from(new Set([...(primaryHost ? [primaryHost] : []), ...fronters]));
   all.forEach(name => {
     const chip = document.createElement('div');
     chip.className   = `fronter-chip${name === primaryHost ? ' active' : ''}`;
     chip.textContent = name;
     chip.onclick     = () => {
       primaryHost = name;
-      // Update primary label
       const label = document.querySelector('.voice-box.primary .voice-label');
-      if (label && !label.querySelector('input')) {
-        label.textContent = name;
-      }
+      if (label && !label.querySelector('input')) label.textContent = name;
       updateFronterChips();
-      // Tell server
       if (ws && connected) {
-        ws.send(JSON.stringify({
-          type:       'switch_host',
-          session_id: SESSION_ID,
-          headmate:   name,
-        }));
+        ws.send(JSON.stringify({ type: 'switch_host', session_id: SESSION_ID, headmate: name }));
       }
     };
     bar.appendChild(chip);
   });
 }
 
+// ── Session switching ─────────────────────────────────────────────────────────
+async function switchSession(sid) {
+  SESSION_ID = sid;
+  sessionStorage.setItem('gizmo_session_id', sid);
+  const msgs = document.getElementById('messages');
+  msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">loading conversation...</div></div>';
+  currentChunks = []; currentMsgEl = null;
+  try {
+    const res  = await fetch(`/sessions/${sid}`);
+    const data = await res.json();
+    msgs.innerHTML = '';
+    const messages = data.messages || [];
+    if (!messages.length) {
+      msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">no messages yet</div></div>';
+    } else {
+      messages.forEach(m => {
+        const name = (m.speaker || 'you').replace(/^\w/, c => c.toUpperCase());
+        appendMessage(m.role === 'user' ? 'user' : 'gizmo', m.role === 'user' ? name : 'Gizmo', m.content, m.role === 'user' ? 'user' : 'gizmo');
+      });
+    }
+    if (data.hosts && data.hosts.length) {
+      primaryHost = data.hosts[0].toLowerCase();
+      fronters    = data.hosts.map(h => h.toLowerCase());
+      updatePrimaryLabel(data.hosts[0]);
+      updateFronterChips();
+    }
+  } catch(e) {
+    msgs.innerHTML = '<div id="empty-state"><div class="big">~</div><div class="small">could not load history</div></div>';
+  }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'restore_session', session_id: sid }));
+  }
+}
+
 // ── Utils ─────────────────────────────────────────────────────────────────────
 function setStatus(s) {
-  const dot = document.getElementById('status-dot');
-  dot.className = `status-dot${s ? ' ' + s : ''}`;
+  document.getElementById('status-dot').className = `status-dot${s ? ' ' + s : ''}`;
 }
-
-function setSendEnabled(v) {
-  document.getElementById('send-btn').disabled = !v;
-}
-
-function hideEmpty() {
-  const el = document.getElementById('empty-state');
-  if (el) el.remove();
-}
-
-function scrollBottom() {
-  const msgs = document.getElementById('messages');
-  msgs.scrollTop = msgs.scrollHeight;
-}
-
+function setSendEnabled(v) { document.getElementById('send-btn').disabled = !v; }
+function hideEmpty() { const el = document.getElementById('empty-state'); if (el) el.remove(); }
+function scrollBottom() { const m = document.getElementById('messages'); m.scrollTop = m.scrollHeight; }
 function updateCharCount() {
   let total = 0;
-  document.querySelectorAll('.voice-textarea').forEach(ta => {
-    total += ta.value.length;
-  });
+  document.querySelectorAll('.voice-textarea').forEach(ta => total += ta.value.length);
   const el = document.getElementById('char-count');
   el.textContent = total > 0 ? `${total}` : '';
   el.style.color = total > 2000 ? 'var(--error)' : 'var(--text-dim)';
@@ -1720,7 +1162,6 @@ function updateCharCount() {
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 let sidebarOpen = false;
-
 function toggleSidebar() {
   sidebarOpen = !sidebarOpen;
   document.getElementById('shell').classList.toggle('sidebar-open', sidebarOpen);
@@ -1730,38 +1171,28 @@ function toggleSidebar() {
 async function loadSessions() {
   const list = document.getElementById('session-list');
   list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:12px;text-align:center;">loading...</div>';
-
   try {
     const res  = await fetch('/sessions');
     const data = await res.json();
     const sessions = data.sessions || [];
-
     if (!sessions.length) {
       list.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:12px;text-align:center;">no sessions yet</div>';
       return;
     }
-
     list.innerHTML = '';
     sessions.forEach(s => {
       const el = document.createElement('div');
       el.className = 'session-item';
       el.onclick = () => openSession(s.id);
-
-      const date = new Date((s.opened_at || 0) * 1000);
+      const date    = new Date((s.opened_at || 0) * 1000);
       const dateStr = date.toLocaleDateString([], {weekday:'short', month:'short', day:'numeric'});
       const timeStr = date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
       const topics  = (s.topics || []).slice(0,3).join(', ') || 'general';
-      const mood    = s.mood || '—';
       const hosts   = (s.hosts || []).map(h => h.charAt(0).toUpperCase() + h.slice(1)).join(', ');
-
-      const isBranch = (s.id.match(/_/g) || []).length > 1;
-      const depth    = (s.id.match(/_/g) || []).length - 1;
-      const indent   = '↳ '.repeat(depth > 1 ? depth - 1 : depth > 0 ? 1 : 0);
       el.innerHTML = `
-        <div class="session-date">${indent}${dateStr} ${timeStr}</div>
-        <div class="session-mood">${mood}${hosts ? ' · <span style="color:var(--accent);font-size:11px">' + hosts + '</span>' : ''}</div>
-        <div class="session-topics">${topics}</div>
-      `;
+        <div class="session-date">${dateStr} ${timeStr}</div>
+        <div class="session-mood">${s.mood || '—'}${hosts ? ' · <span style="color:var(--accent);font-size:11px">' + hosts + '</span>' : ''}</div>
+        <div class="session-topics">${topics}</div>`;
       list.appendChild(el);
     });
   } catch(e) {
@@ -1770,88 +1201,47 @@ async function loadSessions() {
 }
 
 async function openSession(sessionId) {
-  // Mark active
   document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
   event.currentTarget?.classList.add('active');
-
   const detail  = document.getElementById('session-detail');
   const content = document.getElementById('detail-content');
   content.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:40px;">loading...</div>';
   detail.classList.add('visible');
-
   try {
     const res  = await fetch(`/sessions/${sessionId}`);
     const data = await res.json();
-
-    const date      = new Date((data.opened_at || 0) * 1000);
-    const dateStr   = date.toLocaleDateString([], {weekday:'long', year:'numeric', month:'long', day:'numeric'});
-    const timeStr   = date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    const hostsRaw  = data.hosts || [];
-    const starter   = hostsRaw[0] ? hostsRaw[0].charAt(0).toUpperCase() + hostsRaw[0].slice(1) : null;
-    const others    = hostsRaw.slice(1).map(h => h.charAt(0).toUpperCase() + h.slice(1));
-    const topics    = (data.topics || []).join(', ') || 'general';
-    const mood      = data.mood || 'unknown';
-    const summary   = data.summary || '(no summary yet)';
-    const notable   = (data.notable || []);
-    const arc       = data.emotion_arc || [];
-
-    const hostsHtml = starter ? `
-      <div style="font-size:12px;color:var(--text-mid);margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-        <span style="color:var(--accent);font-weight:500">${starter}</span>
-        <span style="color:var(--text-dim)">started</span>
-        ${others.length ? `<span style="color:var(--border-hi)">·</span> <span style="color:var(--text-mid)">${others.join(', ')}</span> <span style="color:var(--text-dim)">joined</span>` : ''}
-      </div>` : '';
-
+    const date    = new Date((data.opened_at || 0) * 1000);
+    const dateStr = date.toLocaleDateString([], {weekday:'long', year:'numeric', month:'long', day:'numeric'});
+    const timeStr = date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    const hostsRaw = data.hosts || [];
+    const starter  = hostsRaw[0] ? hostsRaw[0].charAt(0).toUpperCase() + hostsRaw[0].slice(1) : null;
+    const others   = hostsRaw.slice(1).map(h => h.charAt(0).toUpperCase() + h.slice(1));
+    const arc      = data.emotion_arc || [];
     content.innerHTML = `
       <div class="detail-section">
         <div class="detail-label">${dateStr} at ${timeStr}</div>
-        <div style="font-family:var(--serif);font-size:22px;color:var(--accent)">${mood}</div>
-        ${hostsHtml}
+        <div style="font-family:var(--serif);font-size:22px;color:var(--accent)">${data.mood || '—'}</div>
+        ${starter ? `<div style="font-size:12px;color:var(--text-mid);margin-top:6px">
+          <span style="color:var(--accent)">${starter}</span> started
+          ${others.length ? ' · <span style="color:var(--text-mid)">' + others.join(', ') + '</span> joined' : ''}
+        </div>` : ''}
       </div>
-
       <div class="detail-section">
         <div class="detail-label">emotional arc</div>
         <canvas id="arc-chart"></canvas>
       </div>
-
       <div class="detail-section">
         <div class="detail-label">summary</div>
-        <div class="detail-text">${summary}</div>
+        <div class="detail-text">${data.summary || '(no summary yet)'}</div>
       </div>
-
-      ${topics ? `
-      <div class="detail-section">
-        <div class="detail-label">topics</div>
-        <div class="detail-text">${topics}</div>
-      </div>` : ''}
-
-      ${notable.length ? `
-      <div class="detail-section">
-        <div class="detail-label">notable</div>
-        ${notable.map(n => `<div class="detail-text" style="font-size:12px">— ${n}</div>`).join('')}
-      </div>` : ''}
-
+      ${(data.topics||[]).length ? `<div class="detail-section"><div class="detail-label">topics</div><div class="detail-text">${(data.topics||[]).join(', ')}</div></div>` : ''}
+      ${(data.notable||[]).length ? `<div class="detail-section"><div class="detail-label">notable</div>${(data.notable||[]).map(n=>`<div class="detail-text" style="font-size:12px">— ${n}</div>`).join('')}</div>` : ''}
       <div class="detail-section" style="margin-top:8px">
-        <button onclick="continueSession('${sessionId}')" style="
-          background:var(--accent-lo);
-          border:1px solid var(--accent)66;
-          border-radius:var(--radius);
-          color:var(--accent);
-          font-family:var(--mono);
-          font-size:12px;
-          padding:8px 18px;
-          cursor:pointer;
-          transition:all 0.15s;
-        " onmouseover="this.style.background='var(--accent)22'"
-           onmouseout="this.style.background='var(--accent-lo)'">
+        <button onclick="continueSession('${sessionId}')" style="background:var(--accent-lo);border:1px solid var(--accent)66;border-radius:var(--radius);color:var(--accent);font-family:var(--mono);font-size:12px;padding:8px 18px;cursor:pointer;">
           continue this conversation →
         </button>
-      </div>
-    `;
-
-    // Draw arc chart
+      </div>`;
     if (arc.length > 1) drawArc(arc);
-
   } catch(e) {
     content.innerHTML = `<div style="color:var(--error)">failed to load session</div>`;
   }
@@ -1860,130 +1250,64 @@ async function openSession(sessionId) {
 function drawArc(arc) {
   const canvas = document.getElementById('arc-chart');
   if (!canvas) return;
-  const ctx    = canvas.getContext('2d');
-  const W      = canvas.offsetWidth || 560;
-  const H      = 80;
-  canvas.width  = W;
-  canvas.height = H;
-
-  const vals    = arc.map(p => p.valence || 0);
-  const min_v   = -1, max_v = 1;
-  const pad     = 12;
-
-  // Background
-  ctx.fillStyle = getComputedStyle(document.documentElement)
-    .getPropertyValue('--surface').trim();
+  const ctx  = canvas.getContext('2d');
+  const W    = canvas.offsetWidth || 560;
+  const H    = 80;
+  canvas.width = W; canvas.height = H;
+  const vals  = arc.map(p => p.valence || 0);
+  const pad   = 12;
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim();
   ctx.fillRect(0, 0, W, H);
-
-  // Zero line
   const zeroY = H / 2;
-  ctx.strokeStyle = '#2a2a2e';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 3]);
-  ctx.beginPath();
-  ctx.moveTo(pad, zeroY);
-  ctx.lineTo(W - pad, zeroY);
-  ctx.stroke();
+  ctx.strokeStyle = '#2a2a2e'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(pad, zeroY); ctx.lineTo(W-pad, zeroY); ctx.stroke();
   ctx.setLineDash([]);
-
   if (vals.length < 2) return;
-
-  // Valence line
-  ctx.strokeStyle = '#7c9e8f';
-  ctx.lineWidth   = 2;
+  ctx.strokeStyle = '#7c9e8f'; ctx.lineWidth = 2;
   ctx.beginPath();
   vals.forEach((v, i) => {
-    const x = pad + (i / (vals.length - 1)) * (W - pad * 2);
-    const y = pad + ((max_v - v) / (max_v - min_v)) * (H - pad * 2);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    const x = pad + (i / (vals.length-1)) * (W - pad*2);
+    const y = pad + ((1-v) / 2) * (H - pad*2);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   });
   ctx.stroke();
-
-  // Fill under line
-  const gradient = ctx.createLinearGradient(0, 0, 0, H);
-  gradient.addColorStop(0, '#7c9e8f44');
-  gradient.addColorStop(1, '#7c9e8f00');
-  ctx.fillStyle = gradient;
-  ctx.beginPath();
-  vals.forEach((v, i) => {
-    const x = pad + (i / (vals.length - 1)) * (W - pad * 2);
-    const y = pad + ((max_v - v) / (max_v - min_v)) * (H - pad * 2);
-    if (i === 0) ctx.moveTo(x, zeroY);
-    ctx.lineTo(x, y);
-  });
-  ctx.lineTo(pad + (W - pad * 2), zeroY);
-  ctx.closePath();
-  ctx.fill();
 }
 
-function continueSession(sid) {
-  closeDetail();
-  if (sidebarOpen) toggleSidebar();
-  switchSession(sid);
-}
-
+function continueSession(sid) { closeDetail(); if (sidebarOpen) toggleSidebar(); switchSession(sid); }
 function closeDetail() {
   document.getElementById('session-detail').classList.remove('visible');
   document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-initPrimaryBox();
-connect();
-setSendEnabled(true);
-
 // ── Prompt panel ──────────────────────────────────────────────────────────────
+let promptPanelOpen   = false;
+let currentPromptData = null;
+let activePromptTab   = 'general';
+let currentThinkingData = null;
 
-let promptPanelOpen  = false;
-let currentPromptData = null;   // last received prompt_sections message
-let lastGizmoMsgEl   = null;    // last Gizmo message element (for replacement)
-let activePromptTab  = 'general';
-
-// Tab definitions — which section keys belong to which tab
 const PROMPT_TAB_KEYS = {
-  general: [
-    'identity', 'rules', 'world', 'town_now', 'culture',
-    'now', 'write', 'goal', 'telemetry',
-  ],
-  psyche: [
-    'headmate_voice', 'preferences', 'register', 'headmate_file',
-    'temperature', 'memory', 'scene', 'reaction',
-  ],
-  intimate: [
-    'directive', 'world_observation', 'body_gizmo', 'body_headmate',
-    'curiosity',
-  ],
-  extractor: [
-    'extractor_prompt',
-  ],
+  general:  ['identity','rules','world','town_now','culture','now','write','goal','telemetry'],
+  psyche:   ['headmate_voice','preferences','register','headmate_file','temperature','memory','scene','reaction'],
+  intimate: ['directive','world_observation','body_gizmo','body_headmate','curiosity'],
+  extractor:['extractor_prompt'],
 };
 
-// Human-readable labels for section keys
 const SECTION_LABELS = {
-  identity:         'Identity seed',
-  rules:            'Rules',
-  world:            'Your world',
-  town_now:         'Town right now',
-  culture:          'Cultural threads',
-  now:              'Now',
-  write:            'Write instruction',
-  goal:             'Goal',
-  telemetry:        'Right now (telemetry)',
-  headmate_voice:   'Voice with headmate',
-  preferences:      'Preferences',
-  register:         'Register file',
-  headmate_file:    'Headmate file',
-  temperature:      'Calibration',
-  memory:           'Memory context',
-  scene:            'Scene context',
-  reaction:         'Who\'s in the room',
-  directive:        'Intention',
-  world_observation:'World observation',
-  body_gizmo:       'Gizmo\'s body',
-  body_headmate:    'Their body',
-  curiosity:        'Curiosity',
-  extractor_prompt: 'Extractor prompt',
+  identity:'Identity seed', rules:'Rules', world:'Your world', town_now:'Town right now',
+  culture:'Cultural threads', now:'Now', write:'Write instruction', goal:'Goal',
+  telemetry:'Right now (telemetry)', headmate_voice:'Voice with headmate',
+  preferences:'Preferences', register:'Register file', headmate_file:'Headmate file',
+  temperature:'Calibration', memory:'Memory context', scene:'Scene context',
+  reaction:"Who's in the room", directive:'Intention', world_observation:'World observation',
+  body_gizmo:"Gizmo's body", body_headmate:'Their body', curiosity:'Curiosity',
+  extractor_prompt:'Extractor prompt',
+};
+
+const THINKING_LAYER_LABELS = {
+  layer_1_observe:  { label:"Layer 1 — Observe",    fields:{what_they_said:"What they said",tone:"Tone",subtext:"Subtext",body_read:"Body read",register:"Register"} },
+  layer_2_interpret:{ label:"Layer 2 — Interpret",  fields:{what_they_want:"What they want",what_they_need:"What they need",pattern_match:"Pattern match",delta:"Delta from baseline",context_fit:"Context fit"} },
+  layer_3_intend:   { label:"Layer 3 — Intend",     fields:{my_state:"My state",goal_alignment:"Goal alignment",what_I_want:"What I want",what_I_should_do:"What I should do",tension:"Tension"} },
+  layer_4_plan:     { label:"Layer 4 — Plan",       fields:{tone:"Tone",lead:"Lead with",body:"Body note",avoid:"Avoid",length:"Length",response:"Response"} },
 };
 
 function togglePromptPanel() {
@@ -1997,294 +1321,129 @@ function switchPromptTab(tab) {
   document.querySelectorAll('.prompt-tab').forEach(btn => {
     btn.classList.toggle('active', btn.textContent === tab);
   });
-  if (tab === 'thinking') {
-    renderThinkingTab();
-  } else {
-    renderPromptSections();
-  }
+  if (tab === 'thinking') renderThinkingTab(); else renderPromptSections();
 }
 
 function renderPromptSections() {
   const container = document.getElementById('prompt-sections');
   container.innerHTML = '';
-
   if (!currentPromptData) {
     container.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:16px;text-align:center;">waiting for a response...</div>';
     return;
   }
-
   const keys = PROMPT_TAB_KEYS[activePromptTab] || [];
   let hasAny = false;
-
   keys.forEach(key => {
     const value = currentPromptData[key];
     if (!value || !value.trim()) return;
     hasAny = true;
-
-    const section = document.createElement('div');
-    section.className = 'prompt-section';
-
-    const labelRow = document.createElement('div');
-    labelRow.className = 'prompt-section-label';
-    labelRow.innerHTML = `
-      <span style="color:var(--text-dim)">${SECTION_LABELS[key] || key}</span>
-      <span onclick="resetSection('${key}')" title="reset to original">reset</span>
-    `;
-
+    const section  = document.createElement('div'); section.className = 'prompt-section';
+    const labelRow = document.createElement('div'); labelRow.className = 'prompt-section-label';
+    labelRow.innerHTML = `<span style="color:var(--text-dim)">${SECTION_LABELS[key]||key}</span><span onclick="resetSection('${key}')" title="reset">reset</span>`;
     const ta = document.createElement('textarea');
-    ta.dataset.key      = key;
-    ta.dataset.original = value;
-    ta.value            = value;
-    ta.rows             = key === 'extractor_prompt'
-      ? 20
-      : Math.min(Math.max(value.split('\n').length + 1, 3), 12);
-
-    ta.addEventListener('input', () => {
-      const modified = ta.value !== ta.dataset.original;
-      ta.classList.toggle('modified', modified);
-      updateRegenerateBtn();
-    });
-
-    section.appendChild(labelRow);
-    section.appendChild(ta);
-    container.appendChild(section);
+    ta.dataset.key = key; ta.dataset.original = value; ta.value = value;
+    ta.rows = key === 'extractor_prompt' ? 20 : Math.min(Math.max(value.split('\n').length+1,3),12);
+    ta.addEventListener('input', () => { ta.classList.toggle('modified', ta.value !== ta.dataset.original); updateRegenerateBtn(); });
+    section.appendChild(labelRow); section.appendChild(ta); container.appendChild(section);
   });
-
-  if (!hasAny) {
-    container.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:16px;text-align:center;">nothing here yet</div>';
-  }
-
+  if (!hasAny) container.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:16px;text-align:center;">nothing here yet</div>';
   updateRegenerateBtn();
 }
 
 function resetSection(key) {
   const ta = document.querySelector(`.prompt-section textarea[data-key="${key}"]`);
-  if (ta) {
-    ta.value = ta.dataset.original;
-    ta.classList.remove('modified');
-    updateRegenerateBtn();
-  }
+  if (ta) { ta.value = ta.dataset.original; ta.classList.remove('modified'); updateRegenerateBtn(); }
 }
 
 function updateRegenerateBtn() {
-  const hasModified = document.querySelector('.prompt-section textarea.modified') !== null;
-  const btn = document.getElementById('regenerate-btn');
-  btn.disabled = !hasModified || (!currentPromptData && !currentThinkingData);
+  const hasModified = !!document.querySelector('.prompt-section textarea.modified');
+  document.getElementById('regenerate-btn').disabled = !hasModified || (!currentPromptData && !currentThinkingData);
 }
 
 function setPromptStatus(msg, color = 'var(--text-dim)') {
-  const el = document.getElementById('prompt-status');
-  el.textContent = msg;
-  el.style.color = color;
+  const el = document.getElementById('prompt-status'); el.textContent = msg; el.style.color = color;
 }
 
 function regenerate() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (!currentPromptData && !currentThinkingData) return;
-
-  // Collect prompt section corrections
   const sections = {};
-  document.querySelectorAll('.prompt-section textarea[data-key]').forEach(ta => {
-    sections[ta.dataset.key] = ta.value;
-  });
-  if (currentPromptData) {
-    Object.keys(currentPromptData).forEach(key => {
-      if (!(key in sections)) sections[key] = currentPromptData[key];
-    });
-  }
-
-  // Collect thinking corrections
-  const thinking = getThinkingCorrections();
-
+  document.querySelectorAll('.prompt-section textarea[data-key]').forEach(ta => { sections[ta.dataset.key] = ta.value; });
+  if (currentPromptData) Object.keys(currentPromptData).forEach(key => { if (!(key in sections)) sections[key] = currentPromptData[key]; });
+  const thinkingCorrections = getThinkingCorrections();
   setPromptStatus('regenerating...', 'var(--thinking)');
   document.getElementById('regenerate-btn').disabled = true;
-
-  ws.send(JSON.stringify({
-    type:       'regenerate',
-    session_id: SESSION_ID,
-    sections:   sections,
-    thinking:   thinking,
-    context: {
-      current_host: primaryHost || '',
-      fronters:     fronters,
-    },
-  }));
+  ws.send(JSON.stringify({ type:'regenerate', session_id:SESSION_ID, sections, thinking:thinkingCorrections, context:{current_host:primaryHost||'',fronters} }));
 }
 
-// Handle incoming prompt_sections message
 function handlePromptSections(data) {
-  currentPromptData  = data.sections;
+  currentPromptData   = data.sections;
   currentThinkingData = data.thinking || null;
-  if (promptPanelOpen) {
-    renderPromptSections();
-  }
+  if (promptPanelOpen) renderPromptSections();
 }
-
-// ── Thinking tab ──────────────────────────────────────────────────────────────
-
-let currentThinkingData = null;
-
-// Human-readable labels for thinking fields
-const THINKING_LAYER_LABELS = {
-  layer_1_observe: {
-    label: "Layer 1 — Observe",
-    fields: {
-      what_they_said: "What they said",
-      tone:           "Tone",
-      subtext:        "Subtext",
-      body_read:      "Body read",
-      register:       "Register",
-    }
-  },
-  layer_2_interpret: {
-    label: "Layer 2 — Interpret",
-    fields: {
-      what_they_want: "What they want",
-      what_they_need: "What they need",
-      pattern_match:  "Pattern match",
-      delta:          "Delta from baseline",
-      context_fit:    "Context fit",
-    }
-  },
-  layer_3_intend: {
-    label: "Layer 3 — Intend",
-    fields: {
-      my_state:        "My state",
-      goal_alignment:  "Goal alignment",
-      what_I_want:     "What I want",
-      what_I_should_do: "What I should do",
-      tension:         "Tension",
-    }
-  },
-  layer_4_plan: {
-    label: "Layer 4 — Plan",
-    fields: {
-      tone:     "Tone",
-      lead:     "Lead with",
-      body:     "Body note",
-      avoid:    "Avoid",
-      length:   "Length",
-      response: "Response",
-    }
-  },
-};
 
 function renderThinkingTab() {
   const container = document.getElementById('prompt-sections');
   container.innerHTML = '';
-
-  if (!currentThinkingData || Object.keys(currentThinkingData).length === 0) {
-    container.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:16px;text-align:center;">no thinking data yet — waiting for a response with JSON output...</div>';
+  if (!currentThinkingData || !Object.keys(currentThinkingData).length) {
+    container.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:16px;text-align:center;">no thinking data yet</div>';
     return;
   }
-
   Object.entries(THINKING_LAYER_LABELS).forEach(([layerKey, layerDef]) => {
     const layerData = currentThinkingData[layerKey] || {};
-
-    // Layer header
     const header = document.createElement('div');
-    header.style.cssText = `
-      font-size:10px; letter-spacing:0.08em; text-transform:uppercase;
-      color:var(--accent); padding:8px 0 4px; border-bottom:1px solid var(--border);
-      margin-bottom:6px; font-weight:500;
-    `;
+    header.style.cssText = 'font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--accent);padding:8px 0 4px;border-bottom:1px solid var(--border);margin-bottom:6px;font-weight:500;';
     header.textContent = layerDef.label;
     container.appendChild(header);
-
-    // Fields
     Object.entries(layerDef.fields).forEach(([fieldKey, fieldLabel]) => {
       const value = layerData[fieldKey];
       if (value === null || value === undefined) return;
-
-      const section = document.createElement('div');
-      section.className = 'prompt-section';
-
-      const labelRow = document.createElement('div');
-      labelRow.className = 'prompt-section-label';
-      labelRow.innerHTML = `
-        <span style="color:var(--text-dim)">${fieldLabel}</span>
-        <span onclick="resetThinkingField('${layerKey}','${fieldKey}')" title="reset">reset</span>
-      `;
-
-      const valueStr = value === null ? '' : String(value);
+      const section  = document.createElement('div'); section.className = 'prompt-section';
+      const labelRow = document.createElement('div'); labelRow.className = 'prompt-section-label';
+      labelRow.innerHTML = `<span style="color:var(--text-dim)">${fieldLabel}</span><span onclick="resetThinkingField('${layerKey}','${fieldKey}')" title="reset">reset</span>`;
+      const valueStr = String(value);
       const ta = document.createElement('textarea');
-      ta.dataset.layer    = layerKey;
-      ta.dataset.field    = fieldKey;
-      ta.dataset.original = valueStr;
-      ta.value            = valueStr;
-      ta.rows             = Math.min(Math.max(valueStr.split('\n').length + 1, 2), 8);
-
-      // response field gets more height
-      if (fieldKey === 'response') ta.rows = 6;
-
-      ta.addEventListener('input', () => {
-        ta.classList.toggle('modified', ta.value !== ta.dataset.original);
-        updateRegenerateBtn();
-      });
-
-      section.appendChild(labelRow);
-      section.appendChild(ta);
-      container.appendChild(section);
+      ta.dataset.layer = layerKey; ta.dataset.field = fieldKey;
+      ta.dataset.original = valueStr; ta.value = valueStr;
+      ta.rows = fieldKey === 'response' ? 6 : Math.min(Math.max(valueStr.split('\n').length+1,2),8);
+      ta.addEventListener('input', () => { ta.classList.toggle('modified', ta.value !== ta.dataset.original); updateRegenerateBtn(); });
+      section.appendChild(labelRow); section.appendChild(ta); container.appendChild(section);
     });
   });
-
   updateRegenerateBtn();
 }
 
 function resetThinkingField(layerKey, fieldKey) {
-  const ta = document.querySelector(
-    `.prompt-section textarea[data-layer="${layerKey}"][data-field="${fieldKey}"]`
-  );
-  if (ta) {
-    ta.value = ta.dataset.original;
-    ta.classList.remove('modified');
-    updateRegenerateBtn();
-  }
+  const ta = document.querySelector(`.prompt-section textarea[data-layer="${layerKey}"][data-field="${fieldKey}"]`);
+  if (ta) { ta.value = ta.dataset.original; ta.classList.remove('modified'); updateRegenerateBtn(); }
 }
 
 function getThinkingCorrections() {
   if (!currentThinkingData) return null;
-
-  // Deep clone current thinking
   const corrected = JSON.parse(JSON.stringify(currentThinkingData));
-
   document.querySelectorAll('.prompt-section textarea[data-layer]').forEach(ta => {
-    const layer = ta.dataset.layer;
-    const field  = ta.dataset.field;
+    const layer = ta.dataset.layer; const field = ta.dataset.field;
     if (!corrected[layer]) corrected[layer] = {};
     corrected[layer][field] = ta.value;
   });
-
   return corrected;
 }
 
-// Handle regenerated response
 function handleRegenerated(data) {
-  setPromptStatus(`saved as DPO pair`, 'var(--gizmo)');
+  setPromptStatus('saved as DPO pair', 'var(--gizmo)');
   setTimeout(() => setPromptStatus(''), 3000);
-
-  // Update thinking data if returned
-  if (data.thinking && Object.keys(data.thinking).length > 0) {
-    currentThinkingData = data.thinking;
-  }
-
-  // Reset modified state on all textareas
+  if (data.thinking && Object.keys(data.thinking).length) currentThinkingData = data.thinking;
   document.querySelectorAll('.prompt-section textarea.modified').forEach(ta => {
-    ta.dataset.original = ta.value;
-    ta.classList.remove('modified');
+    ta.dataset.original = ta.value; ta.classList.remove('modified');
   });
   updateRegenerateBtn();
-
-  // Replace last Gizmo message
-  if (lastGizmoMsgEl && data.response) {
-    lastGizmoMsgEl.querySelector('.message-body').textContent = data.response;
-  }
-
-  // Re-render thinking tab if active
-  if (activePromptTab === 'thinking') {
-    renderThinkingTab();
-  }
+  if (lastGizmoMsgEl && data.response) lastGizmoMsgEl.querySelector('.message-body').textContent = data.response;
+  if (activePromptTab === 'thinking') renderThinkingTab();
 }
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+initPrimaryBox();
+connect();
+setSendEnabled(true);
 </script>
 </body>
 </html>
