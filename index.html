@@ -752,6 +752,12 @@ function handleIncoming(msg) {
       appendMessage('gizmo', 'Gizmo', msg.response, 'gizmo');
       lastGizmoMsgEl = document.querySelector('.message.gizmo:last-child');
     }
+    // Ack receipt so server clears pending_response
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'received', session_id: SESSION_ID }));
+      }
+    } catch(e) { console.warn('[received] ack failed:', e); }
     return;
   }
 
@@ -819,6 +825,12 @@ function handleIncoming(msg) {
     _pipelineWasActive = false;
     setSendEnabled(true);
     scrollBottom();
+    // Acknowledge receipt — server clears pending_response only after this
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'received', session_id: msg.session_id || SESSION_ID }));
+      }
+    } catch(e) { console.warn('[received] ack failed:', e); }
     return;
   }
 

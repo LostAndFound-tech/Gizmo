@@ -360,6 +360,18 @@ class GizmoServer:
             await self._handle_check_unsent(websocket, sid, msg)
             return
 
+        if msg_type == "received":
+            # Client acknowledged receipt — now safe to clear pending_response
+            try:
+                saved = _load_session(sid)
+                if saved:
+                    saved.pop("pending_response", None)
+                    saved.pop("pending_response_ts", None)
+                    _save_session(sid, saved)
+            except Exception:
+                pass
+            return
+
         log_event("GizmoServer", "MSG_TYPE_IGNORED", type=msg_type, session=sid[:8])
 
     async def _handle_check_scene(self, websocket, session_id: str, msg: dict) -> None:
@@ -576,19 +588,14 @@ class GizmoServer:
         # By the time we get here, a reconnect may have updated _live_sockets[session_id]
         # to the new socket. Use it.
         live_ws = _live_sockets.get(session_id, websocket)
-        print(f"[DEBUG DELIVER] session_id={session_id} live_ws_id={id(live_ws)} ws_id={id(websocket)} match={live_ws is websocket}", flush=True)
+
         for i in range(0, len(response), CHUNK_SIZE):
             await self._send(live_ws, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
             await asyncio.sleep(0)
 
-        # Clear pending_response — delivered successfully
-        try:
-            delivered = _load_session(session_id) or {}
-            delivered.pop("pending_response", None)
-            delivered.pop("pending_response_ts", None)
-            _save_session(session_id, delivered)
-        except Exception:
-            pass
+        # pending_response is NOT cleared here — client sends a "received" ack
+        # after processing "done", and only then do we clear it from disk.
+        # This ensures reconnect can always recover a lost response.
 
         await self._send(live_ws, {"type": "done", "session_id": session_id, "current_host": headmate or ""})
 
@@ -645,9 +652,7 @@ class GizmoServer:
                 await self._send(websocket, {"type": "chunk", "content": pending[i:i+CHUNK_SIZE]})
                 await asyncio.sleep(0)
             await self._send(websocket, {"type": "done", "session_id": session_id, "current_host": headmate})
-            saved.pop("pending_response", None)
-            saved.pop("pending_response_ts", None)
-            _save_session(session_id, saved)
+            # Don't clear pending_response here — wait for client "received" ack
             return
 
         # ── Case 3: User message with no response ─────────────────────────────
