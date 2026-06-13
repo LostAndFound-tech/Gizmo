@@ -721,7 +721,7 @@ class GizmoServer:
     async def _send(self, websocket, data: dict) -> None:
         try:
             await websocket.send_str(json.dumps(data))
-        except Exception:
+        except Exception as e:
             print(f"[SEND FAILED] type={data.get('type')} error={e}", flush=True)
             pass
 
