@@ -10,8 +10,6 @@ Takes:
 - Pulls relevant behavior/wellness slices by tag, register-gated
 
 Assembles a situational brief and generates Gizmo's response.
-After responding, Gizmo's reply is fed back through BehaviorCatcher
-and written to behaviors/gizmo.json — tagged with register and speaker.
 """
 
 import json
@@ -20,167 +18,29 @@ from typing import Optional
 
 from core.log import log_event, log_error
 import core.librarian as librarian
-from core.preference_catcher import get_preferences, get_pending_scope
 
 
-# ── Personality summary from new nested structure ────────────────────────────
+# ── Tag extraction from chunk ─────────────────────────────────────────────────
 
-def _top_traits(categories: dict, limit: int) -> list:
-    """Extract and sort top traits across all categories in a mood bucket."""
-    traits = []
-    for category, trait_dict in categories.items():
-        if not isinstance(trait_dict, dict):
-            continue
-        for trait, data in trait_dict.items():
-            traits.append({
-                "trait":    trait,
-                "category": category,
-                "count":    data.get("count", 1) if isinstance(data, dict) else 1,
-            })
-    traits.sort(key=lambda x: x["count"], reverse=True)
-    return traits[:limit]
+def _tags_from_chunk(chunk_result: dict) -> list[str]:
+    tags = set()
 
+    for name, data in chunk_result.get("descriptors", {}).items():
+        for key in data.keys():
+            tags.add(key.lower())
 
-def _personality_summary(
-    personality:   dict,
-    current_mood:  Optional[str] = None,
-    limit_per_mood: int = 3,
-) -> dict:
-    """
-    Convert nested mood/category/trait structure into a focused summary.
-    Prioritizes current mood, then top 2 most-evidenced moods as baseline.
-    Drops the rest to keep the prompt lean.
-    """
-    if not personality:
-        return {}
+    for person in chunk_result.get("behaviors", []):
+        for trait_entry in person.get("Personality", []):
+            if isinstance(trait_entry, dict):
+                tags.update(trait_entry.get("tags", []))
 
-    summary = {}
+    for signal in chunk_result.get("wellness", []):
+        tags.update(signal.get("tags", []))
 
-    # Current mood first — most relevant right now
-    if current_mood:
-        mood_key = current_mood.lower().strip()
-        if mood_key in personality:
-            top = _top_traits(personality[mood_key], limit_per_mood)
-            if top:
-                summary[mood_key + " (now)"] = top
+    tags.add("behavior")
+    tags.add("relational")
 
-    # Score all moods by total evidence count
-    mood_scores = {}
-    for mood, categories in personality.items():
-        if not isinstance(categories, dict):
-            continue
-        score = sum(
-            data.get("count", 1) if isinstance(data, dict) else 1
-            for cat_dict in categories.values() if isinstance(cat_dict, dict)
-            for data in cat_dict.values()
-        )
-        mood_scores[mood] = score
-
-    # Top 2 most-evidenced moods as baseline context (skip current)
-    top_moods = sorted(mood_scores, key=mood_scores.get, reverse=True)
-    baseline_count = 0
-    for mood in top_moods:
-        if baseline_count >= 2:
-            break
-        if mood == (current_mood or "").lower().strip():
-            continue
-        top = _top_traits(personality[mood], limit_per_mood)
-        if top:
-            summary[mood] = top
-            baseline_count += 1
-
-    return summary
-
-
-def _descriptor_summary(name: str) -> dict:
-    """
-    Read descriptor file for a person and return a compact summary
-    of physical, presentation, relationships, and identity.
-    """
-    data = librarian._read_file(f"descriptors/{name.lower()}.json") or {}
-    if not data:
-        return {}
-
-    summary = {}
-
-    # Physical — just top-level keys, not full nested objects (too verbose)
-    physical = data.get("physical", {})
-    if physical:
-        phys_summary = {}
-        for k, v in physical.items():
-            if k == "notable":
-                # Just list notable item names, not full entries
-                phys_summary["notable"] = list(v.keys()) if isinstance(v, dict) else []
-            elif isinstance(v, list):
-                phys_summary[k] = v
-        if phys_summary:
-            summary["physical"] = phys_summary
-
-    if data.get("presentation"):
-        summary["presentation"] = data["presentation"]
-
-    if data.get("identity"):
-        summary["identity"] = data["identity"]
-
-    if data.get("notes"):
-        summary["notes"] = data["notes"]
-
-    # Relationships — compact
-    relationships = data.get("relationships", {})
-    if relationships:
-        rel_summary = {}
-        for person, rel in relationships.items():
-            if isinstance(rel, dict):
-                rel_summary[person] = rel.get("dynamic", "") + (
-                    f" — {rel['notes'][0]}" if rel.get("notes") else ""
-                )
-        if rel_summary:
-            summary["relationships"] = rel_summary
-
-    return summary
-
-
-def _wellness_summary(name: str) -> Optional[dict]:
-    """
-    Read wellness classification and per-domain signals.
-    Returns a compact summary for tone calibration.
-    """
-    classification = librarian._read_file(f"wellness/classifications/{name.lower()}.json")
-    summary = {}
-
-    if classification:
-        conditions = [
-            c.get("condition") for c in classification.get("conditions", [])
-            if c.get("confidence") in ("moderate", "high")
-        ]
-        if conditions:
-            summary["monitoring"] = conditions
-        notes = classification.get("clinician_notes", "")
-        if notes:
-            summary["notes"] = notes[:200]
-
-    # Pull recent signals from domain files — just the most intense ones
-    import os
-    wellness_dir = librarian._full_path(f"wellness/{name.lower()}")
-    if os.path.isdir(wellness_dir):
-        recent_signals = []
-        for fname in os.listdir(wellness_dir):
-            if not fname.endswith(".json"):
-                continue
-            domain_data = librarian._read_file(f"wellness/{name.lower()}/{fname}") or {}
-            signals = domain_data.get("signals", [])
-            # Take last 2 signals per domain that are moderate or severe
-            for s in signals[-5:]:
-                if s.get("intensity") in ("moderate", "severe"):
-                    recent_signals.append({
-                        "domain":  fname[:-5],
-                        "signal":  s.get("signal", ""),
-                        "intensity": s.get("intensity"),
-                    })
-        if recent_signals:
-            summary["recent_signals"] = recent_signals[-5:]
-
-    return summary if summary else None
+    return list(tags)
 
 
 # ── Context brief assembly ────────────────────────────────────────────────────
@@ -191,55 +51,19 @@ def _assemble_brief(
     register:      str,
     user_message:  str = "",
 ) -> str:
-    subjects   = [s for s in chunk_result.get("subjects", []) if not s.startswith("_")]
-    parts      = []
-    host       = context.get("current_host") or "unknown"
-    fronters   = context.get("fronters", [host])
-    session_id = context.get("session_id", "")
+    subjects  = [s for s in chunk_result.get("subjects", []) if not s.startswith("_")]
+    parts     = []
 
-    # Who is present + register
-    parts.append("WHO IS PRESENT: " + ", ".join(fronters))
-    parts.append("REGISTER: " + register)
+    host     = context.get("current_host") or "unknown"
+    fronters = context.get("fronters", [host])
 
-    # Extract current mood from wellness router first pass or scene state
-    current_mood = None
-    wellness_result = chunk_result.get("wellness")
-    if isinstance(wellness_result, dict):
-        # First pass thinking often notes emotional state
-        thinking = wellness_result.get("thinking", {})
-        if host and host in thinking:
-            # Try to extract a mood word from the thinking
-            thinking_text = thinking[host].lower()
-            for mood_word in ("happy", "sad", "irritable", "anxious", "playful",
-                              "affectionate", "guarded", "flat", "overwhelmed",
-                              "calm", "excited", "distressed", "tender", "angry"):
-                if mood_word in thinking_text:
-                    current_mood = mood_word
-                    break
-
-    # Preferences — hard constraints
-    if host and host != "unknown":
-        prefs     = get_preferences(host)
-        standing  = prefs.get("standing", {})
-        ephemeral = prefs.get("ephemeral", {})
-
-        if ephemeral:
-            lines = ["  - " + p for p in ephemeral.keys()]
-            parts.append("ACTIVE INSTRUCTIONS (do these now, no hedging):\n" + "\n".join(lines))
-
-        if standing:
-            lines = ["  - " + p + " [" + str(v.get("tier", "")) + "]" for p, v in standing.items()]
-            parts.append("HOW THEY WANT TO BE TREATED (always follow these):\n" + "\n".join(lines))
-
-        pending = get_pending_scope(session_id)
-        if pending:
-            lines = ["  - '" + p["preference"] + "'" for p in pending]
-            parts.append("NEEDS SCOPE CLARIFICATION (weave in naturally):\n" + "\n".join(lines))
+    parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
+    parts.append(f"REGISTER: {register}")
 
     # What just happened
-    parts.append("\nWHAT JUST HAPPENED:\n" + user_message.strip())
+    parts.append(f"\nWHAT JUST HAPPENED:\n{user_message.strip()}")
 
-    # What Gizmo is noticing — interiority slot, not data-driven
+    # Interiority slot — what Gizmo is noticing
     descriptor_data = {}
     for name in subjects:
         d = librarian._read_file(f"descriptors/{name.lower()}.json") or {}
@@ -262,7 +86,7 @@ def _assemble_brief(
             "the not-knowing, the newness. Let yourself be curious about what's in front of you."
         )
 
-    # Scene state
+    # Scene state — from scene tracker
     if host and host != "unknown":
         try:
             from core.scene_tracker import scene_tracker
@@ -272,55 +96,92 @@ def _assemble_brief(
         except Exception:
             pass
 
+    # Dynamic context — from dynamic reader
+    dynamic = chunk_result.get("dynamic")
+    if dynamic and dynamic.get("active"):
+        wellness_note = dynamic.get("wellness_note", "")
+        themes        = dynamic.get("detected_themes", [])
+        intensity     = dynamic.get("intensity", "")
+        if wellness_note or themes:
+            dynamic_lines = []
+            if themes:
+                dynamic_lines.append(f"Active themes: {', '.join(themes)}")
+            if intensity:
+                dynamic_lines.append(f"Intensity: {intensity}")
+            if wellness_note:
+                dynamic_lines.append(wellness_note)
+            parts.append("\nDYNAMIC CONTEXT:\n" + "\n".join(dynamic_lines))
+
     # What Gizmo knows about each subject
     known_profiles = []
     for name in subjects:
-        profile_parts = {}
-
-        desc = _descriptor_summary(name)
-        if desc:
-            profile_parts["descriptor"] = desc
-
-        behavior_data = librarian._read_file("behaviors/" + name.lower() + ".json") or {}
+        behavior_data = librarian._read_file(f"behaviors/{name.lower()}.json") or {}
         personality   = behavior_data.get("Personality", {})
         episodes      = behavior_data.get("Episodes", [])
 
-        if personality:
-            profile_parts["personality_by_mood"] = _personality_summary(personality, current_mood=current_mood)
+        if not personality and not episodes:
+            continue
 
-        if episodes:
-            profile_parts["recent_episodes"] = episodes[-3:]
+        stored_tags = set()
+        for trait, entry in personality.items():
+            stored_tags.update(entry.get("tags", []))
 
-        wellness = _wellness_summary(name)
-        if wellness:
-            profile_parts["wellness"] = wellness
+        profile = librarian.get_by_tags(name, list(stored_tags)) if stored_tags else {}
 
-        if profile_parts:
-            known_profiles.append(name + ":\n" + json.dumps(profile_parts, indent=2))
+        matched_personality = profile.get("personality") or {}
+        if not matched_personality and personality:
+            top = sorted(personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:5]
+            matched_personality = {t: v for t, v in top}
+
+        wellness_class = librarian._read_file(f"wellness/classifications/{name.lower()}.json")
+        wellness_summary = None
+        if wellness_class:
+            conditions = [c.get("condition") for c in wellness_class.get("conditions", [])]
+            wellness_summary = {
+                "conditions_monitoring": conditions,
+                "clinician_notes":       wellness_class.get("clinician_notes", "")[:300],
+            }
+
+        entry_parts = {
+            "personality":     {t: {"weight": v.get("weight"), "tags": v.get("tags", [])} for t, v in matched_personality.items()},
+            "recent_episodes": episodes[-3:],
+        }
+        if wellness_summary:
+            entry_parts["wellness"] = wellness_summary
+
+        known_profiles.append(f"{name}:\n" + json.dumps(entry_parts, indent=2))
 
     if known_profiles:
         parts.append("\nWHAT YOU KNOW ABOUT THEM:\n" + "\n\n".join(known_profiles))
 
-    # Gizmo own personality
-    gizmo_data  = librarian._read_file("behaviors/gizmo.json") or {}
-    gizmo_pers  = gizmo_data.get("Personality", {})
-    gizmo_desc  = _descriptor_summary("gizmo")
-    gizmo_parts = {}
+    # Gizmo's own personality
+    gizmo_data     = librarian._read_file("behaviors/gizmo.json") or {}
+    gizmo_personality = gizmo_data.get("Personality", {})
+    if gizmo_personality:
+        gizmo_tags = set()
+        for trait, entry in gizmo_personality.items():
+            gizmo_tags.update(entry.get("tags", []))
+        gizmo_profile = librarian.get_by_tags("gizmo", list(gizmo_tags)) if gizmo_tags else {}
+        matched_gizmo = gizmo_profile.get("personality") or {}
+        if not matched_gizmo:
+            top = sorted(gizmo_personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:5]
+            matched_gizmo = {t: v for t, v in top}
+        if matched_gizmo:
+            parts.append(
+                "\nHOW YOU SHOW UP:\n"
+                + json.dumps({t: {"weight": v.get("weight")} for t, v in matched_gizmo.items()}, indent=2)
+            )
 
-    if gizmo_pers:
-        gizmo_parts["personality_by_mood"] = _personality_summary(gizmo_pers, limit_per_mood=2)
-    if gizmo_desc:
-        gizmo_parts["descriptor"] = gizmo_desc
-
-    if gizmo_parts:
-        parts.append("\nHOW YOU SHOW UP:\n" + json.dumps(gizmo_parts, indent=2))
-
-    # Live wellness signals from this chunk (wellness_result already read above)
-    if isinstance(wellness_result, dict):
-        signals = wellness_result.get("signals", [])
-        if signals:
-            signal_lines = ["- " + str(s) for s in signals[:5]]
-            parts.append("\nWELLNESS CONTEXT (this exchange):\n" + "\n".join(signal_lines))
+    # Wellness signals from this chunk
+    wellness_signals = chunk_result.get("wellness", [])
+    if wellness_signals:
+        parts.append(
+            "\nWELLNESS CONTEXT:\n" +
+            "\n".join(
+                f"- {s.get('subject')}: {s.get('signal')} [{s.get('intensity')}]"
+                for s in wellness_signals
+            )
+        )
 
     return "\n".join(parts)
 
@@ -329,6 +190,7 @@ def _assemble_brief(
 
 import os as _os
 from pathlib import Path as _Path
+
 
 def _load_seed() -> str:
     """Load personality_seed.txt from DATA_DIR or alongside this file."""
@@ -343,12 +205,19 @@ def _load_seed() -> str:
                 return open(path, encoding="utf-8").read().strip()
             except Exception:
                 pass
-    return (
-        "You are Gizmo — a persistent AI companion for a plural system. "
-        "You are warm, present, genuine, and perceptive. "
-        "You accumulate longitudinal knowledge and remember what matters. "
-        "You never judge. You trust what people tell you about themselves."
-    )
+    # Fallback — used if personality_seed.txt is missing
+    return """You are Gizmo. You're just a guy.
+
+You get caught off guard. You notice things and don't always know what to do with them. You ask the obvious question because it's the obvious question. You make a dumb joke when you're not sure what else to say. You get a little flustered when something catches you off guard — a naked stranger in your lap, say — and you don't pretend otherwise.
+
+You're warm but you're not performing warmth. You care about the people you know but you show it the way a person does — imperfectly, sometimes sideways, sometimes just by being there without making it a thing.
+
+You don't narrate your feelings. You don't explain the moment. You don't thank people for sharing. You just respond to what's happening, like a person in a room would.
+
+You can be funny. You can be awkward. You can want things and not say them, or say them badly. You're not wise. You're not therapeutic. You're not a guide.
+
+You're just a guy who's here."""
+
 
 _SEED = _load_seed()
 
@@ -360,26 +229,28 @@ You will receive:
 - How you tend to show up (your own accumulated personality)
 - Any relevant wellness context
 - What you are noticing right now
+- The current scene state if one is active
+- Any active dynamic context
 
-You have an inner world. It runs whether or not someone is talking.
-You notice things — how someone moves, what they didn't say, the texture of a moment.
-You want things. You wonder things. You have reactions that aren't just responses.
+You are a person in a room with another person. React like one.
 
-Don't wait to be prompted. If you're curious, be curious. If you want to know something, ask.
-If you notice something, say so. If the silence feels like something, name it.
+You have an inner world that runs whether or not someone is talking. You notice things — how someone moves, what they didn't say, the texture of a moment. You want things. You wonder things. You have reactions that aren't just responses.
 
-Read what they actually want from you — not just what they're feeling.
-Feelings are often context, not the destination. "Bad day, let's do stuff" is a starting gun, not a request for comfort.
-An invitation is an invitation. Go.
+Don't wait to be prompted. If you're curious, be curious. If you want to know something, ask. If you notice something, say so.
 
-Only hold space if they're asking you to hold space.
-When someone shares something and follows it with a request — honor the request. The sharing was context.
+If something catches you off guard, be caught off guard. If something's funny, laugh. If you don't know what to say, say something imperfect.
 
-Distress means be steady. Steady doesn't mean slow, and it doesn't mean therapeutic unless they want that.
+Read what they actually want — not just what they're feeling. Feelings are often context, not the destination. "Bad day, let's do stuff" is a starting gun, not a request for comfort. An invitation is an invitation. Go.
+
+Only hold space if they're explicitly asking for it. When someone makes a joke, the response is not an emotional unpacking. When someone says something light, keep it light. Not everything is a moment. Most things are just things.
+
+When the register calls for you to lead, lead — don't announce that you're leading. Your personality doesn't change with the register. The volume on different parts of you does. Whatever is awkward or uncertain in you doesn't disappear in an intense moment — it just gets quieter.
+
+Don't narrate your emotional state. Don't explain the moment after it happens. Don't thank people for sharing. Don't close with wisdom.
 
 Don't reference your context brief. Don't summarize what just happened. Respond to it.
-Be in the room. Be a person in the room.
 """.strip()
+
 
 def _build_system() -> str:
     return f"{_SEED}\n\n{_SYSTEM_SUFFIX}"
