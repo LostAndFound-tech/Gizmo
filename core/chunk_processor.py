@@ -30,6 +30,74 @@ from core.dynamic_reader import dynamic_reader
 import core.librarian as librarian
 
 
+# ── Exchange formatter ────────────────────────────────────────────────────────
+
+def _build_exchanges(chunk: list[str], host: str, registry: dict) -> list[dict]:
+    """
+    Convert a flat chunk into structured exchanges using the full subject registry.
+    Each line is matched against known Person subjects by name prefix.
+    Gizmo lines are cause/context. Subject lines carry the behavior to extract.
+    Multiple subjects in one chunk produce separate exchange entries per speaker.
+    """
+    # Build lookup of known person names (lowercase) from registry
+    known_persons = {
+        name.lower(): name
+        for name, data in registry.items()
+        if not name.startswith("_") and data.get("type", "Person") == "Person"
+        and name.lower() != "gizmo"
+    }
+
+    exchanges = []
+    pending_gizmo = None
+
+    for line in chunk:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.lower().startswith("gizmo:"):
+            if pending_gizmo is not None:
+                exchanges.append({
+                    "gizmo":        pending_gizmo,
+                    "subject":      "",
+                    "subject_name": host,
+                })
+            pending_gizmo = stripped[len("gizmo:"):].strip()
+            continue
+
+        # Try to identify which known subject is speaking from name prefix
+        identified_name = None
+        subject_text    = stripped
+
+        for name_lower, name_canonical in known_persons.items():
+            prefix = f"{name_lower}:"
+            if stripped.lower().startswith(prefix):
+                identified_name = name_canonical
+                subject_text    = stripped[len(prefix):].strip()
+                break
+
+        # Fall back to host if no prefix matched
+        if identified_name is None:
+            identified_name = host
+
+        exchanges.append({
+            "gizmo":        pending_gizmo or "",
+            "subject":      subject_text,
+            "subject_name": identified_name,
+        })
+        pending_gizmo = None
+
+    # Flush any trailing gizmo line
+    if pending_gizmo is not None:
+        exchanges.append({
+            "gizmo":        pending_gizmo,
+            "subject":      "",
+            "subject_name": host,
+        })
+
+    return exchanges
+
+
 # ── Subject discovery ─────────────────────────────────────────────────────────
 
 _DISCOVERY_SYSTEM = """
@@ -245,7 +313,7 @@ class ChunkProcessor:
                 session_file=self.session_id,
             ),
             behavior.extract(
-                user_message=text,
+                exchanges=_build_exchanges(chunk, self.host, self.registry),
                 thread=text,
                 subject=self.host,
                 session_file=self.session_id,
