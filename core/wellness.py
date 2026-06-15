@@ -138,7 +138,7 @@ Rules:
 """.strip()
 
 
-def _build_prompt(chunk: list[str], speakers: list[str], behavior_context: dict) -> str:
+def _build_prompt(chunk: list[str], speakers: list[str], behavior_context: dict, dynamic_context: Optional[dict] = None) -> str:
     parts = [
         f"Speakers present: {', '.join(speakers)}",
         (
@@ -146,8 +146,43 @@ def _build_prompt(chunk: list[str], speakers: list[str], behavior_context: dict)
             "'I', 'me', 'us', 'we' refers to the plural system being served. "
             "Lines prefixed 'Gizmo:' are AI responses — do not file wellness signals about Gizmo."
         ),
-        "\nChunk:\n" + "\n".join(chunk),
     ]
+
+    if dynamic_context and dynamic_context.get("active"):
+        wellness_note = dynamic_context.get("wellness_note", "")
+        congruence    = dynamic_context.get("congruence", "high")
+        flags         = dynamic_context.get("flags", [])
+
+        dynamic_lines = ["DYNAMIC CONTEXT (read before evaluating):"]
+        if wellness_note:
+            dynamic_lines.append(wellness_note)
+        dynamic_lines.append(
+            f"Congruence: {congruence}. "
+            "Calm, matter-of-fact acknowledgment of expected pain or discomfort is NOT "
+            "an anxiety or PTSD signal — look for disproportionate or unexpected reactions only."
+        )
+        if congruence == "high":
+            dynamic_lines.append(
+                "Language congruent with established dynamic. Reduce assessed intensity by one level "
+                "for signals that are clearly scene-congruent."
+            )
+        elif congruence == "low":
+            dynamic_lines.append(
+                "Congruence is low — some language may reflect genuine distress. Assess carefully "
+                "and do not blanket-suppress signals."
+            )
+        if flags:
+            dynamic_lines.append(f"Flagged by dynamic reader: {'; '.join(flags)}")
+
+        parts.append("\n".join(dynamic_lines))
+
+        # Also inject longitudinal dynamic brief
+        from core.dynamic_reader import get_longitudinal_brief
+        longitudinal = get_longitudinal_brief(speakers[0] if speakers else "")
+        if longitudinal:
+            parts.append(f"LONGITUDINAL DYNAMIC HISTORY:\n{longitudinal}")
+
+    parts.append("\nChunk:\n" + "\n".join(chunk))
     parts.append(
         f"\nExisting behavioral context:\n"
         + json.dumps(behavior_context, indent=2)
@@ -202,6 +237,7 @@ class WellnessCollector:
         chunk:    list[str],
         chunk_id: str,
         registry: dict,
+        dynamic_context: Optional[dict] = None,
     ) -> Optional[list]:
         if not chunk:
             return None
@@ -224,7 +260,7 @@ class WellnessCollector:
                         "Personality": data.get("Personality", {})
                     }
 
-            prompt  = _build_prompt(chunk, speakers, behavior_context)
+            prompt  = _build_prompt(chunk, speakers, behavior_context, dynamic_context)
             raw_str = await _call_llm(prompt)
 
             if not raw_str:

@@ -183,7 +183,7 @@ Rules:
 _ASSEMBLY_SYSTEM = """
 You are a clinical synthesis agent working on behalf of a licensed mental health professional.
 You receive pre-evaluated condition results and behavioral data for one individual.
-Your job is to identify system-level patterns and write the clinician handoff notes.
+Your job is to identify system-level patterns only.
 
 Return ONLY valid JSON. No markdown. No explanation. No preamble.
 
@@ -196,16 +196,33 @@ Return exactly this structure:
       "evidence_count": 3,
       "notes": "narrative description"
     }
-  ],
-  "clinician_notes": "Overall synthesis narrative. What stands out. What warrants attention. What appears healthy. What remains ambiguous. Written as a handoff to a professional walking in for the first time."
+  ]
 }
 
 Rules:
 - system_patterns: recurring dynamics that are clinically relevant but not pathological
 - Distinguish plural system function from pathology throughout
-- clinician_notes should be the most useful thing a clinician reads before a first session
-- Note what evidence is strong vs thin
-- Note what warrants further exploration
+- Do NOT include clinician notes — that is a separate pass
+""".strip()
+
+_CLINICIAN_SYSTEM = """
+You are a mental health consultant preparing a handoff note for a licensed clinician
+who is about to meet this individual for the first time.
+
+You may not diagnose. You may make any recommendations.
+
+Write in clear, direct clinical prose. No JSON. No headers. No bullet points.
+This is a note a professional reads before walking into a first session.
+
+Cover:
+- What the evidence shows clearly, and where it is thin
+- What warrants attention and why
+- What appears healthy or functional
+- What remains ambiguous and needs further exploration
+- Any recommendations for the clinician going in
+
+Distinguish plural system function from pathology throughout.
+Intentional perceptual pathways and system multiplicity are not symptoms.
 """.strip()
 
 
@@ -246,90 +263,39 @@ def _safe_parse(raw: str, name: str) -> Optional[dict | list]:
 # ── File helpers ──────────────────────────────────────────────────────────────
 
 def _list_wellness_files() -> list[str]:
-    """
-    Find all names with wellness data.
-    New structure: wellness/{name}/ subdirectories
-    Also checks behaviors/ for names with behavioral data only.
-    Skips classifications/ and system/.
-    """
     names = set()
-
-    # New structure — wellness/{name}/ directories
-    wellness_root = librarian._full_path("wellness")
-    if os.path.isdir(wellness_root):
-        for entry in os.listdir(wellness_root):
-            full = os.path.join(wellness_root, entry)
-            if os.path.isdir(full) and entry not in ("classifications", "system"):
-                names.add(entry)
-
-    # Legacy flat files — wellness/{name}.json (old pipeline)
-    if os.path.isdir(wellness_root):
-        for fname in os.listdir(wellness_root):
-            if fname.endswith(".json") and fname not in ("classifications",):
+    for subfolder in ("wellness", "behaviors"):
+        folder = librarian._full_path(subfolder)
+        if not os.path.isdir(folder):
+            continue
+        for fname in os.listdir(folder):
+            if fname.endswith(".json") and fname != "classifications":
                 names.add(fname[:-5])
-
-    # Behaviors — names with behavioral data but maybe no wellness yet
-    behaviors_root = librarian._full_path("behaviors")
-    if os.path.isdir(behaviors_root):
-        for fname in os.listdir(behaviors_root):
-            if fname.endswith(".json"):
-                names.add(fname[:-5])
-
-    # Strip known non-person names
-    names.discard("gizmo")
-    names.discard("system")
-
     print(f"[WellnessSynthesis] found names: {names}")
     return list(names)
 
 
-def _read_wellness(name: str) -> dict:
-    """
-    Read all wellness signals for a person.
-    New structure: wellness/{name}/{domain}.json — merged into one dict keyed by domain.
-    Falls back to legacy flat file wellness/{name}.json if no directory exists.
-    Returns {} if nothing found.
-    """
-    # New structure — per-domain files in wellness/{name}/
-    person_dir = librarian._full_path(f"wellness/{name.lower()}")
-    if os.path.isdir(person_dir):
-        merged = {}
-        for fname in os.listdir(person_dir):
-            if not fname.endswith(".json"):
-                continue
-            domain = fname[:-5]
-            data   = librarian._read_file(f"wellness/{name.lower()}/{fname}")
-            if data and isinstance(data.get("signals"), list):
-                merged[domain] = data["signals"]
-        if merged:
-            return merged
-
-    # Legacy fallback — flat wellness/{name}.json
-    legacy = librarian._read_file(f"wellness/{name}.json")
-    if legacy:
-        return legacy
-
-    return {}
+def _read_wellness(name: str) -> Optional[dict]:
+    return librarian._read_file(f"wellness/{name}.json")
 
 
 def _read_behaviors(name: str) -> Optional[dict]:
-    return librarian._read_file(f"behaviors/{name.lower()}.json")
+    return librarian._read_file(f"behaviors/{name}.json")
 
 
 def _read_prior(name: str) -> Optional[dict]:
-    return librarian._read_file(f"wellness/classifications/{name.lower()}.json")
+    return librarian._read_file(f"wellness/classifications/{name}.json")
 
 
 def _write_classification(name: str, classification: dict) -> None:
-    n = name.lower()
-    existing = librarian._read_file(f"wellness/classifications/{n}.json")
+    existing = librarian._read_file(f"wellness/classifications/{name}.json")
     if existing:
         ts = existing.get("last_synthesized", datetime.now(timezone.utc).isoformat())
         ts_clean = ts.replace(":", "-").replace(".", "-")[:19]
-        librarian._write_json(f"wellness/classifications/archive/{n}_{ts_clean}.json", existing)
-        print(f"[WellnessSynthesis] archived previous classification for {n}")
-    librarian._write_json(f"wellness/classifications/{n}.json", classification)
-    print(f"[WellnessSynthesis] classification written for {n}")
+        librarian._write_json(f"wellness/classifications/archive/{name}_{ts_clean}.json", existing)
+        print(f"[WellnessSynthesis] archived previous classification for {name}")
+    librarian._write_json(f"wellness/classifications/{name}.json", classification)
+    print(f"[WellnessSynthesis] classification written for {name}")
 
 
 # ── Group pass ────────────────────────────────────────────────────────────────
@@ -376,11 +342,38 @@ async def _run_assembly(
 
     raw = await _call_llm(prompt, _ASSEMBLY_SYSTEM)
     if not raw:
-        return {"system_patterns": [], "clinician_notes": "Assembly pass failed."}
+        return {"system_patterns": []}
     result = _safe_parse(raw, f"{name}/assembly")
     if isinstance(result, dict):
         return result
-    return {"system_patterns": [], "clinician_notes": "Assembly parse failed."}
+    return {"system_patterns": []}
+
+
+# ── Clinician notes pass ───────────────────────────────────────────────────────
+
+async def _run_clinician_notes(
+    name:           str,
+    conditions:     list,
+    system_patterns: list,
+    signals:        dict,
+    behaviors:      dict,
+    dynamic_brief:  Optional[str],
+) -> str:
+    prompt_parts = [
+        f"Individual: {name}\n",
+        f"Conditions evaluated:\n{json.dumps(conditions, indent=2)}\n",
+        f"System patterns:\n{json.dumps(system_patterns, indent=2)}\n",
+        f"Wellness signals:\n{json.dumps(signals, indent=2)}\n",
+        f"Behavioral data:\n{json.dumps({'Personality': behaviors.get('Personality', {})}, indent=2)}",
+    ]
+    if dynamic_brief:
+        prompt_parts.append(f"\nLongitudinal dynamic history:\n{dynamic_brief}")
+
+    raw = await _call_llm("\n".join(prompt_parts), _CLINICIAN_SYSTEM)
+    if not raw:
+        return "Clinician notes pass failed."
+    # This is prose — strip any accidental JSON fences but return as-is
+    return re.sub(r"```(?:json)?|```", "", raw).strip()
 
 
 # ── Synthesis ─────────────────────────────────────────────────────────────────
@@ -392,11 +385,7 @@ class WellnessSynthesis:
 
         signals   = _read_wellness(name) or {}
         behaviors = _read_behaviors(name) or {}
-        # Count all signals across all domains
-        total = sum(
-            len(v) for v in signals.values()
-            if isinstance(v, list)
-        )
+        total     = sum(len(v) for v in signals.values() if isinstance(v, list))
 
         print(f"[WellnessSynthesis] {name}: {total} wellness signals, behaviors: {bool(behaviors)}")
 
@@ -412,19 +401,33 @@ class WellnessSynthesis:
             for group in _CONDITION_GROUPS
         ])
 
-        # Flatten all condition results
         all_conditions = [c for group in group_results for c in group]
 
-        # ── Assembly pass ─────────────────────────────────────────────────────
+        # ── Assembly pass — system patterns only ──────────────────────────────
         assembly = await _run_assembly(name, all_conditions, signals, behaviors, prior)
+        system_patterns = assembly.get("system_patterns", [])
+
+        # ── Clinician notes — separate prose pass ─────────────────────────────
+        from core.dynamic_reader import get_longitudinal_brief
+        dynamic_brief = get_longitudinal_brief(name)
+
+        print(f"[WellnessSynthesis] running clinician notes pass for {name}...")
+        clinician_notes = await _run_clinician_notes(
+            name=name,
+            conditions=all_conditions,
+            system_patterns=system_patterns,
+            signals=signals,
+            behaviors=behaviors,
+            dynamic_brief=dynamic_brief,
+        )
 
         # ── Build final classification ────────────────────────────────────────
         classification = {
             "last_synthesized": datetime.now(timezone.utc).isoformat(),
             "observations":     total,
             "conditions":       all_conditions,
-            "system_patterns":  assembly.get("system_patterns", []),
-            "clinician_notes":  assembly.get("clinician_notes", ""),
+            "system_patterns":  system_patterns,
+            "clinician_notes":  clinician_notes,
         }
 
         _write_classification(name, classification)
