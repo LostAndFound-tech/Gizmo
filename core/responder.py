@@ -55,6 +55,162 @@ def _tags_from_chunk(chunk_result: dict) -> list[str]:
 
 # ── Context brief assembly ────────────────────────────────────────────────────
 
+def _flatten_descriptor(data: dict) -> dict:
+    """
+    Normalize descriptor data into a flat dict for the brief.
+    Handles both the old flat schema (Hair, Eyes, etc.)
+    and the new nested schema (physical.hair, presentation, etc.)
+    Also extracts appearance_note if present.
+    """
+    flat = {}
+
+    # Old flat schema — just pass through
+    old_keys = {"Hair", "Eyes", "Skin", "Face", "Body", "Height", "Build",
+                "Type", "Personality", "Relationships", "Clothing"}
+    for k, v in data.items():
+        if k in old_keys:
+            flat[k] = v
+
+    # New nested schema
+    physical = data.get("physical", {})
+    if physical:
+        for k, v in physical.items():
+            flat[k] = v  # hair, eyes, build, notable, etc.
+
+    presentation = data.get("presentation", {})
+    if presentation:
+        flat["presentation"] = presentation
+
+    relationships = data.get("relationships", {})
+    if relationships:
+        flat["relationships"] = relationships
+
+    identity = data.get("identity", [])
+    if identity:
+        flat["identity"] = identity
+
+    notes = data.get("notes", [])
+    if notes:
+        flat["notes"] = notes
+
+    # appearance_note — verbatim self-description, highest fidelity
+    appearance_note = data.get("appearance_note", "")
+    if appearance_note:
+        flat["appearance_note"] = appearance_note
+
+    return flat
+
+
+def _assemble_brief(
+    chunk_result:  dict,
+    context:       dict,
+    register:      str,
+    user_message:  str = "",
+    session_id:    str = "",
+) -> str:
+    subjects  = [s for s in chunk_result.get("subjects", []) if not s.startswith("_")]
+
+    parts = []
+
+    # Who is present
+    host     = context.get("current_host") or "unknown"
+    fronters = context.get("fronters", [host])
+    parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
+    parts.append(f"REGISTER: {register}")
+
+    # Rolling summary — what's been established, where things are
+    if session_id:
+        from core.context_summary import get_context
+        ctx_data = get_context(session_id)
+        if ctx_data.get("summary"):
+            parts.append(f"\nCONVERSATION SO FAR:\n{ctx_data['summary']}")
+
+    # What was just said — only the current user message, not the full exchange history
+    parts.append(f"\nWHAT JUST HAPPENED:\n{user_message.strip()}")
+
+    # What Gizmo knows about them — pulled from their own file tags
+    known_profiles = []
+    for name in subjects:
+        behavior_data = librarian._read_file(f"behaviors/{name.lower()}.json") or {}
+        personality   = behavior_data.get("Personality", {})
+        episodes      = behavior_data.get("Episodes", [])
+
+        if not personality and not episodes:
+            continue
+
+        # Collect all tags stored in their file
+        stored_tags = set()
+        for trait, entry in personality.items():
+            stored_tags.update(entry.get("tags", []))
+
+        # Pull their slice using their own stored tags
+        profile = librarian.get_by_tags(name, list(stored_tags)) if stored_tags else {}
+
+        # Fall back to top 5 weighted traits if tag query returns empty
+        matched_personality = profile.get("personality") or {}
+        if not matched_personality and personality:
+            top = sorted(personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:5]
+            matched_personality = {t: v for t, v in top}
+
+        # Pull wellness classification if it exists
+        wellness_class = librarian._read_file(f"wellness/classifications/{name.lower()}.json")
+        wellness_summary = None
+        if wellness_class:
+            conditions = [c.get("condition") for c in wellness_class.get("conditions", [])]
+            wellness_summary = {
+                "conditions_monitoring": conditions,
+                "clinician_notes":       wellness_class.get("clinician_notes", "")[:300],
+            }
+
+        # Pull descriptor data — flattened to handle both old and new schema
+        descriptor_data = librarian._read_file(f"descriptors/{name.lower()}.json") or {}
+        flat_descriptor = _flatten_descriptor(descriptor_data)
+
+        entry_parts = {
+            "personality":      {t: {"weight": v.get("weight"), "tags": v.get("tags", [])} for t, v in matched_personality.items()},
+            "recent_episodes":  episodes[-3:],
+        }
+        if flat_descriptor:
+            entry_parts["descriptor"] = flat_descriptor
+        if wellness_summary:
+            entry_parts["wellness"] = wellness_summary
+
+        known_profiles.append(f"{name}:\n" + json.dumps(entry_parts, indent=2))
+
+    if known_profiles:
+        parts.append("\nWHAT YOU KNOW ABOUT THEM:\n" + "\n\n".join(known_profiles))
+
+    # Gizmo's own personality — pulled from his own file tags
+    gizmo_data = librarian._read_file("behaviors/gizmo.json") or {}
+    gizmo_personality = gizmo_data.get("Personality", {})
+    if gizmo_personality:
+        gizmo_tags = set()
+        for trait, entry in gizmo_personality.items():
+            gizmo_tags.update(entry.get("tags", []))
+        gizmo_profile = librarian.get_by_tags("gizmo", list(gizmo_tags)) if gizmo_tags else {}
+        matched_gizmo = gizmo_profile.get("personality") or {}
+        if not matched_gizmo:
+            top = sorted(gizmo_personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:5]
+            matched_gizmo = {t: v for t, v in top}
+        if matched_gizmo:
+            parts.append(
+                "\nHOW YOU SHOW UP:\n"
+                + json.dumps({t: {"weight": v.get("weight")} for t, v in matched_gizmo.items()}, indent=2)
+            )
+
+    # Wellness context — mild informs tone, severe informs care
+    wellness_signals = chunk_result.get("wellness", [])
+    if wellness_signals:
+        parts.append(
+            "\nWELLNESS CONTEXT:\n" +
+            "\n".join(
+                f"- {s.get('subject')}: {s.get('signal')} [{s.get('intensity')}]"
+                for s in wellness_signals
+            )
+        )
+
+    return "\n".join(parts)
+
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
