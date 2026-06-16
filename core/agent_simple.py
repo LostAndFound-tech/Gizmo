@@ -195,6 +195,50 @@ class AgentSimple:
         try:
             msg_lower = user_message.lower().strip()
 
+            # ── Safeword handling (roleplay only) ────────────────────────────
+            if ctx.get("safeword"):
+                level = ctx["safeword"]
+                if level == "red":
+                    # Full stop — close scene, go straight to aftercare
+                    if _roleplay_session and not _roleplay_session._closed:
+                        beats = _roleplay_session.scene_log.get("beats", [])
+                        await _close_roleplay(session_id, host, chunk_size, timeout_sec)
+                        ac_parts = []
+                        async def _ac_send(text: str):
+                            ac_parts.append(text)
+                        await _launch_aftercare(
+                            name=host,
+                            session_id=session_id,
+                            send_fn=_ac_send,
+                            scene_beats=beats,
+                            scene_note="Red safeword called — full stop.",
+                        )
+                        for part in ac_parts:
+                            yield part
+                    return
+
+                if level == "yellow":
+                    # Pause — step out of scene, check in, can resume
+                    if _roleplay_session and not _roleplay_session._closed:
+                        _roleplay_session.state = "paused"
+                        pause_parts = []
+                        async def _pause_send(text: str):
+                            pause_parts.append(text)
+                        from core.llm import llm as _llm_client
+                        raw = await _llm_client.generate(
+                            messages=[{"role": "user", "content": f"{host} called yellow."}],
+                            system_prompt=(
+                                "You are Gizmo stepping out of a scene because the person called yellow — "
+                                "pause, something's off. Step out warmly, check in, don't push. "
+                                "One or two sentences. Let them lead."
+                            ),
+                            temperature=0.7,
+                            max_new_tokens=120,
+                        )
+                        reply = raw.strip() if raw else "Hey — stepping out for a sec. What's up?"
+                        yield reply
+                    return
+
             # ── Wellness report keyphrases (any mode) ─────────────────────────
             if "run wellness report" in msg_lower:
                 from core.wellness_synthesis import wellness_synthesis
@@ -387,25 +431,44 @@ class AgentSimple:
                     return
 
             # ── Pipeline (passive + chat) ─────────────────────────────────────
-            flush_now = _mode == "passive"
-            last_result = await _run_pipeline(
-                user_message=user_message,
-                session_id=session_id,
-                host=host,
-                chunk_size=chunk_size,
-                timeout_sec=timeout_sec,
-                flush=flush_now,
-            )
+            if _mode == "passive":
+                # Passive — pipeline must complete before we move on
+                last_result = await _run_pipeline(
+                    user_message=user_message,
+                    session_id=session_id,
+                    host=host,
+                    chunk_size=chunk_size,
+                    timeout_sec=timeout_sec,
+                    flush=True,
+                )
+                yield ""
+                return
 
-            duration_ms = round((time.monotonic() - t_start) * 1000)
-            log_event("AgentSimple", "COMPLETE",
-                session=session_id[:8],
-                duration_ms=duration_ms,
-                mode=_mode,
-            )
+            if _mode == "chat":
+                # Chat — fire pipeline in background, respond immediately
+                # Pipeline writes behavioral/wellness data async while Gizmo replies
+                processor = _get_processor(session_id, host, chunk_size, timeout_sec)
 
-            # ── Chat response ─────────────────────────────────────────────────
-            if _mode == "chat" and last_result:
+                async def _background_pipeline():
+                    try:
+                        lines = [l for l in user_message.splitlines() if l.strip()]
+                        for line in lines:
+                            await processor.push_line(line)
+                    except Exception as e:
+                        log_error("AgentSimple", "background pipeline failed", exc=e)
+
+                asyncio.create_task(_background_pipeline())
+
+                # Use last known result for context brief while pipeline runs
+                last_result = processor.results[-1] if processor.results else {}
+
+                duration_ms = round((time.monotonic() - t_start) * 1000)
+                log_event("AgentSimple", "COMPLETE",
+                    session=session_id[:8],
+                    duration_ms=duration_ms,
+                    mode=_mode,
+                )
+
                 response_text = await _responder.respond(
                     chunk_result=last_result,
                     context=ctx,
@@ -414,9 +477,6 @@ class AgentSimple:
                 )
                 yield response_text or ""
                 return
-
-            # ── Passive — no response ─────────────────────────────────────────
-            yield ""
 
         except Exception as e:
             log_error("AgentSimple", "respond failed", exc=e)
