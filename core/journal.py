@@ -520,7 +520,7 @@ class JournalSession:
 
         # ── Coherence check ───────────────────────────────────────────────────
         if self.state == "witnessing" and len(self.history) > 4:
-            coherent = await _check_coherence(message)
+            coherent = await self._check_coherence(message)
             if not coherent:
                 self.state = "tangent_check"
                 prompt = [{"role": "user", "content": message}]

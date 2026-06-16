@@ -267,6 +267,22 @@ Be specific about issues. Vague feedback is useless.
 Only flag genuine character/dynamic mismatches — style preferences are not issues.
 """.strip()
 
+_INTENSITY_SCORE_SYSTEM = """
+Score the intensity of this scene beat on a scale of 1-10 and its direction.
+Return ONLY valid JSON. No markdown.
+
+{
+  "intensity": 7,
+  "direction": "escalating | holding | de-escalating",
+  "note": "one phrase — e.g. 'ritual sacrifice', 'tender resolution', 'building tension'"
+}
+
+1-3:  low stakes, calm, comfortable
+4-6:  moderate tension, engagement, play
+7-8:  high intensity, dark themes, heavy emotion
+9-10: extreme — death, mutilation, severe distress, crisis-level content
+""".strip()
+
 
 # ── Roleplay session ──────────────────────────────────────────────────────────
 
@@ -479,21 +495,7 @@ class RoleplaySession:
         # Shouldn't reach here — but safe fallback
         return None
 
-_INTENSITY_SCORE_SYSTEM = """
-Score the intensity of this scene beat on a scale of 1-10 and its direction.
-Return ONLY valid JSON. No markdown.
-
-{
-  "intensity": 7,
-  "direction": "escalating | holding | de-escalating",
-  "note": "one phrase — e.g. 'ritual sacrifice', 'tender resolution', 'building tension'"
-}
-
-1-3:  low stakes, calm, comfortable
-4-6:  moderate tension, engagement, play
-7-8:  high intensity, dark themes, heavy emotion
-9-10: extreme — death, mutilation, severe distress, crisis-level content
-""".strip()
+    # ── Scene generation ──────────────────────────────────────────────────────
 
     def _build_scene_context(self) -> str:
         """Assemble context brief for scene generation."""
