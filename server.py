@@ -464,9 +464,17 @@ class GizmoServer:
         if not detected_mode and safeword == "red":
             detected_mode = "aftercare"
         if detected_mode and detected_mode != _session_modes.get(session_id):
+            prev_mode = _session_modes.get(session_id)
             _session_modes[session_id] = detected_mode
             await self._send(websocket, {"type": "mode_change", "mode": detected_mode})
-            # Persist mode in session file
+            # Clear in-memory history and summary on mode switch
+            if prev_mode in ("roleplay", "journal", "brainstorm"):
+                _session_history.pop(session_id, None)
+                try:
+                    from core.context_summary import reset as reset_summary
+                    reset_summary(session_id, mode=detected_mode)
+                except Exception:
+                    pass
             try:
                 _saved_mode = _load_session(session_id) or {}
                 _saved_mode["mode"] = detected_mode
@@ -507,9 +515,17 @@ class GizmoServer:
         if session_id not in _session_history:
             saved = _load_session(session_id)
             if saved:
+                all_messages = saved.get("messages", [])
+                # Only load last 12 messages (6 pairs) — prevents scene bleed
+                # Also skip any messages that were generated during roleplay mode
+                # since that content belongs to the scene log, not chat history
+                recent = all_messages[-12:]
                 _session_history[session_id] = [
                     {"role": m["role"], "content": m["content"]}
-                    for m in saved.get("messages", [])
+                    for m in recent
+                    if m.get("role") in ("user", "assistant")
+                    and m.get("content", "").strip()
+                    and not m.get("content", "").startswith('{"status"')
                 ]
         history = _session_history.get(session_id, [])
 
@@ -615,6 +631,20 @@ class GizmoServer:
                 ))
             except Exception as e:
                 log_error("GizmoServer", "scene update failed", exc=e)
+
+        # ── Update rolling summary in background (chat mode only) ─────────────
+        current_mode = _session_modes.get(session_id, "chat")
+        if current_mode == "chat" and response:
+            try:
+                from core.context_summary import update as update_summary
+                asyncio.create_task(update_summary(
+                    session_id=session_id,
+                    user_message=raw_text,
+                    gizmo_reply=response,
+                    mode=current_mode,
+                ))
+            except Exception:
+                pass
 
         live_ws = _live_sockets.get(session_id, websocket)
 

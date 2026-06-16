@@ -445,21 +445,33 @@ class AgentSimple:
                 return
 
             if _mode == "chat":
-                # Chat — fire pipeline in background, respond immediately
-                # Pipeline writes behavioral/wellness data async while Gizmo replies
+                # Chat — run pipeline in a separate thread with its own event loop
+                # so the main loop stays free to respond immediately
                 processor = _get_processor(session_id, host, chunk_size, timeout_sec)
+                msg_to_process = user_message
 
-                async def _background_pipeline():
+                def _run_pipeline_thread():
+                    """Run the pipeline in a thread with its own event loop."""
+                    import asyncio as _asyncio
+                    loop = _asyncio.new_event_loop()
+                    _asyncio.set_event_loop(loop)
                     try:
-                        lines = [l for l in user_message.splitlines() if l.strip()]
-                        for line in lines:
-                            await processor.push_line(line)
-                    except Exception as e:
-                        log_error("AgentSimple", "background pipeline failed", exc=e)
+                        async def _inner():
+                            try:
+                                lines = [l for l in msg_to_process.splitlines() if l.strip()]
+                                for line in lines:
+                                    await processor.push_line(line)
+                            except Exception as e:
+                                log_error("AgentSimple", "threaded pipeline failed", exc=e)
+                        loop.run_until_complete(_inner())
+                    finally:
+                        loop.close()
 
-                asyncio.create_task(_background_pipeline())
+                import concurrent.futures
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                asyncio.get_event_loop().run_in_executor(executor, _run_pipeline_thread)
 
-                # Use last known result for context brief while pipeline runs
+                # Respond immediately from existing file context
                 last_result = processor.results[-1] if processor.results else {}
 
                 duration_ms = round((time.monotonic() - t_start) * 1000)

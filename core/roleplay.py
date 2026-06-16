@@ -349,12 +349,13 @@ class RoleplaySession:
     async def _continue_negotiation(self, message: str) -> Optional[str]:
         """
         Drive negotiation forward one step at a time.
+        Each call handles exactly one stage transition.
         Returns Gizmo's next prompt, or None when negotiation is complete.
         """
         msg_lower = message.lower().strip()
         aliases   = _get_aliases(self.name)
 
-        # ── Continuing a prior scene ──────────────────────────────────────────
+        # ── OPEN: waiting for continue/fresh response ─────────────────────────
         if self._neg_stage == "open":
             if any(w in msg_lower for w in ("continue", "keep going", "same", "where we left off")):
                 prior = _list_prior_scenes(self.name)
@@ -362,56 +363,55 @@ class RoleplaySession:
                     last_setup = prior[0].get("setup", {})
                     self.setup = last_setup.copy()
                     self.setup["continued"] = True
-                    self._neg_stage = "ready"
                     usual = _get_usual_limits(self.name)
                     if usual:
                         self.setup["limits"] = usual
-                        return "Same rules as usual?"
-                    return None  # ready to go
+                        self._neg_stage = "limits_confirm"
+                        limit_str = ", ".join(usual)
+                        return f"Same rules as usual — {limit_str}?"
+                    self._neg_stage = "ready"
+                    return None
+            # Fresh start — move to character selection
             self._neg_stage = "character"
+            if aliases:
+                alias_list = ", ".join(aliases.keys())
+                return f"Who are you playing? You've used {alias_list} before, or someone new? Or yourself?"
+            return "Who are you playing — yourself, or someone else?"
 
-        # ── Character selection ───────────────────────────────────────────────
+        # ── CHARACTER: waiting for character choice ───────────────────────────
         if self._neg_stage == "character":
-            if any(w in msg_lower for w in ("myself", "me", "as myself", "myself tonight")):
+            if any(w in msg_lower for w in ("myself", "me", "as myself", "just me")):
                 appearance = _get_appearance(self.name)
                 if appearance:
-                    self.setup["user_character"] = self.name
+                    self.setup["user_character"]  = self.name
                     self.setup["user_appearance"] = appearance
                     self._neg_stage = "vibe"
-                    # Fall through to vibe question
+                    return "What are you after tonight — what do you want to feel?"
                 else:
                     self.setup["user_character"] = self.name
                     self._neg_stage = "need_appearance"
                     return "I want to make sure I see you right — describe yourself for this scene?"
-
-            elif any(w in msg_lower for w in ("someone else", "a character", "alias", "different")):
-                self._neg_stage = "alias_name"
-                if aliases:
-                    alias_list = ", ".join(aliases.keys())
-                    return f"Who are you playing? You've used {alias_list} before, or someone new?"
-                return "Who are you playing? Give me a name and I'll get the picture."
-
+            elif message.strip() in aliases:
+                alias = aliases[message.strip()]
+                self.setup["user_character"]  = message.strip()
+                self.setup["user_appearance"] = alias["description"]
+                self.setup["alias_shareable"] = alias.get("shareable", False)
+                self._neg_stage = "vibe"
+                return "What are you after tonight — what do you want to feel?"
             else:
-                # Treat message as character name or alias reference
-                if message.strip() in aliases:
-                    alias = aliases[message.strip()]
-                    self.setup["user_character"]    = message.strip()
-                    self.setup["user_appearance"]   = alias["description"]
-                    self.setup["alias_shareable"]   = alias.get("shareable", False)
-                    self._neg_stage = "vibe"
-                else:
-                    # New alias — store name, ask for description
-                    self._pending_alias_name = message.strip()
-                    self._neg_stage = "alias_description"
-                    return f"Tell me what {message.strip()} looks like."
+                # Treat as new alias name
+                self._pending_alias_name = message.strip()
+                self._neg_stage = "alias_description"
+                return f"Tell me what {message.strip()} looks like."
 
-        # ── Appearance for self ───────────────────────────────────────────────
+        # ── NEED_APPEARANCE: waiting for self-description ─────────────────────
         if self._neg_stage == "need_appearance":
             self.setup["user_appearance"] = message
             librarian.merge_descriptors(self.name, {"appearance_note": message})
             self._neg_stage = "vibe"
+            return "What are you after tonight — what do you want to feel?"
 
-        # ── New alias description ─────────────────────────────────────────────
+        # ── ALIAS_DESCRIPTION: waiting for alias appearance ───────────────────
         if self._neg_stage == "alias_description":
             alias_name = self._pending_alias_name or "character"
             self.setup["user_character"]  = alias_name
@@ -419,80 +419,63 @@ class RoleplaySession:
             self._neg_stage = "alias_shareable"
             return f"Can I use {alias_name} as an NPC for other headmates too, or just yours?"
 
-        # ── Alias shareability ────────────────────────────────────────────────
+        # ── ALIAS_SHAREABLE: waiting for shareability response ────────────────
         if self._neg_stage == "alias_shareable":
-            alias_name  = self._pending_alias_name or self.setup.get("user_character", "character")
-            shareable   = any(w in msg_lower for w in ("yes", "yeah", "sure", "go ahead", "fine"))
+            alias_name = self._pending_alias_name or self.setup.get("user_character", "character")
+            shareable  = any(w in msg_lower for w in ("yes", "yeah", "sure", "go ahead", "fine"))
             _save_alias(
                 name=self.name,
                 alias_name=alias_name,
                 description=self.setup.get("user_appearance", ""),
                 shareable=shareable,
             )
-            self.setup["alias_shareable"]  = shareable
-            self._pending_alias_name       = None
-            self._neg_stage                = "vibe"
+            self.setup["alias_shareable"] = shareable
+            self._pending_alias_name      = None
+            self._neg_stage = "vibe"
+            return "What are you after tonight — what do you want to feel?"
 
-        # ── Vibe / feeling ────────────────────────────────────────────────────
+        # ── VIBE: waiting for feeling/vibe response ───────────────────────────
         if self._neg_stage == "vibe":
-            if "user_vibe" not in self.setup:
-                # Ask the vibe question
-                self._neg_stage = "vibe_response"
-                char = self.setup.get("user_character", "yourself")
-                return f"What are you after tonight — what do you want to feel?"
-
-        if self._neg_stage == "vibe_response":
             self.setup["user_vibe"] = message
             self._neg_stage = "focus"
+            return "Where do you want the focus? The dynamic, the tension, something specific?"
 
-        # ── Focus ─────────────────────────────────────────────────────────────
+        # ── FOCUS: waiting for focus response ────────────────────────────────
         if self._neg_stage == "focus":
-            if "focus" not in self.setup:
-                self._neg_stage = "focus_response"
-                return "Where do you want the focus? The dynamic, the tension, something specific?"
-
-        if self._neg_stage == "focus_response":
             self.setup["focus"] = message
             self._neg_stage = "limits"
-
-        # ── Limits ───────────────────────────────────────────────────────────
-        if self._neg_stage == "limits":
             usual = _get_usual_limits(self.name)
             if usual:
-                self.setup["limits"]  = usual
-                self._neg_stage       = "limits_confirm"
+                self.setup["limits"] = usual
+                self._neg_stage = "limits_confirm"
                 limit_str = ", ".join(usual)
                 return f"Same rules as usual — {limit_str}?"
-            else:
-                self._neg_stage = "limits_response"
-                return "Any limits for tonight?"
+            self._neg_stage = "limits"
+            return "Any limits for tonight?"
 
-        if self._neg_stage == "limits_confirm":
-            if any(w in msg_lower for w in ("yes", "yeah", "yep", "same", "correct", "right")):
-                self._neg_stage = "scene_setup"
-            else:
-                self.setup["limits"] = [message]
-                self._neg_stage      = "scene_setup"
-
-        if self._neg_stage == "limits_response":
+        # ── LIMITS: waiting for limits response ───────────────────────────────
+        if self._neg_stage == "limits":
             self.setup["limits"] = [message] if message.strip() else []
-            self._neg_stage      = "scene_setup"
+            self._neg_stage = "scene_setup"
+            return "Set the scene — where are we starting?"
 
-        # ── Scene setup ───────────────────────────────────────────────────────
+        # ── LIMITS_CONFIRM: waiting for limits confirmation ───────────────────
+        if self._neg_stage == "limits_confirm":
+            if not any(w in msg_lower for w in ("yes", "yeah", "yep", "same", "correct", "right")):
+                self.setup["limits"] = [message]
+            self._neg_stage = "scene_setup"
+            return "Set the scene — where are we starting?"
+
+        # ── SCENE_SETUP: waiting for scene description ────────────────────────
         if self._neg_stage == "scene_setup":
-            if "scene_setup" not in self.setup:
-                self._neg_stage = "scene_setup_response"
-                return "Set the scene — where are we starting?"
-
-        if self._neg_stage == "scene_setup_response":
             self.setup["scene_setup"] = message
-            self._neg_stage           = "ready"
+            self._neg_stage = "ready"
+            return None
 
-        # ── Ready ─────────────────────────────────────────────────────────────
+        # ── READY ─────────────────────────────────────────────────────────────
         if self._neg_stage == "ready":
-            return None   # signal to caller: negotiation complete
+            return None
 
-        # Shouldn't reach here — but safe fallback
         return None
 
     # ── Scene generation ──────────────────────────────────────────────────────
@@ -714,18 +697,17 @@ class RoleplaySession:
         if self._closed:
             return None
 
+        # ── Init call from agent_simple — open negotiation and stop ──────────
+        if message == "":
+            reply = await self._open_negotiation()
+            self.history.append({"role": "assistant", "content": reply})
+            await self.on_message(reply)
+            return reply
+
         self.history.append({"role": "user", "content": message})
 
         # ── Negotiation phase ─────────────────────────────────────────────────
         if self.state == "negotiating":
-            if self._neg_stage == "open" and not self.history[:-1]:
-                # Very first message — open the negotiation
-                reply = await self._open_negotiation()
-                self.history.append({"role": "assistant", "content": reply})
-                await self.on_message(reply)
-                self._neg_stage = "open"
-                return reply
-
             next_prompt = await self._continue_negotiation(message)
 
             if next_prompt is None:
@@ -738,8 +720,27 @@ class RoleplaySession:
                     session=self.session_id[:8],
                     character=self.setup.get("user_character", self.name),
                 )
-                # Open the scene
-                thought, scene, misfires = await self._generate_beat("*scene opens*")
+
+                if self.setup.get("continued"):
+                    # Resume — load prior beats into history, generate a re-entry beat
+                    prior = _list_prior_scenes(self.name)
+                    if prior:
+                        prior_session_id = prior[0].get("session_id")
+                        prior_log = _load_scene_log(self.name, prior_session_id)
+                        prior_beats = prior_log.get("beats", [])
+                        # Seed history with last 3 beats so Gizmo knows where he is
+                        for beat in prior_beats[-3:]:
+                            self.history.append({"role": "assistant", "content": beat.get("scene", "")})
+                        last_scene = prior_beats[-1].get("scene", "") if prior_beats else ""
+                        resume_prompt = f"*resuming — last scene ended here: {last_scene[:300]}*"
+                    else:
+                        resume_prompt = "*resuming*"
+
+                    thought, scene, misfires = await self._generate_beat(resume_prompt)
+                else:
+                    # Fresh scene open
+                    thought, scene, misfires = await self._generate_beat("*scene opens*")
+
                 _append_beat(self.scene_log, thought, scene, misfires, self.name, self.session_id)
                 self.history.append({"role": "assistant", "content": scene})
                 await self.on_message(scene)
