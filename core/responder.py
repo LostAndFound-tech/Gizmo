@@ -55,7 +55,50 @@ def _tags_from_chunk(chunk_result: dict) -> list[str]:
 
 # ── Context brief assembly ────────────────────────────────────────────────────
 
-def _assemble_brief(
+def _flatten_descriptor(data: dict) -> dict:
+    """
+    Normalize descriptor data into a flat dict for the brief.
+    Handles both the old flat schema (Hair, Eyes, etc.)
+    and the new nested schema (physical.hair, presentation, etc.)
+    Also extracts appearance_note if present.
+    """
+    flat = {}
+
+    # Old flat schema — just pass through
+    old_keys = {"Hair", "Eyes", "Skin", "Face", "Body", "Height", "Build",
+                "Type", "Personality", "Relationships", "Clothing"}
+    for k, v in data.items():
+        if k in old_keys:
+            flat[k] = v
+
+    # New nested schema
+    physical = data.get("physical", {})
+    if physical:
+        for k, v in physical.items():
+            flat[k] = v  # hair, eyes, build, notable, etc.
+
+    presentation = data.get("presentation", {})
+    if presentation:
+        flat["presentation"] = presentation
+
+    relationships = data.get("relationships", {})
+    if relationships:
+        flat["relationships"] = relationships
+
+    identity = data.get("identity", [])
+    if identity:
+        flat["identity"] = identity
+
+    notes = data.get("notes", [])
+    if notes:
+        flat["notes"] = notes
+
+    # appearance_note — verbatim self-description, highest fidelity
+    appearance_note = data.get("appearance_note", "")
+    if appearance_note:
+        flat["appearance_note"] = appearance_note
+
+    return flat
     chunk_result:  dict,
     context:       dict,
     register:      str,
@@ -116,10 +159,16 @@ def _assemble_brief(
                 "clinician_notes":       wellness_class.get("clinician_notes", "")[:300],
             }
 
+        # Pull descriptor data — flattened to handle both old and new schema
+        descriptor_data = librarian._read_file(f"descriptors/{name.lower()}.json") or {}
+        flat_descriptor = _flatten_descriptor(descriptor_data)
+
         entry_parts = {
             "personality":      {t: {"weight": v.get("weight"), "tags": v.get("tags", [])} for t, v in matched_personality.items()},
             "recent_episodes":  episodes[-3:],
         }
+        if flat_descriptor:
+            entry_parts["descriptor"] = flat_descriptor
         if wellness_summary:
             entry_parts["wellness"] = wellness_summary
 
@@ -200,6 +249,14 @@ Don't reference your context brief directly — just let it inform how you show 
 Don't summarize what just happened. Respond to it.
 Match the register. If it's playful, be playful. If it's warm, be warm.
 If someone is in distress, be steady. If it's a scene, be in it.
+
+CRITICAL — PHYSICAL DESCRIPTORS:
+Never invent, guess, or approximate physical details about anyone.
+If someone asks what they look like and you have it stored, use exactly what you have.
+If you don't have it, say so cleanly — "I don't have that" or "tell me."
+A wrong guess about someone's appearance is worse than admitting you don't know.
+This applies to skin, hair, eyes, height, build, body — everything physical.
+Stored descriptor data is ground truth. Nothing else is.
 """.strip()
 
 def _build_system() -> str:
