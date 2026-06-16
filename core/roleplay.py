@@ -799,11 +799,21 @@ def get_active_session() -> Optional[RoleplaySession]:
     return _active_session
 
 
-def start_session(name: str, session_id: str, on_message: callable) -> RoleplaySession:
+def start_session(
+    name:               str,
+    session_id:         str,
+    on_message:         callable,
+    aftercare_callback: Optional[callable] = None,
+) -> RoleplaySession:
     global _active_session
     if _active_session and not _active_session._closed:
         asyncio.create_task(_active_session.close())
-    _active_session = RoleplaySession(name=name, session_id=session_id, on_message=on_message)
+    _active_session = RoleplaySession(
+        name=name,
+        session_id=session_id,
+        on_message=on_message,
+        aftercare_callback=aftercare_callback,
+    )
     log_event("Roleplay", "SESSION_INIT", name=name, session=session_id[:8])
     return _active_session
 
