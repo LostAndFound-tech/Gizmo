@@ -467,14 +467,14 @@ class GizmoServer:
             prev_mode = _session_modes.get(session_id)
             _session_modes[session_id] = detected_mode
             await self._send(websocket, {"type": "mode_change", "mode": detected_mode})
-            # Clear in-memory history and summary on mode switch
-            if prev_mode in ("roleplay", "journal", "brainstorm"):
-                _session_history.pop(session_id, None)
-                try:
-                    from core.context_summary import reset as reset_summary
-                    reset_summary(session_id, mode=detected_mode)
-                except Exception:
-                    pass
+            # Clear history and summary on any mode switch
+            # Chat mode always starts clean — only who's present, nothing carried over
+            _session_history.pop(session_id, None)
+            try:
+                from core.context_summary import reset as reset_summary
+                reset_summary(session_id, mode=detected_mode)
+            except Exception:
+                pass
             try:
                 _saved_mode = _load_session(session_id) or {}
                 _saved_mode["mode"] = detected_mode
@@ -674,6 +674,13 @@ class GizmoServer:
             if restored_mode != _session_modes.get(session_id):
                 _session_modes[session_id] = restored_mode
                 await self._send(websocket, {"type": "mode_change", "mode": restored_mode})
+            # Always reset summary on reconnect into chat — no context bleed across sessions
+            if restored_mode == "chat":
+                try:
+                    from core.context_summary import reset as reset_summary
+                    reset_summary(session_id, mode="chat")
+                except Exception:
+                    pass
 
         task = _pipeline_tasks.get(session_id)
         if task and not task.done():
