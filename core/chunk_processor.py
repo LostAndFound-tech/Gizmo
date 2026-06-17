@@ -258,7 +258,6 @@ class ChunkProcessor:
             name = s.get("name")
             if name and name not in self.registry:
                 self.registry[name] = {"type": s.get("type", "Person")}
-                print(f"[ChunkProcessor] new subject: {name}")
 
     def _apply_pronoun_resolutions(self, resolutions: list[dict]) -> None:
         for r in resolutions:
@@ -293,7 +292,6 @@ class ChunkProcessor:
         self._update_registry(subjects)
         self._apply_pronoun_resolutions(pronoun_resolutions)
         print(f"[DEBUG] registry after discovery: {self.registry}")
-        print(f"[DEBUG] chunk: {chunk}")
 
         # ── 2. Dynamic reader — must run before wellness ──────────────────────
         register = self.registry.get("_register", "neutral")

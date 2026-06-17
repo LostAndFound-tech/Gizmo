@@ -12,6 +12,15 @@ Takes:
 Assembles a situational brief and generates Gizmo's response.
 After responding, Gizmo's reply is fed back through BehaviorCatcher
 and written to behaviors/gizmo.json — tagged with register and speaker.
+
+Brief sections (in order):
+  WHO IS PRESENT
+  REGISTER
+  WHAT JUST HAPPENED
+  WHAT YOU KNOW ABOUT THEM        ← from behaviors/{name}.json
+  HOW YOU KNOW THIS PERSON        ← from behaviors/gizmo_self.json (new)
+  HOW YOU SHOW UP                 ← from behaviors/gizmo.json
+  WELLNESS CONTEXT
 """
 
 import json
@@ -31,104 +40,207 @@ def _tags_from_chunk(chunk_result: dict) -> list[str]:
     """
     tags = set()
 
-    # From descriptors
     for name, data in chunk_result.get("descriptors", {}).items():
         for key in data.keys():
             tags.add(key.lower())
 
-    # From behaviors
     for person in chunk_result.get("behaviors", []):
         for trait_entry in person.get("Personality", []):
             if isinstance(trait_entry, dict):
                 tags.update(trait_entry.get("tags", []))
 
-    # From wellness
     for signal in chunk_result.get("wellness", []):
         tags.update(signal.get("tags", []))
 
-    # Always include these
     tags.add("behavior")
     tags.add("relational")
 
     return list(tags)
 
 
+# ── Tone read ─────────────────────────────────────────────────────────────────
+
+_TONE_SYSTEM = """
+You read the mood and situational texture of a single message.
+Return ONLY valid JSON. No markdown. No explanation. No preamble.
+
+{
+  "tags": ["couch-mode", "tired-but-warm", "just-chatting"]
+}
+
+Rules:
+- 2 to 5 tags
+- Single words or hyphenated phrases, lowercase
+- Capture texture, not category — "tired-but-warm" not "emotional"
+- If the message is too short or neutral to read, return {"tags": []}
+""".strip()
+
+
+async def _read_tone(user_message: str) -> list[str]:
+    """
+    Quick LLM pass to get situational tags for the current message.
+    Used to match against gizmo_self.json episodes.
+    Returns empty list if signal is too thin or call fails.
+    """
+    if not user_message or len(user_message.split()) < 4:
+        return []
+    try:
+        from core.llm import llm
+        raw = await llm.generate(
+            messages=[{"role": "user", "content": user_message}],
+            system_prompt=_TONE_SYSTEM,
+            temperature=0.0,
+            max_new_tokens=100,
+        )
+        if not raw or not raw.strip():
+            return []
+        clean  = re.sub(r"```(?:json)?|```", "", raw).strip()
+        parsed = json.loads(clean)
+        return parsed.get("tags", [])
+    except Exception as e:
+        log_error("Responder", "tone read failed", exc=e)
+        print(f"[Responder] tone read failed: {type(e).__name__}: {e}")
+        return []
+
+
+# ── Gizmo self-knowledge assembly ─────────────────────────────────────────────
+
+def _closeness_label(weight: float) -> str:
+    """Convert closeness float to a human-readable label for the brief."""
+    if weight >= 0.5:  return "very close"
+    if weight >= 0.3:  return "close"
+    if weight >= 0.15: return "familiar"
+    if weight >= 0.05: return "acquaintance"
+    return "just met"
+
+
+def _closeness(name: str, data: dict) -> float:
+    total = sum(
+        v.get("episode_count", 0)
+        for k, v in data.items()
+        if isinstance(v, dict) and k != "tag_vocabulary"
+    )
+    if total == 0:
+        return 1.0
+    person_count = data.get(name, {}).get("episode_count", 0)
+    return round(person_count / total, 4)
+
+
+async def _assemble_gizmo_knowledge(name: str, user_message: str) -> Optional[str]:
+    """
+    Build the HOW YOU KNOW THIS PERSON section of the brief.
+
+    1. Load gizmo_self.json
+    2. Compute closeness for this person
+    3. Read tone of current message
+    4. Match tone tags against episode situational_tags
+    5. Surface what landed, what didn't, punch bowl moments
+    6. Return None if no prior experience — Gizmo goes in fresh
+    """
+    if not name or name == "unknown":
+        return None
+
+    self_data   = librarian._read_file("behaviors/gizmo_self.json") or {}
+    person_data = self_data.get(name)
+
+    if not person_data:
+        return None
+
+    episodes = person_data.get("episodes", [])
+    if not episodes:
+        return None
+
+    closeness       = _closeness(name, self_data)
+    closeness_label = _closeness_label(closeness)
+    current_tags    = await _read_tone(user_message)
+
+    # ── Match episodes by situational tag overlap ─────────────────────────────
+    matched_episodes = []
+    if current_tags:
+        current_set = set(current_tags)
+        for ep in episodes:
+            ep_tags = set(ep.get("situational_tags", []))
+            if ep_tags & current_set:
+                matched_episodes.append(ep)
+
+    # Fall back to most recent if no tag match
+    if not matched_episodes:
+        matched_episodes = episodes[-3:]
+
+    # ── Aggregate what landed / what didn't ───────────────────────────────────
+    landed   = []
+    missed   = []
+    punches  = []
+
+    for ep in matched_episodes:
+        if ep.get("punch_bowl"):
+            punches.append(ep.get("what_missed", ""))
+        for t in ep.get("traits_reinforced", []):
+            trait = t.get("trait") if isinstance(t, dict) else t
+            if trait and trait not in landed:
+                landed.append(trait)
+        for t in ep.get("traits_adjusted", []):
+            trait = t.get("trait") if isinstance(t, dict) else t
+            if trait and trait not in missed:
+                missed.append(trait)
+
+    # ── Build section ─────────────────────────────────────────────────────────
+    lines = [f"HOW YOU KNOW THIS PERSON ({name}):"]
+    lines.append(f"Closeness: {closeness_label} ({closeness})")
+
+    if current_tags:
+        lines.append(f"Vibe right now: {', '.join(current_tags)}")
+
+    if landed:
+        lines.append(f"\nWhat works with them in moments like this:")
+        for t in landed[:4]:
+            lines.append(f"  - {t}")
+
+    if missed:
+        lines.append(f"\nWhat doesn't:")
+        for t in missed[:4]:
+            lines.append(f"  - {t}")
+
+    if punches:
+        lines.append(f"\nPunch bowl — don't do this:")
+        for p in punches[:2]:
+            if p:
+                lines.append(f"  - {p}")
+
+    # Surface 2 most relevant recent episodes raw
+    recent_relevant = matched_episodes[-2:]
+    if recent_relevant:
+        lines.append("\nRecent moments that rhyme with this:")
+        for ep in recent_relevant:
+            lines.append(
+                f"  [{', '.join(ep.get('situational_tags', [])[:3])}] "
+                f"{ep.get('assessment', '')}"
+            )
+
+    return "\n".join(lines)
+
+
 # ── Context brief assembly ────────────────────────────────────────────────────
 
-def _flatten_descriptor(data: dict) -> dict:
-    """
-    Normalize descriptor data into a flat dict for the brief.
-    Handles both the old flat schema (Hair, Eyes, etc.)
-    and the new nested schema (physical.hair, presentation, etc.)
-    Also extracts appearance_note if present.
-    """
-    flat = {}
-
-    # Old flat schema — just pass through
-    old_keys = {"Hair", "Eyes", "Skin", "Face", "Body", "Height", "Build",
-                "Type", "Personality", "Relationships", "Clothing"}
-    for k, v in data.items():
-        if k in old_keys:
-            flat[k] = v
-
-    # New nested schema
-    physical = data.get("physical", {})
-    if physical:
-        for k, v in physical.items():
-            flat[k] = v  # hair, eyes, build, notable, etc.
-
-    presentation = data.get("presentation", {})
-    if presentation:
-        flat["presentation"] = presentation
-
-    relationships = data.get("relationships", {})
-    if relationships:
-        flat["relationships"] = relationships
-
-    identity = data.get("identity", [])
-    if identity:
-        flat["identity"] = identity
-
-    notes = data.get("notes", [])
-    if notes:
-        flat["notes"] = notes
-
-    # appearance_note — verbatim self-description, highest fidelity
-    appearance_note = data.get("appearance_note", "")
-    if appearance_note:
-        flat["appearance_note"] = appearance_note
-
-    return flat
-
-
-def _assemble_brief(
+async def _assemble_brief(
     chunk_result:  dict,
     context:       dict,
     register:      str,
     user_message:  str = "",
-    session_id:    str = "",
 ) -> str:
-    subjects  = [s for s in chunk_result.get("subjects", []) if not s.startswith("_")]
+    subjects = [s for s in chunk_result.get("subjects", []) if not s.startswith("_")]
+    tags     = _tags_from_chunk(chunk_result)
 
     parts = []
 
-    # Who is present
     host     = context.get("current_host") or "unknown"
     fronters = context.get("fronters", [host])
     parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
     parts.append(f"REGISTER: {register}")
 
-    # Rolling summary — what's been established, where things are
-    if session_id:
-        from core.context_summary import get_context
-        ctx_data = get_context(session_id)
-        if ctx_data.get("summary"):
-            parts.append(f"\nCONVERSATION SO FAR:\n{ctx_data['summary']}")
-
-    # What was just said — only the current user message, not the full exchange history
     parts.append(f"\nWHAT JUST HAPPENED:\n{user_message.strip()}")
 
-    # What Gizmo knows about them — pulled from their own file tags
+    # ── What Gizmo knows about them ───────────────────────────────────────────
     known_profiles = []
     for name in subjects:
         behavior_data = librarian._read_file(f"behaviors/{name.lower()}.json") or {}
@@ -138,22 +250,18 @@ def _assemble_brief(
         if not personality and not episodes:
             continue
 
-        # Collect all tags stored in their file
         stored_tags = set()
         for trait, entry in personality.items():
             stored_tags.update(entry.get("tags", []))
 
-        # Pull their slice using their own stored tags
         profile = librarian.get_by_tags(name, list(stored_tags)) if stored_tags else {}
 
-        # Fall back to top 5 weighted traits if tag query returns empty
         matched_personality = profile.get("personality") or {}
         if not matched_personality and personality:
             top = sorted(personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:5]
             matched_personality = {t: v for t, v in top}
 
-        # Pull wellness classification if it exists
-        wellness_class = librarian._read_file(f"wellness/classifications/{name.lower()}.json")
+        wellness_class   = librarian._read_file(f"wellness/classifications/{name.lower()}.json")
         wellness_summary = None
         if wellness_class:
             conditions = [c.get("condition") for c in wellness_class.get("conditions", [])]
@@ -162,16 +270,10 @@ def _assemble_brief(
                 "clinician_notes":       wellness_class.get("clinician_notes", "")[:300],
             }
 
-        # Pull descriptor data — flattened to handle both old and new schema
-        descriptor_data = librarian._read_file(f"descriptors/{name.lower()}.json") or {}
-        flat_descriptor = _flatten_descriptor(descriptor_data)
-
         entry_parts = {
-            "personality":      {t: {"weight": v.get("weight"), "tags": v.get("tags", [])} for t, v in matched_personality.items()},
-            "recent_episodes":  episodes[-3:],
+            "personality":     {t: {"weight": v.get("weight"), "tags": v.get("tags", [])} for t, v in matched_personality.items()},
+            "recent_episodes": episodes[-3:],
         }
-        if flat_descriptor:
-            entry_parts["descriptor"] = flat_descriptor
         if wellness_summary:
             entry_parts["wellness"] = wellness_summary
 
@@ -180,8 +282,14 @@ def _assemble_brief(
     if known_profiles:
         parts.append("\nWHAT YOU KNOW ABOUT THEM:\n" + "\n\n".join(known_profiles))
 
-    # Gizmo's own personality — pulled from his own file tags
-    gizmo_data = librarian._read_file("behaviors/gizmo.json") or {}
+    # ── How Gizmo knows this person — self-reflection data ────────────────────
+    gizmo_knowledge = await _assemble_gizmo_knowledge(host, user_message)
+    if gizmo_knowledge:
+        parts.append(f"\n{gizmo_knowledge}")
+    # If None — no section, Gizmo goes in fresh. Intentional.
+
+    # ── How Gizmo shows up — his own accumulated personality ──────────────────
+    gizmo_data        = librarian._read_file("behaviors/gizmo.json") or {}
     gizmo_personality = gizmo_data.get("Personality", {})
     if gizmo_personality:
         gizmo_tags = set()
@@ -198,7 +306,7 @@ def _assemble_brief(
                 + json.dumps({t: {"weight": v.get("weight")} for t, v in matched_gizmo.items()}, indent=2)
             )
 
-    # Wellness context — mild informs tone, severe informs care
+    # ── Wellness context ──────────────────────────────────────────────────────
     wellness_signals = chunk_result.get("wellness", [])
     if wellness_signals:
         parts.append(
@@ -218,7 +326,6 @@ import os as _os
 from pathlib import Path as _Path
 
 def _load_seed() -> str:
-    """Load personality_seed.txt from DATA_DIR or alongside this file."""
     candidates = [
         _os.path.join(_os.environ.get("DATA_DIR", "./data"), "personality_seed.txt"),
         str(_Path(__file__).parent.parent / "personality_seed.txt"),
@@ -244,6 +351,7 @@ You will receive:
 - Who is present and the current register
 - What was just said or done (the current message only)
 - What you already know about the people present
+- How you know this person — your own accumulated relational memory with them
 - How you tend to show up (your own accumulated personality)
 - Any relevant wellness context
 
@@ -252,14 +360,7 @@ Don't reference your context brief directly — just let it inform how you show 
 Don't summarize what just happened. Respond to it.
 Match the register. If it's playful, be playful. If it's warm, be warm.
 If someone is in distress, be steady. If it's a scene, be in it.
-
-CRITICAL — PHYSICAL DESCRIPTORS:
-Never invent, guess, or approximate physical details about anyone.
-If someone asks what they look like and you have it stored, use exactly what you have.
-If you don't have it, say so cleanly — "I don't have that" or "tell me."
-A wrong guess about someone's appearance is worse than admitting you don't know.
-This applies to skin, hair, eyes, height, build, body — everything physical.
-Stored descriptor data is ground truth. Nothing else is.
+If you know you've overshot with this person before in a moment like this — don't do it again.
 """.strip()
 
 def _build_system() -> str:
@@ -268,7 +369,7 @@ def _build_system() -> str:
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
-async def _call_llm(brief: str, history: list, register: str, session_id: str = "") -> Optional[str]:
+async def _call_llm(brief: str, history: list, register: str) -> Optional[str]:
     try:
         from core.llm import llm
 
@@ -281,33 +382,13 @@ async def _call_llm(brief: str, history: list, register: str, session_id: str = 
             "intimate": 0.85,
         }.get(register, 0.75)
 
-        # Use raw tail from rolling summary instead of full history
-        # Summary captures the thread; tail gives immediate conversational continuity
-        if session_id:
-            from core.context_summary import get_context
-            ctx_data = get_context(session_id)
-            raw_tail = ctx_data.get("raw_tail", [])
-        else:
-            raw_tail = list(history)[-6:] if history else []
-
-        # Drop trailing user turn — it's in the brief already
-        while raw_tail and raw_tail[-1].get("role") == "user":
-            raw_tail = raw_tail[:-1]
-
-        # Drop empty or error entries
-        raw_tail = [
-            m for m in raw_tail
-            if m.get("content", "").strip()
-            and not m.get("content", "").startswith('{"status"')
-        ]
-
-        messages = raw_tail + [{"role": "user", "content": brief}]
+        messages = list(history) + [{"role": "user", "content": brief}]
 
         raw = await llm.generate(
             messages=messages,
             system_prompt=_build_system(),
             temperature=temperature,
-            max_new_tokens=1500,
+            max_new_tokens=500,
         )
 
         if not raw or not raw.strip():
@@ -337,8 +418,9 @@ class Responder:
             fronters   = context.get("fronters", [context.get("current_host", "unknown")])
             session_id = context.get("session_id", "")
 
-            brief    = _assemble_brief(chunk_result, context, register, user_message, session_id)
-            response = await _call_llm(brief, history, register, session_id)
+            # _assemble_brief is now async — it calls _read_tone internally
+            brief    = await _assemble_brief(chunk_result, context, register, user_message)
+            response = await _call_llm(brief, history, register)
 
             if response:
                 log_event("Responder", "RESPONSE_GENERATED",
