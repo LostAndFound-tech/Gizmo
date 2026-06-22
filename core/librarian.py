@@ -203,6 +203,55 @@ def get_wellness_by_tags(name: str, query_tags: list[str]) -> dict:
     }
 
 
+# ── Knowledge retrieval ───────────────────────────────────────────────────────
+
+def get_knowledge(
+    tags:    list[str],
+    speaker: str = None,
+    limit:   int = 10,
+) -> list[dict]:
+    """
+    Return knowledge entries from the flat index matching the given tags.
+
+    Tags are matched directly against knowledge entry tags — no TAG_MAP expansion,
+    since knowledge tags are the vocabulary itself, not clinical aliases.
+
+    Entries sourced from or mentioning the speaker float to the top.
+    Most recent entries win ties.
+    """
+    index = _read_file("knowledge/index.json")
+    if not isinstance(index, list) or not index:
+        return []
+
+    if not tags:
+        return []
+
+    tag_set       = set(t.lower() for t in tags)
+    speaker_lower = speaker.lower() if speaker else ""
+    matched       = []
+
+    for entry in index:
+        if not isinstance(entry, dict):
+            continue
+        entry_tags = set(t.lower() for t in entry.get("tags", []))
+        if entry_tags & tag_set:
+            matched.append(entry)
+
+    if not matched:
+        return []
+
+    def _score(entry: dict) -> tuple:
+        speaker_match = int(
+            entry.get("source", "").lower() == speaker_lower
+            or (speaker_lower and speaker_lower in entry.get("fact", "").lower())
+        )
+        ts = entry.get("ts", "")
+        return (speaker_match, ts)
+
+    matched.sort(key=_score, reverse=True)
+    return matched[:limit]
+
+
 # ── Descriptor merge ──────────────────────────────────────────────────────────
 
 def _safe_dedup(existing_list: list, new_items: list) -> list:
@@ -283,43 +332,17 @@ def merge_behaviors(name: str, new_data: dict, subfolder: str = "behaviors") -> 
                     }
             existing["Personality"] = _normalize_personality(existing["Personality"])
 
-        # ── Episode log + trait extraction ───────────────────────────────────
+        # ── Action→reaction episode log ───────────────────────────────────────
         elif key == "Episodes" and isinstance(value, list):
             if "Episodes" not in existing:
                 existing["Episodes"] = []
-            if "Personality" not in existing:
-                existing["Personality"] = {}
-
             for episode in value:
-                if not isinstance(episode, dict):
-                    continue
-                # Require cause + action + reaction to be meaningful
-                if not (episode.get("cause") and episode.get("action") and episode.get("reaction")):
-                    continue
-
-                existing["Episodes"].append(episode)
-
-                # Pull trait out of episode and increment in personality store
-                trait = episode.get("trait", "").strip()
-                tags  = episode.get("tags", [])
-                if trait:
-                    if trait in existing["Personality"]:
-                        existing["Personality"][trait]["count"] += 1
-                        existing_tags = existing["Personality"][trait].get("tags", [])
-                        existing["Personality"][trait]["tags"] = _safe_dedup(existing_tags, tags)
-                        # Track source episode index
-                        ep_idx = len(existing["Episodes"]) - 1
-                        existing["Personality"][trait].setdefault("episode_refs", []).append(ep_idx)
-                    else:
-                        ep_idx = len(existing["Episodes"]) - 1
-                        existing["Personality"][trait] = {
-                            "count":        1,
-                            "weight":       1.0,
-                            "tags":         tags,
-                            "episode_refs": [ep_idx],
-                        }
-
-            existing["Personality"] = _normalize_personality(existing["Personality"])
+                if (
+                    isinstance(episode, dict)
+                    and episode.get("action")
+                    and episode.get("reaction")
+                ):
+                    existing["Episodes"].append(episode)
 
         # ── Scalar fields — keep existing ─────────────────────────────────────
         elif key not in existing:
