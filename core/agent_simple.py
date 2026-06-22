@@ -47,7 +47,7 @@ _journal_session    = None
 _brainstorm_session = None
 _roleplay_session   = None
 _aftercare_session  = None
-
+_last_exchange: dict[str, dict] = {}  # session_id → {user_message, gizmo_response}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -445,33 +445,28 @@ class AgentSimple:
                 return
 
             if _mode == "chat":
-                # Chat — run pipeline in a separate thread with its own event loop
-                # so the main loop stays free to respond immediately
                 processor = _get_processor(session_id, host, chunk_size, timeout_sec)
-                msg_to_process = user_message
 
-                def _run_pipeline_thread():
-                    """Run the pipeline in a thread with its own event loop."""
-                    import asyncio as _asyncio
-                    loop = _asyncio.new_event_loop()
-                    _asyncio.set_event_loop(loop)
+                prev = _last_exchange.get(session_id)
+                if prev and host != "unknown":
+                    from core.gizmo_reflection import fire_and_forget
+                    fire_and_forget(
+                        name=host,
+                        user_message=prev["user_message"],
+                        gizmo_response=prev["gizmo_response"],
+                        next_message=user_message,
+                    )
+
+                async def _bg_pipeline():
                     try:
-                        async def _inner():
-                            try:
-                                lines = [l for l in msg_to_process.splitlines() if l.strip()]
-                                for line in lines:
-                                    await processor.push_line(line)
-                            except Exception as e:
-                                log_error("AgentSimple", "threaded pipeline failed", exc=e)
-                        loop.run_until_complete(_inner())
-                    finally:
-                        loop.close()
+                        lines = [l for l in user_message.splitlines() if l.strip()]
+                        for line in lines:
+                            await processor.push_line(line)
+                    except Exception as e:
+                        log_error("AgentSimple", "background pipeline failed", exc=e)
 
-                import concurrent.futures
-                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                asyncio.get_event_loop().run_in_executor(executor, _run_pipeline_thread)
+                asyncio.create_task(_bg_pipeline())
 
-                # Respond immediately from existing file context
                 last_result = processor.results[-1] if processor.results else {}
 
                 duration_ms = round((time.monotonic() - t_start) * 1000)
@@ -487,6 +482,12 @@ class AgentSimple:
                     history=history or [],
                     user_message=user_message,
                 )
+
+                _last_exchange[session_id] = {
+                    "user_message":   user_message,
+                    "gizmo_response": response_text or "",
+                }
+
                 yield response_text or ""
                 return
 

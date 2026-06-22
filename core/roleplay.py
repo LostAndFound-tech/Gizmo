@@ -215,6 +215,7 @@ You're reading the room, not filling out a form.
 
 You need to gather (across the conversation, not all at once):
 - Who they're playing (themselves or an alias)
+- Who they would like you to play
 - What they're after tonight — the feeling, not the plot
 - Where the focus should be
 - Any limits for this session
