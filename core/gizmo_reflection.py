@@ -241,9 +241,6 @@ async def _reflect(
         existing_episodes = person_data.get("episodes", [])
 
         # Pull Gizmo's existing self-authored personality traits
-        existing_profile = {
-            ep.get("traits_reinforced", []) for ep in existing_episodes
-        }
         # Flatten into a readable format for the prompt
         all_reinforced = []
         all_adjusted   = []
