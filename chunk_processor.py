@@ -313,12 +313,12 @@ class ChunkProcessor:
                 session_file=self.session_id,
             ),
             behavior.extract(
-            exchanges=_build_exchanges(chunk, self.host, self.registry),
-            thread=text,
-            subject=self.host,
-            session_file=self.session_id,
-            pending_actions=self.action_buffer,
-        ),
+                user_message=text,
+                thread=text,
+                subject=self.host,
+                session_file=self.session_id,
+                pending_actions=self.action_buffer,
+            ),
             wellness.collect(
                 chunk=chunk,
                 chunk_id=chunk_id,

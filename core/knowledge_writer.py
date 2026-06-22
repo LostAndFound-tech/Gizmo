@@ -127,6 +127,33 @@ def _normalise_route(raw_route: str, known_headmates: list[str]) -> str:
     return "system/external/general"
 
 
+_RETRIEVAL_SYSTEM = """
+You are matching a conversational message against a tag vocabulary.
+Return ONLY a valid JSON array of matching tags. No markdown. No explanation.
+
+Return only tags from the provided vocabulary that genuinely apply to this message.
+If nothing matches, return [].
+""".strip()
+
+async def get_relevant_tags(message: str, vocabulary: list[str]) -> list[str]:
+    try:
+        from core.llm import llm
+        prompt = f"Vocabulary:\n{json.dumps(vocabulary)}\n\nMessage:\n{message}"
+        raw = await llm.generate(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt=_RETRIEVAL_SYSTEM,
+            temperature=0.0,
+            max_new_tokens=200,
+        )
+        if not raw or not raw.strip():
+            return []
+        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        return json.loads(clean)
+    except Exception as e:
+        log_error("KnowledgeWriter", "tag retrieval failed", exc=e)
+        return []
+
+
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
 _SYSTEM = """
