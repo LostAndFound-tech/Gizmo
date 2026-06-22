@@ -338,8 +338,8 @@ class ChunkProcessor:
         behavior_results = behavior_results or []
         wellness_signals = wellness_signals or []
 
-        print(f"The wellness information I pulled up is: {len(wellness)}")
-        print(f"The knowledge I have is: {len(knowledge_signals)}")
+        print(f"[ChunkProcessor] wellness signals: {len(wellness_signals)}")
+        print(f"[ChunkProcessor] knowledge entries: {len(knowledge_signals) if knowledge_signals else 0}")
 
         # ── 3. Merge descriptors ──────────────────────────────────────────────
         if descriptor_dict:
@@ -366,6 +366,7 @@ class ChunkProcessor:
             "partial":        partial,
             "subjects":       [k for k in self.registry.keys() if not k.startswith("_")],
             "descriptors":    descriptor_dict,
+            "knowledge":       knowledge_signals or [],
             "behaviors":      behavior_results,
             "wellness":       wellness_signals,
             "dynamic":        dynamic_context,
