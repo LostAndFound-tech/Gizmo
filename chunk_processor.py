@@ -268,6 +268,9 @@ class ChunkProcessor:
                 self.registry.setdefault("_pronouns", {})[pronoun] = resolves_to
 
     async def _run_chunk(self, chunk: list[str], partial: bool = False) -> dict:
+
+        print(f"[ChunkProcessor] _run_chunk called, behavior.extract sig check: {behavior.extract.__code__.co_varnames[:6]}")
+
         # ── Keyphrase triggers ────────────────────────────────────────────────
         text_lower = " ".join(chunk).lower()
         if "run wellness report" in text_lower:
