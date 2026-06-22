@@ -61,7 +61,7 @@ def _tags_from_chunk(chunk_result: dict) -> list[str]:
 # ── Tone read ─────────────────────────────────────────────────────────────────
 
 _TONE_SYSTEM = """
-You read the mood and situational texture of a single message.
+You read the mood and situational texture of a short exchange.
 Return ONLY valid JSON. No markdown. No explanation. No preamble.
 
 {
@@ -69,7 +69,7 @@ Return ONLY valid JSON. No markdown. No explanation. No preamble.
 }
 
 Rules:
-- 2 to 5 tags
+- 1 to 5 tags
 - Single words or hyphenated phrases, lowercase
 - Capture texture, not category — "tired-but-warm" not "emotional"
 - If the message is too short or neutral to read, return {"tags": []}
@@ -145,10 +145,16 @@ async def _assemble_gizmo_knowledge(name: str, user_message: str) -> Optional[st
 
     if not person_data:
         return None
+    
+    if not self_data:
+        with open("behaviors/gizmo_self.json", "w") as file:
+            file.write("I am Gizmo.")
 
     episodes = person_data.get("episodes", [])
     if not episodes:
         return None
+    
+    
 
     closeness       = _closeness(name, self_data)
     closeness_label = _closeness_label(closeness)
@@ -231,14 +237,15 @@ async def _assemble_brief(
     subjects = [s for s in chunk_result.get("subjects", []) if not s.startswith("_")]
     tags     = _tags_from_chunk(chunk_result)
 
+    print(f"For subjects:{subjects}, I have the following tags: \n{tags}\n")
     parts = []
 
     host     = context.get("current_host") or "unknown"
     fronters = context.get("fronters", [host])
-    parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
-    parts.append(f"REGISTER: {register}")
+    parts.append(f"[WHO IS PRESENT] {', '.join(fronters)}")
+    parts.append(f"[REGISTER] {register}")
 
-    parts.append(f"\nWHAT JUST HAPPENED:\n{user_message.strip()}")
+    parts.append(f"\n[WHAT JUST HAPPENED]\n{user_message.strip()}")
 
     # ── What Gizmo knows about them ───────────────────────────────────────────
     known_profiles = []
@@ -255,8 +262,9 @@ async def _assemble_brief(
             stored_tags.update(entry.get("tags", []))
 
         profile = librarian.get_by_tags(name, list(stored_tags)) if stored_tags else {}
-
+        print(f"The Profile Information I have is:\n{profile}")
         matched_personality = profile.get("personality") or {}
+        print(f"My personality:{matched_personality}")
         if not matched_personality and personality:
             top = sorted(personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:5]
             matched_personality = {t: v for t, v in top}
@@ -269,6 +277,8 @@ async def _assemble_brief(
                 "conditions_monitoring": conditions,
                 "clinician_notes":       wellness_class.get("clinician_notes", "")[:300],
             }
+        
+        print(f"What I'm looking at: {wellness_summary}")
 
         entry_parts = {
             "personality":     {t: {"weight": v.get("weight"), "tags": v.get("tags", [])} for t, v in matched_personality.items()},
@@ -286,6 +296,7 @@ async def _assemble_brief(
     gizmo_knowledge = await _assemble_gizmo_knowledge(host, user_message)
     if gizmo_knowledge:
         parts.append(f"\n{gizmo_knowledge}")
+    print(f"The knowledge I'm going in with:\n{gizmo_knowledge}")
     # If None — no section, Gizmo goes in fresh. Intentional.
 
     # ── How Gizmo shows up — his own accumulated personality ──────────────────
@@ -302,9 +313,10 @@ async def _assemble_brief(
             matched_gizmo = {t: v for t, v in top}
         if matched_gizmo:
             parts.append(
-                "\nHOW YOU SHOW UP:\n"
+                "\n[HOW YOU SHOW UP]\n"
                 + json.dumps({t: {"weight": v.get("weight")} for t, v in matched_gizmo.items()}, indent=2)
             )
+        print(f"My personality from here:\n{gizmo_personality}")
 
     # ── Wellness context ──────────────────────────────────────────────────────
     wellness_signals = chunk_result.get("wellness", [])
@@ -347,20 +359,10 @@ def _load_seed() -> str:
 _SEED = _load_seed()
 
 _SYSTEM_SUFFIX = """
-You will receive:
-- Who is present and the current register
-- What was just said or done (the current message only)
-- What you already know about the people present
-- How you know this person — your own accumulated relational memory with them
-- How you tend to show up (your own accumulated personality)
-- Any relevant wellness context
-
-Respond naturally to the conversation. Be present. Be real.
-Don't reference your context brief directly — just let it inform how you show up.
-Don't summarize what just happened. Respond to it.
-Match the register. If it's playful, be playful. If it's warm, be warm.
-If someone is in distress, be steady. If it's a scene, be in it.
-If you know you've overshot with this person before in a moment like this — don't do it again.
+Use all this information to respond to the user. You are a friend of theirs. They trust you, and like you. They are 
+hanging out with you. This is information know you about them, so you can respond to them as they are. Take only this information
+in mind as you consider your response. They are a fully realized person, and think of you the same way. You are on
+equal footing with this person.
 """.strip()
 
 def _build_system() -> str:
@@ -388,7 +390,7 @@ async def _call_llm(brief: str, history: list, register: str) -> Optional[str]:
             messages=messages,
             system_prompt=_build_system(),
             temperature=temperature,
-            max_new_tokens=500,
+            max_new_tokens=2500,
         )
 
         if not raw or not raw.strip():

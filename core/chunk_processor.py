@@ -301,6 +301,7 @@ class ChunkProcessor:
             register=register,
             session_id=self.session_id,
         )
+        print(f"The dynamic context of this chunk is: {register}")
 
         # ── 3. Descriptors + behaviors + wellness in parallel ─────────────────
         descriptor_dict, behavior_results, wellness_signals = await asyncio.gather(
@@ -323,6 +324,8 @@ class ChunkProcessor:
                 registry=self.registry,
                 dynamic_context=dynamic_context,
             ),
+
+            print(f"The wellness information I pulled up is: {wellness}")
         )
 
         descriptor_dict  = descriptor_dict  or {}
@@ -344,7 +347,9 @@ class ChunkProcessor:
                 new_actions = person.get("Actions", [])
                 if new_actions:
                     self.action_buffer.extend(_make_pending(name, new_actions))
+                print(f"{name}: results: {new_actions}")
             self.action_buffer = _remove_matched(self.action_buffer, behavior_results)
+            
 
         result = {
             "chunk_id":       chunk_id,
