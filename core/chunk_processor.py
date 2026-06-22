@@ -4,9 +4,10 @@ core/chunk_processor.py
 Per-chunk pipeline:
   1. Subject discovery   — who/what is named in this chunk
   2. Pronoun resolution  — match pronouns against the live registry
-  3. Descriptors + behaviors + wellness + knowledge in parallel via asyncio.gather
-  4. Action buffer       — unpaired actions held up to 3 chunks, then dropped
-  5. Merge               — write resolved data into per-person files via librarian
+  3. Dynamic reader      — detects active scene/dynamic context (runs first, feeds wellness)
+  4. Descriptors + behaviors + wellness in parallel via asyncio.gather
+  5. Action buffer       — unpaired actions held up to 3 chunks, then dropped
+  6. Merge               — write resolved data into per-person files via librarian
 
 Chunk size is configurable. Chunks fired before reaching chunk_size are
 flagged as partial. Partials are checked for relevance against the next
@@ -25,8 +26,77 @@ from core.log import log_event, log_error
 from core.Descriptor_catcher import descriptor_catcher as describer
 from core.BehaviorCatcher import behaviorcatcher as behavior
 from core.wellness import wellness_collector as wellness
-from core.knowledge_writer import knowledge_writer
+from core.dynamic_reader import dynamic_reader
 import core.librarian as librarian
+from core.knowledge_writer import knowledge_writer
+
+
+# ── Exchange formatter ────────────────────────────────────────────────────────
+
+def _build_exchanges(chunk: list[str], host: str, registry: dict) -> list[dict]:
+    """
+    Convert a flat chunk into structured exchanges using the full subject registry.
+    Each line is matched against known Person subjects by name prefix.
+    Gizmo lines are cause/context. Subject lines carry the behavior to extract.
+    Multiple subjects in one chunk produce separate exchange entries per speaker.
+    """
+    # Build lookup of known person names (lowercase) from registry
+    known_persons = {
+        name.lower(): name
+        for name, data in registry.items()
+        if not name.startswith("_") and data.get("type", "Person") == "Person"
+        and name.lower() != "gizmo"
+    }
+
+    exchanges = []
+    pending_gizmo = None
+
+    for line in chunk:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.lower().startswith("gizmo:"):
+            if pending_gizmo is not None:
+                exchanges.append({
+                    "gizmo":        pending_gizmo,
+                    "subject":      "",
+                    "subject_name": host,
+                })
+            pending_gizmo = stripped[len("gizmo:"):].strip()
+            continue
+
+        # Try to identify which known subject is speaking from name prefix
+        identified_name = None
+        subject_text    = stripped
+
+        for name_lower, name_canonical in known_persons.items():
+            prefix = f"{name_lower}:"
+            if stripped.lower().startswith(prefix):
+                identified_name = name_canonical
+                subject_text    = stripped[len(prefix):].strip()
+                break
+
+        # Fall back to host if no prefix matched
+        if identified_name is None:
+            identified_name = host
+
+        exchanges.append({
+            "gizmo":        pending_gizmo or "",
+            "subject":      subject_text,
+            "subject_name": identified_name,
+        })
+        pending_gizmo = None
+
+    # Flush any trailing gizmo line
+    if pending_gizmo is not None:
+        exchanges.append({
+            "gizmo":        pending_gizmo,
+            "subject":      "",
+            "subject_name": host,
+        })
+
+    return exchanges
 
 
 # ── Subject discovery ─────────────────────────────────────────────────────────
@@ -189,7 +259,6 @@ class ChunkProcessor:
             name = s.get("name")
             if name and name not in self.registry:
                 self.registry[name] = {"type": s.get("type", "Person")}
-                print(f"[ChunkProcessor] new subject: {name}")
 
     def _apply_pronoun_resolutions(self, resolutions: list[dict]) -> None:
         for r in resolutions:
@@ -225,15 +294,18 @@ class ChunkProcessor:
         self._apply_pronoun_resolutions(pronoun_resolutions)
         print(f"[DEBUG] registry after discovery: {self.registry}")
 
-        # ── 2. Known headmates for knowledge writer ───────────────────────────
-        known_headmates = [
-            k for k in self.registry
-            if self.registry[k].get("type") == "Person"
-            and k.lower() != "gizmo"
-        ]
+        # ── 2. Dynamic reader — must run before wellness ──────────────────────
+        register = self.registry.get("_register", "neutral")
+        dynamic_context = await dynamic_reader.read(
+            chunk=chunk,
+            name=self.host,
+            register=register,
+            session_id=self.session_id,
+        )
+        print(f"The dynamic context of this chunk is: {register}")
 
-        # ── 3. Parallel passes ────────────────────────────────────────────────
-        descriptor_dict, behavior_results, wellness_signals, knowledge_entries = await asyncio.gather(
+        # ── 3. Descriptors + behaviors + wellness in parallel ─────────────────
+        descriptor_dict, behavior_results, wellness_signals, knowledge_signals = await asyncio.gather(
             describer.extract(
                 user_message=text,
                 thread=text,
@@ -241,7 +313,7 @@ class ChunkProcessor:
                 session_file=self.session_id,
             ),
             behavior.extract(
-                user_message=text,
+                exchanges=_build_exchanges(chunk, self.host, self.registry),
                 thread=text,
                 subject=self.host,
                 session_file=self.session_id,
@@ -251,30 +323,30 @@ class ChunkProcessor:
                 chunk=chunk,
                 chunk_id=chunk_id,
                 registry=self.registry,
+                dynamic_context=dynamic_context,
             ),
             knowledge_writer.extract(
                 user_message=text,
-                gizmo_response="",
+                gizmo_response="",          # populated post-response in chat mode
                 speaker=self.host,
-                known_headmates=known_headmates,
+                known_headmates=[k for k in self.registry if self.registry[k].get("type") == "Person" and k.lower() != "gizmo"],
                 session_id=self.session_id,
             ),
         )
 
-        descriptor_dict   = descriptor_dict   or {}
-        behavior_results  = behavior_results  or []
-        wellness_signals  = wellness_signals  or []
-        knowledge_entries = knowledge_entries or []
+        descriptor_dict  = descriptor_dict  or {}
+        behavior_results = behavior_results or []
+        wellness_signals = wellness_signals or []
 
-        print(f"[ChunkProcessor] wellness signals: {len(wellness_signals)}")
-        print(f"[ChunkProcessor] knowledge entries: {len(knowledge_entries)}")
+        print(f"The wellness information I pulled up is: {len(wellness)}")
+        print(f"The knowledge I have is: {len(knowledge_signals)}")
 
-        # ── 4. Merge descriptors ──────────────────────────────────────────────
+        # ── 3. Merge descriptors ──────────────────────────────────────────────
         if descriptor_dict:
             for name, data in descriptor_dict.items():
                 librarian.merge_descriptors(name, data)
 
-        # ── 5. Merge behaviors + update action buffer ─────────────────────────
+        # ── 4. Merge behaviors + update action buffer ─────────────────────────
         if behavior_results:
             for person in behavior_results:
                 name = person.get("Subject")
@@ -284,18 +356,20 @@ class ChunkProcessor:
                 new_actions = person.get("Actions", [])
                 if new_actions:
                     self.action_buffer.extend(_make_pending(name, new_actions))
+                print(f"{name}: results: {new_actions}")
             self.action_buffer = _remove_matched(self.action_buffer, behavior_results)
+            
 
         result = {
-            "chunk_id":        chunk_id,
-            "chunk":           chunk,
-            "partial":         partial,
-            "subjects":        [k for k in self.registry.keys() if not k.startswith("_")],
-            "descriptors":     descriptor_dict,
-            "behaviors":       behavior_results,
-            "wellness":        wellness_signals,
-            "knowledge":       knowledge_entries,
-            "pending_buffer":  len(self.action_buffer),
+            "chunk_id":       chunk_id,
+            "chunk":          chunk,
+            "partial":        partial,
+            "subjects":       [k for k in self.registry.keys() if not k.startswith("_")],
+            "descriptors":    descriptor_dict,
+            "behaviors":      behavior_results,
+            "wellness":       wellness_signals,
+            "dynamic":        dynamic_context,
+            "pending_buffer": len(self.action_buffer),
         }
 
         self.results.append(result)
@@ -353,6 +427,8 @@ class ChunkProcessor:
             timed_out = self._partial is not None
             self._partial = None
             return await self._run_chunk(chunk, partial=timed_out)
+        # Session end — write dynamic session entry
+        await dynamic_reader.close_session(self.host, self.session_id)
         print(
             f"[ChunkProcessor] session complete. "
             f"registry: {[k for k in self.registry.keys() if not k.startswith('_')]} | "
