@@ -304,8 +304,14 @@ class ChunkProcessor:
         )
         print(f"The dynamic context of this chunk is: {register}")
 
-        # ── 3. Descriptors + behaviors + wellness in parallel ─────────────────
-        descriptor_dict, behavior_results, wellness_signals = await asyncio.gather(
+        # ── 3. Descriptors + behaviors + wellness + knowledge in parallel ─────────
+        known_headmates = [
+            k for k in self.registry
+            if self.registry[k].get("type") == "Person"
+            and k.lower() != "gizmo"
+        ]
+
+        descriptor_dict, behavior_results, wellness_signals, knowledge_entries = await asyncio.gather(
             describer.extract(
                 user_message=text,
                 thread=text,
@@ -313,7 +319,7 @@ class ChunkProcessor:
                 session_file=self.session_id,
             ),
             behavior.extract(
-                user_message=text,
+                exchanges=_build_exchanges(chunk, self.host, self.registry),
                 thread=text,
                 subject=self.host,
                 session_file=self.session_id,
@@ -327,20 +333,20 @@ class ChunkProcessor:
             ),
             knowledge_writer.extract(
                 user_message=text,
-                gizmo_response="",          # populated post-response in chat mode
+                gizmo_response="",
                 speaker=self.host,
-                known_headmates=[k for k in self.registry if self.registry[k].get("type") == "Person" and k.lower() != "gizmo"],
+                known_headmates=known_headmates,
                 session_id=self.session_id,
             ),
         )
-            
 
-        descriptor_dict  = descriptor_dict  or {}
-        behavior_results = behavior_results or []
-        wellness_signals = wellness_signals or []
+        descriptor_dict   = descriptor_dict   or {}
+        behavior_results  = behavior_results  or []
+        wellness_signals  = wellness_signals  or []
+        knowledge_entries = knowledge_entries or []
 
-        print(f"The wellness information I pulled up is: {wellness}")
-        print(f"The knowledge I have is: ")
+        print(f"[ChunkProcessor] wellness signals: {len(wellness_signals)}")
+        print(f"[ChunkProcessor] knowledge entries: {len(knowledge_entries)}")
 
         # ── 3. Merge descriptors ──────────────────────────────────────────────
         if descriptor_dict:
