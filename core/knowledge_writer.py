@@ -366,7 +366,7 @@ class KnowledgeWriter:
                     session=session_id[:8],
                     new_tags=len(new_tags),
                 )
-
+            print(f"Writing to knowledge extractor:\n{written}")
             return written or None
 
         except Exception as e:

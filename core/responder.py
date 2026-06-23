@@ -91,7 +91,7 @@ async def _assemble_brief(
 
         # Pull their slice using their own stored tags
         profile = librarian.get_by_tags(name, list(stored_tags)) if stored_tags else {}
-
+        print(f"PROFILE INFO:{profile}")
         # Fall back to top 5 weighted traits if tag query returns empty
         matched_personality = profile.get("personality") or {}
         if not matched_personality and personality:
@@ -148,6 +148,7 @@ async def _assemble_brief(
                 for s in wellness_signals
             )
         )
+    print(f"Wellness signals I'm tracking:\n{wellness_signals}")
 
     # What Gizmo knows about their world — retrieved by vocabulary tag match
     try:
@@ -166,6 +167,7 @@ async def _assemble_brief(
                             line += f" [{e['place']}]"
                         lines.append(line)
                     parts.append("\nWHAT YOU KNOW ABOUT THEIR WORLD:\n" + "\n".join(lines))
+                    print(f"WHAT I KNOW:{knowledge}")
     except Exception as e:
         print(f"[Responder] knowledge retrieval failed: {e}")
 
