@@ -261,21 +261,52 @@ def _safe_dedup(existing_list: list, new_items: list) -> list:
     return existing_list
 
 
-def _merge_into(existing: dict, incoming: dict) -> dict:
+def _deep_merge(existing: dict, incoming: dict) -> dict:
+    """
+    Recursively merge incoming dict into existing dict.
+
+    Rules:
+    - list + list   → deduped union
+    - dict + dict   → recurse
+    - missing key   → take incoming value
+    - scalar clash  → keep existing (first write wins for scalars)
+
+    This preserves the nested descriptor schema:
+      physical.notable.collar → merges sub-fields without clobbering the whole object
+    """
     for key, value in incoming.items():
         if key not in existing:
             existing[key] = value
+        elif isinstance(existing[key], dict) and isinstance(value, dict):
+            existing[key] = _deep_merge(existing[key], value)
         elif isinstance(existing[key], list) and isinstance(value, list):
             existing[key] = _safe_dedup(existing[key], value)
+        # scalar clash — keep existing
     return existing
 
 
-def merge_descriptors(name: str, new_data: dict, subfolder: str = "descriptors") -> None:
-    rel_path = f"{subfolder}/{name.lower()}.json"
-    existing = _read_file(rel_path) or {}
-    merged   = _merge_into(existing, new_data)
-    _write_json(rel_path, merged)
-    print(f"[librarian] merged descriptors for {name}")
+def merge_descriptors(new_data: dict, subfolder: str = "descriptors") -> None:
+    """
+    Merge descriptor data for one or more entities.
+
+    new_data is a name-keyed dict from the descriptor catcher:
+      {"Jess": {"Type": "Person", "physical": {...}, ...},
+       "the lobby": {"Type": "Place", "file_key": "lobby", ...}}
+
+    Each entity's data is deep-merged into its own file, preserving
+    nested structures like physical.notable.collar across multiple writes.
+    Uses file_key if present, otherwise normalises the entity name.
+    """
+    for entity_name, entity_data in new_data.items():
+        if not isinstance(entity_data, dict):
+            continue
+
+        file_key = entity_data.get("file_key") or entity_name.lower().replace(" ", "_")
+        rel_path = f"{subfolder}/{file_key}.json"
+        existing = _read_file(rel_path) or {}
+        merged   = _deep_merge(existing, entity_data)
+        _write_json(rel_path, merged)
+        print(f"[librarian] merged descriptors for {entity_name} → {rel_path}")
 
 # ── Behavior merge ────────────────────────────────────────────────────────────
 
