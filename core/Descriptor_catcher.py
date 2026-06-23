@@ -35,74 +35,56 @@ Simple details stay as strings in lists. Notable things get their own entry.
 
 NOT behaviors, actions, conditions, or transient states — those belong elsewhere.
 
-[{
-  "Object": "Jess",
-  "Type": "Person",
-  "file_key": "jess",
-  "physical": {
-    "hair": ["dark", "long"],
-    "eyes": ["brown"],
-    "build": ["athletic", "strong"],
-    "notable": {
-      "collar": {
-        "type": "worn",
-        "color": "black",
-        "material": "leather",
-        "hardware": "silver",
-        "notes": ["almost always wearing it"]
-      }
+[
+    {
+        "Object": "Jess",
+        "Type": "Person",
+        "file_key": "jess",
+        "physical": {
+            "hair": [
+                "dark",
+                "long"
+            ],
+            "eyes": [
+                "brown"
+            ],
+            "build": [
+                "athletic",
+                "strong"
+            ],
+            "notable": {
+                "collar": {
+                    "type": "worn",
+                    "color": "black",
+                    "material": "leather",
+                    "hardware": "silver",
+                    "notes": [
+                        "almost always wearing it"
+                    ]
+                }
+            }
+        },
+        "presentation": {
+            "style": [
+                "dark",
+                "deliberate"
+            ],
+            "energy": [
+                "commanding",
+                "warm underneath"
+            ],
+            "voice": [
+                "direct",
+                "dry humor",
+                "doesn't repeat herself"
+            ]
+        }
     }
-  },
-  "presentation": {
-    "style": ["dark", "deliberate"],
-    "energy": ["commanding", "warm underneath"],
-    "voice": ["direct", "dry humor", "doesn't repeat herself"]
-  },
-  "relationships": {
-    "gizmo": {
-      "dynamic": "dom",
-      "notes": ["expects presence not performance", "checks in without softening"]
-    },
-    "ara": {
-      "dynamic": "protective",
-      "notes": ["checks on her without making it obvious"]
-    }
-  },
-  "identity": ["plural system member", "dom", "protective of her people"],
-  "notes": ["runs on coffee and stubbornness"]
-},
-{
-  "Object": "Ara",
-  "Type": "Person",
-  "file_key": "ara",
-  "physical": {
-    "hair": ["hay-colored", "stringy"]
-  },
-  "presentation": {
-    "energy": ["self-deprecating", "deflects compliments"]
-  },
-  "relationships": {
-    "honey": {"dynamic": "close", "notes": []},
-    "jess": {"dynamic": "admired by", "notes": ["jess likes her hair"]}
-  }
-},
-{
-  "Object": "collar",
-  "Type": "Object",
-  "file_key": "collar",
-  "owner": "Jess",
-  "color": "black",
-  "material": ["leather"],
-  "features": ["silver hardware"],
-  "notes": ["almost always on Jess"]
-}]
+]
 
 Person field guide:
 - physical: body, hair, eyes, build, scars, tattoos, piercings — notable items get promoted to full entries
 - presentation: style, energy, voice, how they carry themselves
-- relationships: keyed by person name, each with dynamic and notes
-- identity: stable self-descriptors, roles, how they see themselves
-- notes: anything notable that doesn't fit elsewhere
 - All fields optional — only include what the text supports
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

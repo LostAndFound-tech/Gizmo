@@ -128,7 +128,7 @@ async def _synthesize_profile(
             messages=[{"role": "user", "content": "\n\n".join(prompt_parts)}],
             system_prompt=_PROFILE_SYSTEM,
             temperature=0.4,
-            max_new_tokens=200,
+            max_new_tokens=1000,
         )
         return raw.strip() if raw and raw.strip() else ""
     except Exception as e:
@@ -161,7 +161,7 @@ async def _synthesize_world(
             messages=[{"role": "user", "content": prompt}],
             system_prompt=_WORLD_SYSTEM,
             temperature=0.3,
-            max_new_tokens=150,
+            max_new_tokens=1500,
         )
         result = raw.strip() if raw and raw.strip() else ""
         if result == "[nothing known yet]":
@@ -207,7 +207,7 @@ async def _synthesize_moment(
             messages=[{"role": "user", "content": "\n\n".join(prompt_parts)}],
             system_prompt=_MOMENT_SYSTEM,
             temperature=0.5,
-            max_new_tokens=150,
+            max_new_tokens=2500,
         )
         print(f"What I know about what is going on:{raw}")
         return raw.strip() if raw and raw.strip() else ""
