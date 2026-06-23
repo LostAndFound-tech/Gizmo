@@ -71,21 +71,35 @@ TAG_MAP: dict[str, list[str]] = {
 def _expand_query_tags(query_tags: list[str]) -> set[str]:
     """
     Expand loose query tags into the full set of storage tags to match against.
-    Checks both directions — query tag as storage tag, and query tag as alias.
+
+    Three passes:
+    1. Direct match - query tag is itself a storage tag
+    2. TAG_MAP expansion - clinical/behavioral alias resolution
+    3. Vocabulary match - organic tags coined by the knowledge writer
     """
     expanded = set()
     query_lower = [t.lower() for t in query_tags]
 
+    # Load live vocabulary - grows organically as knowledge writer coins new tags
+    try:
+        vocab_data = _read_file("knowledge/vocabulary.json")
+        vocabulary = set(vocab_data.get("tags", [])) if isinstance(vocab_data, dict) else set()
+    except Exception:
+        vocabulary = set()
+
     for qt in query_lower:
-        # Direct match — query tag is itself a storage tag
+        # Direct match
         expanded.add(qt)
-        # Forward match — query tag is a storage tag key
+        # TAG_MAP forward match
         if qt in TAG_MAP:
             expanded.add(qt)
-        # Reverse match — query tag appears in a storage tag's alias list
+        # TAG_MAP reverse match - qt appears as an alias
         for storage_tag, aliases in TAG_MAP.items():
             if qt in aliases:
                 expanded.add(storage_tag)
+        # Vocabulary match - organic tags
+        if qt in vocabulary:
+            expanded.add(qt)
 
     return expanded
 
