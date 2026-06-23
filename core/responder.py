@@ -309,6 +309,10 @@ async def _assemble_brief(
         if moment_para:
             parts.append(f"\nTHIS MOMENT:\n{moment_para}")
 
+        print(f"They are: \n\n{profile_para}")
+        print(f"Their world:\n\n{world_para}")
+        print(f"The moment:\n\n{moment_para}")
+
     # ── Gizmo's own personality ───────────────────────────────────────────────
     gizmo_data = librarian._read_file("behaviors/gizmo.json") or {}
     gizmo_pers = gizmo_data.get("Personality", {})
