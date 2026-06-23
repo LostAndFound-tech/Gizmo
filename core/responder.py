@@ -209,6 +209,7 @@ async def _synthesize_moment(
             temperature=0.5,
             max_new_tokens=150,
         )
+        print(f"What I know about what is going on:{raw}")
         return raw.strip() if raw and raw.strip() else ""
     except Exception as e:
         log_error("Responder", "moment synthesis failed", exc=e)
