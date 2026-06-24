@@ -576,7 +576,7 @@ class GizmoServer:
             )
             intent = intent_result.get("intent", "none")
 
-            # Handle intents that short-circuit the pipeline entirely
+            # Handle intents that short-circuit or modify the pipeline
             if intent == "context_reset":
                 _session_history.pop(session_id, None)
                 log_event("GizmoServer", "CONTEXT_RESET", session=session_id[:8], reason="intent")
@@ -586,11 +586,12 @@ class GizmoServer:
                         await _ap.flush()
                 except Exception:
                     pass
+                # Don't rewrite raw_text — let it flow as normal chat after reset
 
             elif intent == "mode_switch":
-                mode_param = intent_result.get("params", {}).get("mode", "")
-                if mode_param:
-                    raw_text = f"{mode_param} mode"
+                # agent_simple already handles mode phrases reliably
+                # do NOT rewrite raw_text — just let it through as-is
+                pass
 
             elif intent == "wellness_report":
                 name_param = intent_result.get("params", {}).get("name")
@@ -601,7 +602,6 @@ class GizmoServer:
 
             elif intent == "requirement_complete":
                 # Let the pipeline handle it via scheduler extractor
-                # but also pass the direct answer for confirmation
                 pass
 
         except Exception as e:
@@ -851,7 +851,7 @@ class GizmoServer:
             )
             intent = intent_result.get("intent", "none")
 
-            # Handle intents that short-circuit the pipeline entirely
+            # Handle intents that short-circuit or modify the pipeline
             if intent == "context_reset":
                 _session_history.pop(session_id, None)
                 log_event("GizmoServer", "CONTEXT_RESET", session=session_id[:8], reason="intent")
@@ -861,11 +861,12 @@ class GizmoServer:
                         await _ap.flush()
                 except Exception:
                     pass
+                # Don't rewrite raw_text — let it flow as normal chat after reset
 
             elif intent == "mode_switch":
-                mode_param = intent_result.get("params", {}).get("mode", "")
-                if mode_param:
-                    raw_text = f"{mode_param} mode"
+                # agent_simple already handles mode phrases reliably
+                # do NOT rewrite raw_text — just let it through as-is
+                pass
 
             elif intent == "wellness_report":
                 name_param = intent_result.get("params", {}).get("name")
@@ -876,7 +877,6 @@ class GizmoServer:
 
             elif intent == "requirement_complete":
                 # Let the pipeline handle it via scheduler extractor
-                # but also pass the direct answer for confirmation
                 pass
 
         except Exception as e:
