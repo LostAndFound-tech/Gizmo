@@ -242,7 +242,7 @@ class ChunkProcessor:
                 session_file=self.session_id,
             ),
             behavior.extract(
-                exchanges=_build_exchanges(chunk, self.host, self.registry),
+                exchanges=text,
                 thread=text,
                 subject=self.host,
                 session_file=self.session_id,
