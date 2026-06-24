@@ -304,11 +304,7 @@ async def _assemble_brief(
     direct_intent = context.get("direct_answer_intent", "")
     if direct_answer:
         parts.append(
-            f"
-DIRECT ANSWER ({direct_intent}):
-{direct_answer}
-
-"
+            f"DIRECT ANSWER ({direct_intent}):{direct_answer}"
             f"Deliver this answer through your own voice and personality. "
             f"Do not hedge, invent, or apologize. The data above is accurate — just say it."
         )
