@@ -23,6 +23,7 @@ from typing import Optional
 
 from core.log import log_event, log_error
 import core.librarian as librarian
+from core.scheduler import build_schedule_brief
 
 
 # ── Tag extraction from chunk ─────────────────────────────────────────────────
@@ -288,6 +289,30 @@ async def _assemble_brief(
     dynamic  = chunk_result.get("dynamic")
 
     parts = []
+
+    # ── Time and schedule — always first ─────────────────────────────────────
+    try:
+        schedule_block = build_schedule_brief(fronter=host)
+        parts.append(schedule_block)
+    except Exception as e:
+        print(f"[Responder] schedule brief failed: {e}")
+        from core.timezone import tz_now
+        parts.append(f"CURRENT TIME: {tz_now().strftime('%A, %B %d, %Y -- %I:%M %p %Z')}")
+
+    # ── Direct answer from intent classifier ─────────────────────────────────
+    direct_answer = context.get("direct_answer", "")
+    direct_intent = context.get("direct_answer_intent", "")
+    if direct_answer:
+        parts.append(
+            f"
+DIRECT ANSWER ({direct_intent}):
+{direct_answer}
+
+"
+            f"Deliver this answer through your own voice and personality. "
+            f"Do not hedge, invent, or apologize. The data above is accurate — just say it."
+        )
+
     parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
 
     # Anyone the registry knows about who is NOT currently present

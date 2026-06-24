@@ -216,6 +216,38 @@ def _detect_mode_from_message(text: str) -> Optional[str]:
     return None
 
 
+_RESET_PHRASES = [
+    "that's from before",
+    "thats from before",
+    "different conversation",
+    "new scene",
+    "starting fresh",
+    "start fresh",
+    "forget that",
+    "never mind that",
+    "new topic",
+    "moving on",
+    "that was earlier",
+]
+
+def _is_context_reset(text: str) -> bool:
+    """Detect explicit context reset phrases."""
+    t = text.lower().strip()
+    return any(phrase in t for phrase in _RESET_PHRASES)
+
+
+def _check_inactivity_reset(session_id: str, saved: dict) -> bool:
+    """
+    Returns True if the gap since last active is > 30 minutes.
+    Scene context should be considered stale.
+    """
+    last_active = saved.get("last_active", 0)
+    if not last_active:
+        return False
+    gap_minutes = (time.time() - last_active) / 60
+    return gap_minutes > 30
+
+
 async def run_single_pipeline(message, session_id, headmate, context, history) -> str:
     from core.agent_simple import agent_simple as agent
     try:
@@ -459,6 +491,28 @@ class GizmoServer:
         if _is_duplicate(session_id, raw_text):
             return
 
+        # ── Context reset checks ──────────────────────────────────────────────
+        # Explicit reset phrase OR 30-minute inactivity gap
+        _saved_for_reset = _load_session(session_id) or {}
+        _context_reset   = (
+            _is_context_reset(raw_text) or
+            _check_inactivity_reset(session_id, _saved_for_reset)
+        )
+        if _context_reset:
+            _session_history.pop(session_id, None)
+            log_event("GizmoServer", "CONTEXT_RESET",
+                session=session_id[:8],
+                reason="phrase" if _is_context_reset(raw_text) else "inactivity",
+            )
+            print(f"[GizmoServer] context reset for {session_id[:8]}")
+            # Flush the processor so it starts clean
+            try:
+                from core.agent_simple import _processor as _ap
+                if _ap:
+                    await _ap.flush()
+            except Exception:
+                pass
+
         # ── Detect mode switch and broadcast to client ────────────────────────
         detected_mode = _detect_mode_from_message(raw_text)
         if not detected_mode and safeword == "red":
@@ -485,7 +539,10 @@ class GizmoServer:
         speech_parts = [p for p in parts if p.get("content_type") == "speech"]
         if speech_parts:
             first_speaker = speech_parts[0].get("headmate")
-            if first_speaker and first_speaker != headmate:
+            # Only update current_host if we don't already have one established.
+            # Never let mid-conversation speakers (e.g. Princess mid-fight) hijack
+            # the host identity for the session.
+            if first_speaker and not headmate:
                 context["current_host"] = first_speaker
                 headmate = first_speaker
 
@@ -509,8 +566,51 @@ class GizmoServer:
             session=session_id[:8], headmate=headmate or "unknown",
             multi=multi, parts=len(parts), words=len(raw_text.split()))
 
-        await asyncio.sleep(THINKING_DELAY)
-        await self._send(websocket, {"type": "thinking"})
+        # ── Intent classification ─────────────────────────────────────────────
+        intent_result = {"intent": "none", "confidence": 1.0, "params": {}, "direct_answer": ""}
+        try:
+            from core.intent_classifier import intent_classifier
+            intent_result = await intent_classifier.classify(
+                message=raw_text,
+                fronter=headmate or "system",
+            )
+            intent = intent_result.get("intent", "none")
+
+            # Handle intents that short-circuit the pipeline entirely
+            if intent == "context_reset":
+                _session_history.pop(session_id, None)
+                log_event("GizmoServer", "CONTEXT_RESET", session=session_id[:8], reason="intent")
+                try:
+                    from core.agent_simple import _processor as _ap
+                    if _ap:
+                        await _ap.flush()
+                except Exception:
+                    pass
+
+            elif intent == "mode_switch":
+                mode_param = intent_result.get("params", {}).get("mode", "")
+                if mode_param:
+                    raw_text = f"{mode_param} mode"
+
+            elif intent == "wellness_report":
+                name_param = intent_result.get("params", {}).get("name")
+                if name_param:
+                    raw_text = f"run report for {name_param}"
+                else:
+                    raw_text = "run wellness report"
+
+            elif intent == "requirement_complete":
+                # Let the pipeline handle it via scheduler extractor
+                # but also pass the direct answer for confirmation
+                pass
+
+        except Exception as e:
+            log_error("GizmoServer", "intent classification failed", exc=e)
+
+        current_mode = _session_modes.get(session_id, "chat")
+        if current_mode != "passive":
+            await asyncio.sleep(THINKING_DELAY)
+            await self._send(websocket, {"type": "thinking"})
 
         if session_id not in _session_history:
             saved = _load_session(session_id)
@@ -520,8 +620,20 @@ class GizmoServer:
                 # Also skip any messages that were generated during roleplay mode
                 # since that content belongs to the scene log, not chat history
                 recent = all_messages[-12:]
+                def _annotate_message(m: dict) -> dict:
+                    content = m["content"]
+                    if m.get("context_type") == "system_conflict":
+                        speakers = m.get("speakers", [])
+                        label = f": {', '.join(speakers)}" if speakers else ""
+                        content = (
+                            f"[Note: the following exchange had multiple system members"
+                            f" present{label} -- they are no longer in the current scene]\n"
+                            + content
+                        )
+                    return {"role": m["role"], "content": content}
+
                 _session_history[session_id] = [
-                    {"role": m["role"], "content": m["content"]}
+                    _annotate_message(m)
                     for m in recent
                     if m.get("role") in ("user", "assistant")
                     and m.get("content", "").strip()
@@ -553,12 +665,19 @@ class GizmoServer:
         messages = saved_pre.get("messages", [])
         if not messages or messages[-1].get("content") != raw_text or messages[-1].get("role") != "user":
             saved_pre.setdefault("messages", []).append({
-                "role":    "user",
-                "speaker": headmate or "unknown",
-                "content": raw_text,
-                "ts":      now,
+                "role":         "user",
+                "speaker":      headmate or "unknown",
+                "content":      raw_text,
+                "ts":           now,
+                "context_type": "system_conflict" if len(all_speakers) > 1 else "normal",
+                "speakers":     all_speakers,
             })
         _save_session(session_id, saved_pre)
+
+        # Thread intent result into context so responder can inject direct answer
+        if intent_result.get("direct_answer"):
+            context["direct_answer"]      = intent_result["direct_answer"]
+            context["direct_answer_intent"] = intent_result["intent"]
 
         try:
             loop = asyncio.get_event_loop()
@@ -721,6 +840,47 @@ class GizmoServer:
 
         log_event("GizmoServer", "RESENDING_UNSENT",
             session=session_id[:8], headmate=headmate)
+
+        # ── Intent classification ─────────────────────────────────────────────
+        intent_result = {"intent": "none", "confidence": 1.0, "params": {}, "direct_answer": ""}
+        try:
+            from core.intent_classifier import intent_classifier
+            intent_result = await intent_classifier.classify(
+                message=raw_text,
+                fronter=headmate or "system",
+            )
+            intent = intent_result.get("intent", "none")
+
+            # Handle intents that short-circuit the pipeline entirely
+            if intent == "context_reset":
+                _session_history.pop(session_id, None)
+                log_event("GizmoServer", "CONTEXT_RESET", session=session_id[:8], reason="intent")
+                try:
+                    from core.agent_simple import _processor as _ap
+                    if _ap:
+                        await _ap.flush()
+                except Exception:
+                    pass
+
+            elif intent == "mode_switch":
+                mode_param = intent_result.get("params", {}).get("mode", "")
+                if mode_param:
+                    raw_text = f"{mode_param} mode"
+
+            elif intent == "wellness_report":
+                name_param = intent_result.get("params", {}).get("name")
+                if name_param:
+                    raw_text = f"run report for {name_param}"
+                else:
+                    raw_text = "run wellness report"
+
+            elif intent == "requirement_complete":
+                # Let the pipeline handle it via scheduler extractor
+                # but also pass the direct answer for confirmation
+                pass
+
+        except Exception as e:
+            log_error("GizmoServer", "intent classification failed", exc=e)
 
         await asyncio.sleep(THINKING_DELAY)
         await self._send(websocket, {"type": "thinking"})
