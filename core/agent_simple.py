@@ -432,15 +432,17 @@ class AgentSimple:
 
             # ── Pipeline (passive + chat) ─────────────────────────────────────
             if _mode == "passive":
-                # Passive — pipeline must complete before we move on
-                last_result = await _run_pipeline(
-                    user_message=user_message,
-                    session_id=session_id,
-                    host=host,
-                    chunk_size=chunk_size,
-                    timeout_sec=timeout_sec,
-                    flush=True,
-                )
+                processor = _get_processor(session_id, host, chunk_size, timeout_sec)
+
+                async def _passive_pipeline():
+                    try:
+                        lines = [l for l in user_message.splitlines() if l.strip()]
+                        for line in lines:
+                            await processor.push_line(line)
+                    except Exception as e:
+                        log_error("AgentSimple", "passive pipeline failed", exc=e)
+
+                asyncio.create_task(_passive_pipeline())
                 yield ""
                 return
 
