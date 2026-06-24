@@ -2,41 +2,26 @@
 core/knowledge_writer.py
 
 Extracts discrete facts from conversational exchanges and writes them to
-Gizmo's knowledge store.
+Gizmo's knowledge store under the headmate folder structure.
 
 Store layout:
-  {DATA_DIR}/knowledge/
-    vocabulary.json                  ← shared tag vocabulary (source of truth)
-    index.json                       ← flat index of every fact ever written
+  headmates/
+    {name}/
+      knowledge/
+        preferences.json
+        opinions.json
+        internal_space.json
+        [topic].json
     system/
       external/
-        home.json                    ← shared physical space
-        people.json                  ← external people
-        work.json                    ← jobs, workplace, coworkers
-        pets.json                    ← animals
-        [topic].json                 ← expands as needed
-    {headmate}/
-      internal_space.json            ← headmate's internal experience
-      preferences.json               ← likes, dislikes, habits
-      [topic].json                   ← expands as needed
+        home.json
+        people.json
+        work.json
+        [topic].json
+      vocabulary.json
+      index.json
     gizmo/
-      threads.json                   ← things Gizmo wants to follow up on
-
-Entry schema:
-  {
-    "fact":       "Jess rearranged her living room today",
-    "source":     "jess",
-    "internal":   false,
-    "place":      "living room",           ← optional
-    "objects":    ["cat palace", "coffee table"],  ← optional
-    "tags":       ["living-room", "furniture", "cats"],
-    "confidence": "stated | implied | uncertain",
-    "route":      "system/external/home",
-    "ts":         "2026-06-22T18:00:00+00:00"
-  }
-
-Runs in the chunk_processor parallel gather alongside descriptors,
-behaviors, and wellness. Fire and forget — never blocks the response.
+      threads.json
 """
 
 import json
@@ -48,84 +33,40 @@ from core.log import log_event, log_error
 import core.librarian as librarian
 
 
-# ── Vocabulary ────────────────────────────────────────────────────────────────
-
-_VOCAB_FILE = "knowledge/vocabulary.json"
-_INDEX_FILE = "knowledge/index.json"
-
-
-def _read_vocabulary() -> list[str]:
-    data = librarian._read_file(_VOCAB_FILE)
-    if isinstance(data, dict):
-        return data.get("tags", [])
-    return []
-
-
-def _write_vocabulary(tags: list[str]) -> None:
-    librarian._write_json(_VOCAB_FILE, {"tags": sorted(tags)})
-
-
-def _read_index() -> list[dict]:
-    data = librarian._read_file(_INDEX_FILE)
-    if isinstance(data, list):
-        return data
-    return []
-
-
-def _write_index(index: list[dict]) -> None:
-    librarian._write_json(_INDEX_FILE, index)
-
-
 # ── Routing ───────────────────────────────────────────────────────────────────
-
-# Known external topic buckets. LLM can propose new ones — we normalise them.
-_EXTERNAL_BUCKETS = {
-    "home", "people", "work", "pets", "places",
-    "routines", "events", "objects", "media", "food",
-}
-
-# Known headmate-level topic buckets.
-_HEADMATE_BUCKETS = {
-    "internal_space", "preferences", "history",
-    "relationships", "opinions", "routines",
-}
-
 
 def _normalise_route(raw_route: str, known_headmates: list[str]) -> str:
     """
-    Normalise a raw route string from the LLM into a valid file path
-    relative to the knowledge/ directory.
+    Normalise a raw route string from the LLM into a path relative to headmates/.
 
-    Expected LLM outputs (examples):
-      "system/external/home"
-      "jess/preferences"
-      "gizmo/threads"
+    LLM outputs:
+      "system/external/home"    -> "system/external/home"
+      "jess/preferences"        -> "jess/knowledge/preferences"
+      "gizmo/threads"           -> "gizmo/threads"
 
     Falls back to "system/external/general" on anything unparseable.
     """
-    raw = raw_route.strip().lower().strip("/")
+    raw   = raw_route.strip().lower().strip("/")
     parts = raw.split("/")
 
-    # gizmo/threads
     if parts[0] == "gizmo":
         sub = parts[1] if len(parts) > 1 else "threads"
         return f"gizmo/{sub}"
 
-    # system/external/[topic]
     if parts[0] == "system":
         topic = parts[-1] if len(parts) >= 3 else "general"
-        # Sanitise topic name
         topic = re.sub(r"[^a-z0-9_-]", "-", topic)
         return f"system/external/{topic}"
 
-    # [headmate]/[topic]
     if parts[0] in [h.lower() for h in known_headmates]:
         topic = parts[1] if len(parts) > 1 else "general"
         topic = re.sub(r"[^a-z0-9_-]", "-", topic)
-        return f"{parts[0]}/{topic}"
+        return f"{parts[0]}/knowledge/{topic}"
 
     return "system/external/general"
 
+
+# ── Retrieval ─────────────────────────────────────────────────────────────────
 
 _RETRIEVAL_SYSTEM = """
 You are matching a conversational message against a tag vocabulary.
@@ -134,6 +75,7 @@ Return ONLY a valid JSON array of matching tags. No markdown. No explanation.
 Return only tags from the provided vocabulary that genuinely apply to this message.
 If nothing matches, return [].
 """.strip()
+
 
 async def get_relevant_tags(message: str, vocabulary: list[str]) -> list[str]:
     try:
@@ -152,6 +94,10 @@ async def get_relevant_tags(message: str, vocabulary: list[str]) -> list[str]:
     except Exception as e:
         log_error("KnowledgeWriter", "tag retrieval failed", exc=e)
         return []
+
+
+def _read_vocabulary() -> list[str]:
+    return librarian.read_vocabulary()
 
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
@@ -182,24 +128,24 @@ For each fact, return:
 }
 
 ROUTING RULES:
-- Facts about the shared physical space (rooms, furniture, layout) → system/external/home
-- Facts about external people (Willow, friends, coworkers) → system/external/people
-- Facts about work, jobs, workplace → system/external/work
-- Facts about pets or animals → system/external/pets
-- Facts about places outside the home → system/external/places
-- Facts about recurring events or schedules → system/external/routines
-- Facts about a headmate's internal experience, feelings about their own space → {headmate}/internal_space
-- Facts about a headmate's tastes, preferences, habits → {headmate}/preferences
-- Facts about a headmate's opinions → {headmate}/opinions
-- Things Gizmo wants to follow up on or is curious about → gizmo/threads
-- When in doubt about system vs headmate: if it affects or involves the whole household, system. If it's specific to one headmate's experience of something, headmate.
+- Facts about the shared physical space (rooms, furniture, layout) -> system/external/home
+- Facts about external people (Willow, friends, coworkers) -> system/external/people
+- Facts about work, jobs, workplace -> system/external/work
+- Facts about pets or animals -> system/external/pets
+- Facts about places outside the home -> system/external/places
+- Facts about recurring events or schedules -> system/external/routines
+- Facts about a headmate's internal experience, feelings about their own space -> {headmate}/internal_space
+- Facts about a headmate's tastes, preferences, habits -> {headmate}/preferences
+- Facts about a headmate's opinions -> {headmate}/opinions
+- Things Gizmo wants to follow up on or is curious about -> gizmo/threads
+- When in doubt about system vs headmate: if it affects the whole household, system.
+  If it's specific to one headmate's experience, headmate.
 
 TAGGING RULES:
 - Match existing vocabulary tags first — only coin new tags if nothing fits
 - New tags: lowercase, single word or hyphenated phrase, specific not generic
-- Use 2–6 tags per fact
-- Tags should name the thing, not describe the act: "coffee-table" not "furniture-acquisition"
-- Place and objects fields are for named things — don't repeat them as tags unless genuinely useful
+- Use 2-6 tags per fact
+- Tags should name the thing: "coffee-table" not "furniture-acquisition"
 
 WHAT TO EXTRACT:
 - Named objects that will come up again (cat palace, coffee table, the lamp)
@@ -210,19 +156,19 @@ WHAT TO EXTRACT:
 - Things Gizmo should remember to ask about later
 
 WHAT TO SKIP:
-- Pure emotional states with no factual content (already handled by wellness/behavior)
-- Anything too vague to be useful ("she seemed happy")
+- Pure emotional states with no factual content (handled by wellness/behavior)
+- Anything too vague to be useful
 - Gizmo's own responses unless they reveal something worth tracking
 - Greetings, filler, pleasantries
 
 CONFIDENCE:
-- stated:   they said it explicitly
-- implied:  reasonable inference from what was said
-- uncertain: ambiguous — worth noting but not reliable
+- stated:    they said it explicitly
+- implied:   reasonable inference
+- uncertain: ambiguous
 
 internal field:
 - false: fact about the external world, shared space, or other people
-- true:  fact about a headmate's inner experience, internal system space, or personal felt sense
+- true:  fact about a headmate's inner experience or personal felt sense
 """.strip()
 
 
@@ -253,32 +199,13 @@ async def _call_llm(prompt: str) -> Optional[list]:
         )
         if not raw or not raw.strip():
             return None
-        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        clean  = re.sub(r"```(?:json)?|```", "", raw).strip()
         parsed = json.loads(clean)
-        if not isinstance(parsed, list):
-            return None
-        return parsed
+        return parsed if isinstance(parsed, list) else None
     except Exception as e:
         log_error("KnowledgeWriter", "LLM call failed", exc=e)
         print(f"[KnowledgeWriter] LLM call failed: {type(e).__name__}: {e}")
         return None
-
-
-# ── File write ────────────────────────────────────────────────────────────────
-
-def _append_to_knowledge_file(route: str, entry: dict) -> None:
-    path     = f"knowledge/{route}.json"
-    existing = librarian._read_file(path)
-    if not isinstance(existing, list):
-        existing = []
-    existing.append(entry)
-    librarian._write_json(path, existing)
-
-
-def _update_index(entries: list[dict]) -> None:
-    index = _read_index()
-    index.extend(entries)
-    _write_index(index)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -293,10 +220,6 @@ class KnowledgeWriter:
         known_headmates: list[str],
         session_id:      str = "",
     ) -> Optional[list[dict]]:
-        """
-        Extract facts from an exchange and write them to the knowledge store.
-        Returns the list of entries written, or None if nothing extracted.
-        """
         if not user_message.strip():
             return None
 
@@ -313,19 +236,17 @@ class KnowledgeWriter:
                 log_event("KnowledgeWriter", "NO_FACTS", speaker=speaker, session=session_id[:8])
                 return None
 
-            ts           = datetime.now(timezone.utc).isoformat()
-            new_tags     = []
-            written      = []
+            ts       = datetime.now(timezone.utc).isoformat()
+            new_tags = []
+            written  = []
 
             for fact in facts:
                 if not isinstance(fact, dict) or not fact.get("fact"):
                     continue
 
-                # Normalise route
                 raw_route = fact.get("route", "system/external/general")
                 route     = _normalise_route(raw_route, known_headmates)
 
-                # Collect new tags
                 for tag in fact.get("tags", []):
                     if tag and tag not in vocabulary and tag not in new_tags:
                         new_tags.append(tag)
@@ -341,32 +262,29 @@ class KnowledgeWriter:
                     "ts":         ts,
                 }
 
-                # Optional fields — only include if present
                 if fact.get("place"):
                     entry["place"] = fact["place"]
                 if fact.get("objects"):
                     entry["objects"] = fact["objects"]
 
-                _append_to_knowledge_file(route, entry)
+                librarian.append_knowledge_entry(route, entry)
                 written.append(entry)
-                print(f"[KnowledgeWriter] → {route}: {entry['fact'][:60]}")
+                print(f"[KnowledgeWriter] -> {route}: {entry['fact'][:60]}")
 
-            # Grow vocabulary with genuinely new tags
             if new_tags:
                 vocabulary.extend(new_tags)
-                _write_vocabulary(vocabulary)
+                librarian.write_vocabulary(vocabulary)
                 print(f"[KnowledgeWriter] new tags coined: {new_tags}")
 
-            # Update flat index
             if written:
-                _update_index(written)
+                librarian.append_index_entry(written)
                 log_event("KnowledgeWriter", "FACTS_WRITTEN",
                     count=len(written),
                     speaker=speaker,
                     session=session_id[:8],
                     new_tags=len(new_tags),
                 )
-            print(f"Writing to knowledge extractor:\n{written}")
+
             return written or None
 
         except Exception as e:

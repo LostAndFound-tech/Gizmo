@@ -801,35 +801,42 @@ def _history_for_prompt(history: dict, max_months: int = 6) -> str:
 # ── File helpers ──────────────────────────────────────────────────────────────
 
 def _list_wellness_files() -> list[str]:
+    """
+    Find all headmate names by scanning headmates/ folder.
+    Excludes system and gizmo.
+    """
     names = set()
-    for subfolder in ("wellness", "behaviors"):
-        folder = librarian._full_path(subfolder)
-        if not os.path.isdir(folder):
+    folder = librarian._full_path("headmates")
+    if not os.path.isdir(folder):
+        print(f"[WellnessSynthesis] headmates folder not found: {folder}")
+        return []
+    for item in os.listdir(folder):
+        if item in ("system", "gizmo"):
             continue
-        for fname in os.listdir(folder):
-            if fname.endswith(".json") and fname != "classifications":
-                names.add(fname[:-5])
+        item_path = os.path.join(folder, item)
+        if os.path.isdir(item_path):
+            names.add(item)
     print(f"[WellnessSynthesis] found names: {names}")
     return list(names)
 
 
 def _read_wellness(name: str) -> Optional[dict]:
-    return librarian._read_file(f"wellness/{name}.json")
+    return librarian.read_wellness(name)
 
 
 def _read_behaviors(name: str) -> Optional[dict]:
-    return librarian._read_file(f"behaviors/{name}.json")
+    return librarian.read_personality(name)
 
 
 def _read_prior(name: str) -> Optional[dict]:
-    return librarian._read_file(f"wellness/classifications/{name}.json")
+    return librarian.read_wellness_classification(name)
 
 
 def _read_knowledge(name: str) -> dict:
     topics = ("preferences", "opinions", "internal_space", "relationships", "history", "routines")
     knowledge = {}
     for topic in topics:
-        data = librarian._read_file(f"knowledge/{name.lower()}/{topic}.json")
+        data = librarian.read_knowledge_topic(name, topic)
         if data and isinstance(data, list) and len(data) > 0:
             trimmed = [
                 {k: v for k, v in entry.items()
@@ -841,7 +848,7 @@ def _read_knowledge(name: str) -> dict:
 
 
 def _read_gizmo_episodes(name: str) -> list:
-    gizmo_self  = librarian._read_file("behaviors/gizmo_self.json") or {}
+    gizmo_self  = librarian.read_gizmo_self()
     person_data = gizmo_self.get(name) or gizmo_self.get(name.lower()) or {}
     episodes    = person_data.get("episodes", [])
     return [
@@ -853,283 +860,6 @@ def _read_gizmo_episodes(name: str) -> list:
 
 
 def _write_classification(name: str, classification: dict) -> None:
-    existing = librarian._read_file(f"wellness/classifications/{name}.json")
-    if existing:
-        ts       = existing.get("last_synthesized", datetime.now(timezone.utc).isoformat())
-        ts_clean = ts.replace(":", "-").replace(".", "-")[:19]
-        librarian._write_json(
-            f"wellness/classifications/archive/{name}_{ts_clean}.json", existing
-        )
-        print(f"[WellnessSynthesis] archived previous classification for {name}")
-    librarian._write_json(f"wellness/classifications/{name}.json", classification)
-    print(f"[WellnessSynthesis] classification written for {name}")
+    librarian.write_wellness_classification(name, classification)
 
 
-# ── Stage 1: Baseline ─────────────────────────────────────────────────────────
-
-async def _stage_baseline(name: str, knowledge: dict) -> Optional[dict]:
-    if not knowledge:
-        return None
-
-    prompt = (
-        f"Individual: {name}\n\n"
-        f"Known preferences, opinions, and self-description:\n"
-        + json.dumps(knowledge, indent=2)
-    )
-
-    raw = await _call_llm(prompt, _BASELINE_SYSTEM, max_tokens=1000)
-    if not raw:
-        return None
-    result = _safe_parse(raw, f"{name}/baseline")
-    return result if isinstance(result, dict) else None
-
-
-# ── Stage 2: Comparison ───────────────────────────────────────────────────────
-
-async def _stage_comparison(
-    name:           str,
-    baseline:       Optional[dict],
-    behaviors:      dict,
-    gizmo_episodes: list,
-) -> Optional[dict]:
-    if not baseline and not behaviors:
-        return None
-
-    prompt_parts = [f"Individual: {name}\n"]
-
-    if baseline:
-        prompt_parts.append(f"Self-model baseline:\n{json.dumps(baseline, indent=2)}")
-
-    if behaviors:
-        personality = behaviors.get("Personality", {})
-        top_traits  = dict(
-            sorted(personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:20]
-        )
-        episodes = behaviors.get("Episodes", [])[-5:]
-        prompt_parts.append(
-            f"\nObserved behavioral patterns:\n"
-            + json.dumps({"top_traits": top_traits, "recent_episodes": episodes}, indent=2)
-        )
-
-    if gizmo_episodes:
-        prompt_parts.append(
-            f"\nGizmo's relational observations:\n{json.dumps(gizmo_episodes, indent=2)}"
-        )
-
-    raw = await _call_llm("\n".join(prompt_parts), _COMPARISON_SYSTEM, max_tokens=2000)
-    if not raw:
-        return None
-    result = _safe_parse(raw, f"{name}/comparison")
-    return result if isinstance(result, dict) else None
-
-
-# ── Stage 3: Ruptures ─────────────────────────────────────────────────────────
-
-async def _stage_ruptures(
-    name:       str,
-    baseline:   Optional[dict],
-    comparison: Optional[dict],
-    history:    dict,
-) -> Optional[dict]:
-    if not comparison:
-        return None
-
-    prompt_parts = [f"Individual: {name}\n"]
-
-    if baseline:
-        prompt_parts.append(f"Self-model:\n{json.dumps(baseline, indent=2)}")
-
-    prompt_parts.append(f"\nBehavior comparison:\n{json.dumps(comparison, indent=2)}")
-
-    history_str = _history_for_prompt(history)
-    if history_str:
-        prompt_parts.append(f"\nCompressed wellness history:\n{history_str}")
-
-    raw = await _call_llm("\n".join(prompt_parts), _RUPTURES_SYSTEM, max_tokens=2000)
-    if not raw:
-        return None
-    result = _safe_parse(raw, f"{name}/ruptures")
-    return result if isinstance(result, dict) else None
-
-
-# ── Stage 4: Conditions (parallel) ───────────────────────────────────────────
-
-async def _stage_conditions_group(
-    group:      dict,
-    name:       str,
-    baseline:   Optional[dict],
-    comparison: Optional[dict],
-    ruptures:   Optional[dict],
-    history:    dict,
-) -> list:
-    prompt_parts = [
-        f"Individual: {name}\n",
-        f"Evaluate ONLY these conditions: {', '.join(group['conditions'])}\n",
-        f"DSM criteria:\n{group['criteria']}\n",
-    ]
-
-    if baseline:
-        prompt_parts.append(f"Self-model baseline:\n{json.dumps(baseline, indent=2)}\n")
-
-    if comparison:
-        prompt_parts.append(f"Behavior comparison map:\n{json.dumps(comparison, indent=2)}\n")
-
-    if ruptures:
-        prompt_parts.append(f"Identified ruptures:\n{json.dumps(ruptures, indent=2)}\n")
-
-    # Use compressed history, not raw signals
-    history_str = _history_for_prompt(history)
-    if history_str:
-        prompt_parts.append(f"Compressed wellness history:\n{history_str}")
-
-    raw = await _call_llm("\n".join(prompt_parts), _CONDITIONS_SYSTEM, max_tokens=3000)
-    if not raw:
-        return []
-    result = _safe_parse(raw, f"{name}/{group['name']}")
-    return result if isinstance(result, list) else []
-
-
-# ── Stage 5: Clinician notes ──────────────────────────────────────────────────
-
-async def _stage_clinician_notes(
-    name:          str,
-    baseline:      Optional[dict],
-    comparison:    Optional[dict],
-    ruptures:      Optional[dict],
-    conditions:    list,
-    history:       dict,
-    behaviors:     dict,
-    dynamic_brief: Optional[str],
-) -> str:
-    prompt_parts = [f"Individual: {name}\n"]
-
-    if baseline:
-        prompt_parts.append(f"Self-model baseline:\n{json.dumps(baseline, indent=2)}\n")
-
-    if comparison:
-        prompt_parts.append(f"Behavior comparison map:\n{json.dumps(comparison, indent=2)}\n")
-
-    if ruptures:
-        prompt_parts.append(f"Identified ruptures:\n{json.dumps(ruptures, indent=2)}\n")
-
-    prompt_parts.append(f"Condition evaluations:\n{json.dumps(conditions, indent=2)}\n")
-
-    history_str = _history_for_prompt(history)
-    if history_str:
-        prompt_parts.append(f"Compressed wellness history:\n{history_str}\n")
-
-    if behaviors:
-        personality = behaviors.get("Personality", {})
-        top_traits  = dict(
-            sorted(personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:10]
-        )
-        prompt_parts.append(f"Top behavioral traits:\n{json.dumps(top_traits, indent=2)}\n")
-
-    if dynamic_brief:
-        prompt_parts.append(f"Longitudinal dynamic history:\n{dynamic_brief}")
-
-    raw = await _call_llm("\n".join(prompt_parts), _CLINICIAN_SYSTEM, max_tokens=4000)
-    if not raw:
-        return "Clinician notes pass failed."
-    return re.sub(r"```(?:json)?|```", "", raw).strip()
-
-
-# ── Synthesis ─────────────────────────────────────────────────────────────────
-
-class WellnessSynthesis:
-
-    async def synthesize_one(self, name: str) -> Optional[dict]:
-        print(f"[WellnessSynthesis] synthesizing {name}...")
-
-        signals        = _read_wellness(name) or {}
-        behaviors      = _read_behaviors(name) or {}
-        knowledge      = _read_knowledge(name)
-        gizmo_episodes = _read_gizmo_episodes(name)
-        total          = sum(len(v) for v in signals.values() if isinstance(v, list))
-
-        print(
-            f"[WellnessSynthesis] {name}: {total} signals, "
-            f"knowledge topics: {list(knowledge.keys())}, "
-            f"gizmo episodes: {len(gizmo_episodes)}"
-        )
-
-        if total < 1 and not behaviors and not knowledge and not gizmo_episodes:
-            print(f"[WellnessSynthesis] no data for {name}, skipping")
-            return None
-
-        prior = _read_prior(name)
-
-        # ── Pre-step: compress signals into temporal hierarchy ────────────────
-        print(f"[WellnessSynthesis] compressing signals for {name}...")
-        history = await _compress_signals(name, signals) if signals else {}
-
-        # ── Stage 1: Baseline ─────────────────────────────────────────────────
-        print(f"[WellnessSynthesis] stage 1: baseline for {name}")
-        baseline = await _stage_baseline(name, knowledge)
-
-        # ── Stage 2: Comparison ───────────────────────────────────────────────
-        print(f"[WellnessSynthesis] stage 2: comparison for {name}")
-        comparison = await _stage_comparison(name, baseline, behaviors, gizmo_episodes)
-
-        # ── Stage 3: Ruptures ─────────────────────────────────────────────────
-        print(f"[WellnessSynthesis] stage 3: ruptures for {name}")
-        ruptures = await _stage_ruptures(name, baseline, comparison, history)
-
-        # ── Stage 4: Conditions — parallel ───────────────────────────────────
-        print(f"[WellnessSynthesis] stage 4: conditions for {name}")
-        group_results = await asyncio.gather(*[
-            _stage_conditions_group(group, name, baseline, comparison, ruptures, history)
-            for group in _CONDITION_GROUPS
-        ])
-        all_conditions = [c for group in group_results for c in group]
-
-        # ── Stage 5: Clinician notes ──────────────────────────────────────────
-        print(f"[WellnessSynthesis] stage 5: clinician notes for {name}")
-        try:
-            from core.dynamic_reader import get_longitudinal_brief
-            dynamic_brief = get_longitudinal_brief(name)
-        except Exception:
-            dynamic_brief = None
-
-        clinician_notes = await _stage_clinician_notes(
-            name=name,
-            baseline=baseline,
-            comparison=comparison,
-            ruptures=ruptures,
-            conditions=all_conditions,
-            history=history,
-            behaviors=behaviors,
-            dynamic_brief=dynamic_brief,
-        )
-
-        # ── Build final classification ────────────────────────────────────────
-        classification = {
-            "last_synthesized": datetime.now(timezone.utc).isoformat(),
-            "observations":     total,
-            "baseline":         baseline,
-            "comparison":       comparison,
-            "ruptures":         ruptures,
-            "conditions":       all_conditions,
-            "clinician_notes":  clinician_notes,
-        }
-
-        _write_classification(name, classification)
-        return classification
-
-    async def run(self) -> dict:
-        log_event("WellnessSynthesis", "START")
-        names   = _list_wellness_files()
-        results = {}
-
-        print(f"[WellnessSynthesis] found {len(names)} files: {names}")
-
-        for name in names:
-            result = await self.synthesize_one(name)
-            results[name] = "synthesized" if result else "skipped"
-
-        log_event("WellnessSynthesis", "COMPLETE", processed=len(results))
-        print(f"[WellnessSynthesis] complete: {results}")
-        return results
-
-
-wellness_synthesis = WellnessSynthesis()

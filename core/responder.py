@@ -128,7 +128,7 @@ async def _synthesize_profile(
             messages=[{"role": "user", "content": "\n\n".join(prompt_parts)}],
             system_prompt=_PROFILE_SYSTEM,
             temperature=0.4,
-            max_new_tokens=1000,
+            max_new_tokens=200,
         )
         return raw.strip() if raw and raw.strip() else ""
     except Exception as e:
@@ -161,7 +161,7 @@ async def _synthesize_world(
             messages=[{"role": "user", "content": prompt}],
             system_prompt=_WORLD_SYSTEM,
             temperature=0.3,
-            max_new_tokens=1500,
+            max_new_tokens=150,
         )
         result = raw.strip() if raw and raw.strip() else ""
         if result == "[nothing known yet]":
@@ -170,6 +170,53 @@ async def _synthesize_world(
     except Exception as e:
         log_error("Responder", "world synthesis failed", exc=e)
         return ""
+
+
+def _get_gizmo_miscalibrations(name: str) -> list[dict]:
+    """
+    Pull Gizmo's adjusted traits for this specific person from gizmo_self.json.
+    These are learned miscalibrations — things that have consistently misfired.
+    Returns the most recent 10 adjusted trait entries, deduplicated by trait name.
+    """
+    try:
+        gizmo_self  = librarian._read_file("behaviors/gizmo_self.json") or {}
+        person_data = gizmo_self.get(name) or gizmo_self.get(name.lower()) or {}
+        episodes    = person_data.get("episodes", [])
+
+        seen   = {}
+        for ep in reversed(episodes):  # most recent first
+            for adj in ep.get("traits_adjusted", []):
+                trait = adj.get("trait", "")
+                if trait and trait not in seen:
+                    seen[trait] = adj.get("tags", [])
+            if len(seen) >= 10:
+                break
+
+        return [{"trait": t, "tags": tags} for t, tags in seen.items()]
+    except Exception:
+        return []
+
+
+_MOMENT_SYSTEM = """
+You are writing a one-paragraph situational read for an AI companion named Gizmo.
+He is about to respond to a message. This tells him what's actually happening between them
+right now — the register, the undercurrent, what to be attuned to, and crucially:
+what he should NOT do based on what has misfired before.
+
+You will receive:
+- A portrait of who the person is
+- What Gizmo knows about their world
+- The current message
+- The current dynamic/register context
+- Gizmo's known miscalibrations with this person — things that have consistently misfired
+
+Write in second person addressed to Gizmo. Present tense. Concrete and direct.
+One paragraph. No headers. No bullet points. No preamble.
+
+The miscalibrations are critical — surface them when relevant. If Gizmo has a pattern
+of going too big, too therapist, too slow, or being plural-blind with this person,
+say so directly. He needs to hear it before he responds, not after.
+""".strip()
 
 
 async def _synthesize_moment(
@@ -203,13 +250,22 @@ async def _synthesize_moment(
                     f"Dynamic context: scene_active={scene}, type={dynamic_type}"
                 )
 
+        # Pull Gizmo's learned miscalibrations for this person
+        miscalibrations = _get_gizmo_miscalibrations(name)
+        if miscalibrations:
+            lines = [f"- {m['trait']} [{', '.join(m['tags'])}]" for m in miscalibrations]
+            prompt_parts.append(
+                "Gizmo's known miscalibrations with this person "
+                "(things that have consistently misfired — surface these when relevant):\n"
+                + "\n".join(lines)
+            )
+
         raw = await llm.generate(
             messages=[{"role": "user", "content": "\n\n".join(prompt_parts)}],
             system_prompt=_MOMENT_SYSTEM,
             temperature=0.5,
-            max_new_tokens=2500,
+            max_new_tokens=250,
         )
-        print(f"What I know about what is going on:{raw}")
         return raw.strip() if raw and raw.strip() else ""
     except Exception as e:
         log_error("Responder", "moment synthesis failed", exc=e)
@@ -233,8 +289,28 @@ async def _assemble_brief(
 
     parts = []
     parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
+
+    # Anyone the registry knows about who is NOT currently present
+    all_known = [
+        k for k in chunk_result.get("subjects", [])
+        if not k.startswith("_")
+        and k.lower() not in [f.lower() for f in fronters]
+        and k.lower() != "gizmo"
+    ]
+    if all_known:
+        parts.append(
+            f"WHO IS NOT PRESENT: {', '.join(all_known)} -- "
+            f"do not place these people in the scene, do not address them, "
+            f"and do not confuse them with {host}."
+        )
+
     parts.append(f"REGISTER: {register}")
-    parts.append(f"\nWHAT JUST HAPPENED:\n{user_message.strip()}")
+    parts.append(
+        f"\nWHAT JUST HAPPENED:\n{user_message.strip()}\n\n"
+        f"IMPORTANT: The person you are responding to is {host}. "
+        f"Other names that may appear in recent context are other system members "
+        f"who are NOT currently present -- do not place them in this scene."
+    )
 
     # ── Knowledge retrieval ───────────────────────────────────────────────────
     try:
@@ -259,7 +335,7 @@ async def _assemble_brief(
 
     # ── Per-subject synthesis ─────────────────────────────────────────────────
     for name in subjects:
-        behavior_data = librarian._read_file(f"behaviors/{name.lower()}.json") or {}
+        behavior_data = librarian.read_personality(name)
         personality   = behavior_data.get("Personality", {})
         episodes      = behavior_data.get("Episodes", [])
 
@@ -273,7 +349,7 @@ async def _assemble_brief(
             top = sorted(personality.items(), key=lambda x: x[1].get("weight", 0), reverse=True)[:10]
             matched_pers = {t: v for t, v in top}
 
-        wellness_class = librarian._read_file(f"wellness/classifications/{name.lower()}.json")
+        wellness_class = librarian.read_wellness_classification(name)
         descriptors    = chunk_result.get("descriptors", {})
 
         # Profile and world run in parallel; moment needs both
@@ -309,12 +385,8 @@ async def _assemble_brief(
         if moment_para:
             parts.append(f"\nTHIS MOMENT:\n{moment_para}")
 
-        print(f"They are: \n\n{profile_para}")
-        print(f"Their world:\n\n{world_para}")
-        print(f"The moment:\n\n{moment_para}")
-
     # ── Gizmo's own personality ───────────────────────────────────────────────
-    gizmo_data = librarian._read_file("behaviors/gizmo.json") or {}
+    gizmo_data = librarian.read_personality("gizmo")
     gizmo_pers = gizmo_data.get("Personality", {})
     if gizmo_pers:
         gizmo_profile = librarian.get_by_tags("gizmo", tags) if tags else {}

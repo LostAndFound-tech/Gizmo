@@ -5,8 +5,8 @@ Wellness signal collector. Runs parallel to the behavior pipeline on every chunk
 Captures clinically significant signals with full context, chunk reference, and tags.
 Pulls existing behavior context for people in the chunk for richer signal detection.
 
-Per-person files:     {DATA_DIR}/wellness/{name.lower()}.json
-System-level file:    {DATA_DIR}/wellness/system.json
+Per-person files: headmates/{name}/wellness.json
+System-level:     headmates/system/wellness.json
 """
 
 import json
@@ -138,7 +138,7 @@ Rules:
 """.strip()
 
 
-def _build_prompt(chunk: list[str], speakers: list[str], behavior_context: dict, dynamic_context: Optional[dict] = None) -> str:
+def _build_prompt(chunk: list[str], speakers: list[str], behavior_context: dict) -> str:
     parts = [
         f"Speakers present: {', '.join(speakers)}",
         (
@@ -146,43 +146,8 @@ def _build_prompt(chunk: list[str], speakers: list[str], behavior_context: dict,
             "'I', 'me', 'us', 'we' refers to the plural system being served. "
             "Lines prefixed 'Gizmo:' are AI responses — do not file wellness signals about Gizmo."
         ),
+        "\nChunk:\n" + "\n".join(chunk),
     ]
-
-    if dynamic_context and dynamic_context.get("active"):
-        wellness_note = dynamic_context.get("wellness_note", "")
-        congruence    = dynamic_context.get("congruence", "high")
-        flags         = dynamic_context.get("flags", [])
-
-        dynamic_lines = ["DYNAMIC CONTEXT (read before evaluating):"]
-        if wellness_note:
-            dynamic_lines.append(wellness_note)
-        dynamic_lines.append(
-            f"Congruence: {congruence}. "
-            "Calm, matter-of-fact acknowledgment of expected pain or discomfort is NOT "
-            "an anxiety or PTSD signal — look for disproportionate or unexpected reactions only."
-        )
-        if congruence == "high":
-            dynamic_lines.append(
-                "Language congruent with established dynamic. Reduce assessed intensity by one level "
-                "for signals that are clearly scene-congruent."
-            )
-        elif congruence == "low":
-            dynamic_lines.append(
-                "Congruence is low — some language may reflect genuine distress. Assess carefully "
-                "and do not blanket-suppress signals."
-            )
-        if flags:
-            dynamic_lines.append(f"Flagged by dynamic reader: {'; '.join(flags)}")
-
-        parts.append("\n".join(dynamic_lines))
-
-        # Also inject longitudinal dynamic brief
-        from core.dynamic_reader import get_longitudinal_brief
-        longitudinal = get_longitudinal_brief(speakers[0] if speakers else "")
-        if longitudinal:
-            parts.append(f"LONGITUDINAL DYNAMIC HISTORY:\n{longitudinal}")
-
-    parts.append("\nChunk:\n" + "\n".join(chunk))
     parts.append(
         f"\nExisting behavioral context:\n"
         + json.dumps(behavior_context, indent=2)
@@ -195,37 +160,20 @@ def _build_prompt(chunk: list[str], speakers: list[str], behavior_context: dict,
 async def _call_llm(prompt: str) -> Optional[str]:
     try:
         from core.llm import llm
-
         raw = await llm.generate(
             messages=[{"role": "user", "content": prompt}],
             system_prompt=_SYSTEM,
             temperature=0.0,
             max_new_tokens=8000,
         )
-
         if not raw or not raw.strip():
             log_event("WellnessCollector", "EMPTY_RESPONSE")
             return None
-
-        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
-        return clean
-
+        return re.sub(r"```(?:json)?|```", "", raw).strip()
     except Exception as e:
         log_error("WellnessCollector", "LLM call failed", exc=e)
         print(f"[WellnessCollector] LLM call failed: {type(e).__name__}: {e}")
         return None
-
-
-# ── File write ────────────────────────────────────────────────────────────────
-
-def _append_signal(name: str, signal: dict) -> None:
-    path     = f"wellness/{name.lower()}.json"
-    existing = librarian._read_file(path) or {}
-    category = signal.get("category", "general")
-    if category not in existing:
-        existing[category] = []
-    existing[category].append(signal)
-    librarian._write_json(path, existing)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -234,10 +182,10 @@ class WellnessCollector:
 
     async def collect(
         self,
-        chunk:    list[str],
-        chunk_id: str,
-        registry: dict,
-        dynamic_context: Optional[dict] = None,
+        chunk:          list[str],
+        chunk_id:       str,
+        registry:       dict,
+        dynamic_context: dict = None,
     ) -> Optional[list]:
         if not chunk:
             return None
@@ -250,17 +198,16 @@ class WellnessCollector:
                 and k.lower() != "gizmo"
             ]
 
-            # Pull existing behavior context for all speakers
+            # Pull existing personality context for all speakers
             behavior_context = {}
             for speaker in speakers:
-                data = librarian._read_file(f"behaviors/{speaker.lower()}.json")
+                data = librarian.read_personality(speaker)
                 if data:
-                    # Just personality weights — not full episodes, keeps tokens down
                     behavior_context[speaker] = {
                         "Personality": data.get("Personality", {})
                     }
 
-            prompt  = _build_prompt(chunk, speakers, behavior_context, dynamic_context)
+            prompt  = _build_prompt(chunk, speakers, behavior_context)
             raw_str = await _call_llm(prompt)
 
             if not raw_str:
@@ -281,7 +228,7 @@ class WellnessCollector:
                 if not target:
                     continue
 
-                _append_signal(target, signal)
+                librarian.append_wellness_signal(target, signal)
                 print(f"[WellnessCollector] signal filed for {target}: "
                       f"{signal.get('category')} — {signal.get('criterion')}")
 

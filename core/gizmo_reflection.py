@@ -10,23 +10,20 @@ Takes three parts:
   - next_message:   how they responded to that (the implicit feedback signal)
 
 Two LLM passes:
-  1. Reflection pass  — what happened, what landed, what didn't, traits to reinforce or adjust
-  2. Tag pass         — what words describe this exchange, matched against existing vocabulary
+  1. Reflection pass  — what happened, what landed, what didn't
+  2. Tag pass         — what words describe this exchange
 
-Writes to: {DATA_DIR}/behaviors/gizmo_self.json
+Writes to: headmates/gizmo/self.json
 
 Structure:
 {
-  "tag_vocabulary": ["tender", "deflecting", ...],   ← grows over time
+  "tag_vocabulary": ["tender", "deflecting", ...],
   "Jess": {
     "episode_count": 12,
     "episodes": [...]
   },
   ...
 }
-
-Closeness is not stored — it's computed from episode_count relative to total
-experience across all people. New person with one exchange = full attention.
 """
 
 import asyncio
@@ -38,27 +35,22 @@ from core.log import log_event, log_error
 import core.librarian as librarian
 
 
-# ── File path ─────────────────────────────────────────────────────────────────
-
-_SELF_FILE = "behaviors/gizmo_self.json"
-
+# ── File helpers ──────────────────────────────────────────────────────────────
 
 def _read_self() -> dict:
-    return librarian._read_file(_SELF_FILE) or {"tag_vocabulary": []}
+    return librarian.read_gizmo_self() or {"tag_vocabulary": []}
 
 
 def _write_self(data: dict) -> None:
-    librarian._write_json(_SELF_FILE, data)
+    librarian._write_json(
+        librarian.headmate_path("gizmo", "self.json"),
+        data,
+    )
 
 
 # ── Closeness weight ──────────────────────────────────────────────────────────
 
 def _closeness(name: str, data: dict) -> float:
-    """
-    Closeness is episode_count for this person divided by total episodes across
-    all people. One person = 1.0. Five equal people = 0.2 each.
-    Not a loyalty score — a familiarity distribution.
-    """
     total = sum(
         v.get("episode_count", 0)
         for k, v in data.items()
@@ -81,8 +73,8 @@ You will receive:
 - The user's message
 - Your response to it
 - Their next message (how they actually responded — your implicit feedback)
-- Your existing personality profile (what you already know about yourself)
-- Your existing episodes with this person (your history with them)
+- Your existing personality profile
+- Your existing episodes with this person
 
 Return ONLY valid JSON. No markdown. No explanation. No preamble.
 If the next message is too short or neutral to read anything from, return null.
@@ -100,9 +92,7 @@ If the next message is too short or neutral to read anything from, return null.
   ]
 }
 
-punch_bowl: true if Gizmo significantly misread the moment — went too big, too small,
-too playful when something real was happening, too serious when they needed to laugh.
-This is not a judgment. It's just honest.
+punch_bowl: true if Gizmo significantly misread the moment.
 
 Rules:
 - traits_reinforced: things that worked and should be weighted higher
@@ -110,16 +100,15 @@ Rules:
 - Both lists can be empty if the exchange was neutral
 - Tags should be tight single words or hyphenated phrases
 - Do not invent reactions — read only what the next message actually signals
-- If next message continues naturally, that's a land. If it redirects or goes flat, that's a miss.
-- Return null if you genuinely cannot read the signal (too short, ambiguous, topic shift unrelated to your response)
+- Return null if you genuinely cannot read the signal
 """.strip()
 
 
 def _build_reflection_prompt(
-    user_message:   str,
-    gizmo_response: str,
-    next_message:   str,
-    existing_profile: dict,
+    user_message:      str,
+    gizmo_response:    str,
+    next_message:      str,
+    existing_profile:  dict,
     existing_episodes: list,
 ) -> str:
     parts = [
@@ -162,9 +151,8 @@ matched: tags from the existing vocabulary that genuinely fit this exchange
 new: words that capture something the existing vocabulary doesn't have yet
 
 Rules:
-- Only match tags that actually fit — don't pad
-- New tags should be single words or hyphenated phrases, lowercase
-- New tags should capture something real that matched tags don't already cover
+- Only match tags that actually fit
+- New tags: single words or hyphenated phrases, lowercase
 - Both lists can be empty
 - Aim for 2-6 total tags across both lists
 - Think texture, not category: "tired-but-warm" not "emotional"
@@ -202,7 +190,6 @@ async def _call_reflection(prompt: str) -> Optional[dict]:
         return json.loads(clean)
     except Exception as e:
         log_error("GizmoReflection", "reflection call failed", exc=e)
-        print(f"[GizmoReflection] reflection call failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -221,7 +208,6 @@ async def _call_tags(prompt: str) -> Optional[dict]:
         return json.loads(clean)
     except Exception as e:
         log_error("GizmoReflection", "tag call failed", exc=e)
-        print(f"[GizmoReflection] tag call failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -236,15 +222,12 @@ async def _reflect(
     try:
         data = _read_self()
 
-        # Pull existing profile and episodes for this person
         person_data       = data.get(name, {})
         existing_episodes = person_data.get("episodes", [])
 
-        # Pull Gizmo's existing self-authored personality traits
-        # Flatten into a readable format for the prompt
         all_reinforced = []
         all_adjusted   = []
-        for ep in existing_episodes[-20:]:  # last 20 episodes as context ceiling
+        for ep in existing_episodes[-20:]:
             all_reinforced.extend(ep.get("traits_reinforced", []))
             all_adjusted.extend(ep.get("traits_adjusted", []))
 
@@ -268,10 +251,10 @@ async def _reflect(
 
         # ── Pass 2: Tags ──────────────────────────────────────────────────────
         tag_prompt = _build_tag_prompt(
-            assessment   = reflection.get("assessment", ""),
-            what_landed  = reflection.get("what_landed", ""),
-            what_missed  = reflection.get("what_missed", ""),
-            vocabulary   = vocabulary,
+            assessment  = reflection.get("assessment", ""),
+            what_landed = reflection.get("what_landed", ""),
+            what_missed = reflection.get("what_missed", ""),
+            vocabulary  = vocabulary,
         )
         tag_result = await _call_tags(tag_prompt)
 
@@ -280,7 +263,6 @@ async def _reflect(
         if tag_result:
             matched_tags = tag_result.get("matched", [])
             new_tags     = tag_result.get("new", [])
-            # Grow the vocabulary with genuinely new tags
             for tag in new_tags:
                 if tag and tag not in vocabulary:
                     vocabulary.append(tag)
@@ -336,14 +318,6 @@ def fire_and_forget(
     gizmo_response: str,
     next_message:   str,
 ) -> None:
-    """
-    Schedule a reflection pass in the background. Non-blocking.
-    Call this after the responder generates a response and the next user
-    message has arrived. The caller does not await this.
-
-    Usage in chunk_processor or responder:
-        from core.gizmo_reflection import fire_and_forget
-        fire_and_forget(host, prev_user_msg, gizmo_response, current_user_msg)
-    """
+    """Schedule a reflection pass in the background. Non-blocking."""
     asyncio.ensure_future(_reflect(name, user_message, gizmo_response, next_message))
     print(f"[GizmoReflection] reflection scheduled for {name}")
