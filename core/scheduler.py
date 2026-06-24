@@ -249,6 +249,7 @@ def build_schedule_brief(fronter: str = "system") -> str:
             req = all_req_defs.get(req_key, {})
             lines.append(_req_line(req_key, req, log_today))
 
+    print(f"THE SCHEDULING BRIEF AT THIS TIME:\n\n".join(lines))
     return "\n".join(lines)
 
 
