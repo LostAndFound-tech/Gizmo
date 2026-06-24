@@ -16,7 +16,8 @@ Usage:
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-_timezone: ZoneInfo = ZoneInfo("UTC")
+
+
 
 
 def set_timezone(tz_name: str) -> None:
@@ -40,3 +41,9 @@ def get_timezone() -> ZoneInfo:
 def tz_now() -> datetime:
     """Return current datetime in the active timezone."""
     return datetime.now(_timezone)
+
+
+_timezone = None
+_timezone = set_timezone("America/Denver")
+if _timezone is None:
+    _timezone: ZoneInfo = ZoneInfo("UTC")
