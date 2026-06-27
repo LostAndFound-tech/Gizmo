@@ -279,6 +279,12 @@ class Responder:
             session_id = context.get("session_id", "")
 
             brief    = _assemble_brief(chunk_result, context, register, user_message)
+            print(f"USER MESSAGE:\n\n{user_message}\n\n")
+            print(f"CHUNK RESULT:\n\n{chunk_result}\n\n")
+            print(f"REGISTER:\n\n{register}\n\n")
+            print(f"HISTORY:\n\n{history}\n\n")
+            print(f"CONTEXT:\n\n{context}\n\n")
+            print(f"BRIEF:\n\n{brief}\n\n")
             response = await _call_llm(brief, history, register)
 
             if response:
