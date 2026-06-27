@@ -185,7 +185,7 @@ async def _assemble_brief(
     fronters = context.get("fronters", [host])
     parts.append(f"THE CURRENT TIME IS: {timezone.tz_now()}")
     parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
-    parts.append(f"THE SCHEDULE FOR {host} today:\n\n{scheduler.lookup_day(host, timezone.tz_now().strftime('%Y-%m-%d'))}")
+    parts.append(f"THE SCHEDULE FOR {host} today:\n\n{scheduler.build_schedule_brief(host)}")
     parts.append(f"REGISTER: {register}")
 
     # What is emotionally live right now
