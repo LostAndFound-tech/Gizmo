@@ -20,6 +20,7 @@ from typing import Optional
 
 from core.log import log_event, log_error
 import core.librarian as librarian
+import core.timezone as timezone
 
 
 # ── Tag extraction from chunk ─────────────────────────────────────────────────
@@ -181,6 +182,7 @@ async def _assemble_brief(
     # Who is present
     host     = context.get("current_host") or "unknown"
     fronters = context.get("fronters", [host])
+    parts.append(f"THE CURRENT TIME IS: {timezone.tz_now()}")
     parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
     parts.append(f"REGISTER: {register}")
 
