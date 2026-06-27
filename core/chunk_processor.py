@@ -25,6 +25,7 @@ from core.log import log_event, log_error
 from core.Descriptor_catcher import descriptor_catcher as describer
 from core.BehaviorCatcher import behaviorcatcher as behavior
 from core.wellness import wellness_collector as wellness
+from core.scheduler import scheduler
 import core.librarian as librarian
 
 
@@ -225,11 +226,10 @@ class ChunkProcessor:
         print(f"[DEBUG] registry after discovery: {self.registry}")
         print(f"[DEBUG] chunk: {chunk}")
 
-        # ── 2. Descriptors + behaviors + wellness in parallel ─────────────────
+        # ── 2. Descriptors + behaviors + wellness + schedule in parallel ─────────
 
         # Build structured exchanges for BehaviorCatcher.
         # Lines prefixed "Gizmo:" are cause context; everything else is subject.
-        # Pairs consecutive lines where possible; unpaired lines get empty cause.
         exchanges = []
         pending_line = None
         for line in chunk:
@@ -242,7 +242,6 @@ class ChunkProcessor:
                     "subject_name": self.host,
                 })
                 pending_line = None
-        # If chunk ends on a Gizmo line with no subject response yet, still pass it
         if pending_line:
             exchanges.append({
                 "gizmo":        pending_line,
@@ -250,7 +249,7 @@ class ChunkProcessor:
                 "subject_name": self.host,
             })
 
-        descriptor_dict, behavior_results, wellness_signals = await asyncio.gather(
+        descriptor_dict, behavior_results, wellness_signals, schedule_result = await asyncio.gather(
             describer.extract(
                 user_message=text,
                 thread=text,
@@ -268,6 +267,12 @@ class ChunkProcessor:
                 chunk=chunk,
                 chunk_id=chunk_id,
                 registry=self.registry,
+            ),
+            scheduler.extract(
+                chunk=chunk,
+                speaker=self.host,
+                registry=self.registry,
+                session_id=self.session_id,
             ),
         )
 
@@ -303,6 +308,7 @@ class ChunkProcessor:
             "descriptors":    descriptor_dict,
             "behaviors":      behavior_results,
             "wellness":       wellness_signals,
+            "schedule":       schedule_result,
             "pending_buffer": len(self.action_buffer),
         }
 
