@@ -21,6 +21,7 @@ from typing import Optional
 from core.log import log_event, log_error
 import core.librarian as librarian
 import core.timezone as timezone
+import core.scheduler as scheduler
 
 
 # ── Tag extraction from chunk ─────────────────────────────────────────────────
@@ -184,6 +185,7 @@ async def _assemble_brief(
     fronters = context.get("fronters", [host])
     parts.append(f"THE CURRENT TIME IS: {timezone.tz_now()}")
     parts.append(f"WHO IS PRESENT: {', '.join(fronters)}")
+    parts.append(f"THE SCHEDULE FOR {host} today:\n\n{scheduler.lookup_day(host, timezone.tz_now())}")
     parts.append(f"REGISTER: {register}")
 
     # What is emotionally live right now

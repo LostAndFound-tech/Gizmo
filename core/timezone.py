@@ -46,4 +46,4 @@ def tz_now() -> datetime:
 _timezone = None
 _timezone = set_timezone("America/Denver")
 if _timezone is None:
-    _timezone: ZoneInfo = ZoneInfo("MST")
+    _timezone: ZoneInfo = ZoneInfo("MDT")
