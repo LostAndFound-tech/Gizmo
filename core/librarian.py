@@ -249,6 +249,16 @@ def _behavior_path(name: str) -> str:
     # Default to new layout for new subjects
     return headmate_path
 
+# Public alias — some callers use librarian.headmate_path(name)
+def headmate_path(name: str, filename: str = "personality.json") -> str:
+    """Return path to a file inside a headmate's folder. e.g. headmates/jess/schedule.json"""
+    return f"headmates/{name.lower()}/{filename}"
+
+
+def system_path(filename: str) -> str:
+    """Return path to a file inside the system headmate folder."""
+    return f"headmates/system/{filename}"
+
 
 def merge_behaviors(name: str, new_data: dict, subfolder: str = "behaviors") -> None:
     """
