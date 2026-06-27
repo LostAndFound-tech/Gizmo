@@ -632,7 +632,7 @@ class Scheduler:
                     events=len(written["events"]),
                     completions=len(written["completions"]),
                 )
-
+            print(f"SCHEDULER WRITING:{written}")
             return written if any(written.values()) else None
 
         except Exception as e:
