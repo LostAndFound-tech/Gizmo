@@ -422,14 +422,7 @@ class Responder:
             brief    = await _assemble_brief(chunk_result, context, register, user_message, moment)
             response = await _call_llm(brief, history, register)
 
-            print(f"USER MESSAGE:\n\n{user_message}")
-            print(f"REGISTER:\n\n{register}")
-            print(f"CHUNK RESULT:\n\n{chunk_result}")
-            print(f"CONTEXT:\n\n{context}")
-            print(f"MOMENT:\n\n{moment}")
-            print(f"HISTORY:\n\n{history}")
-
-            print(f"\n\nBRIEF IN FULL:\n\n{brief}")
+            print(f"THE PROMPT:\n\n{brief}")
             if response:
                 log_event("Responder", "RESPONSE_GENERATED",
                     session=session_id[:8],
