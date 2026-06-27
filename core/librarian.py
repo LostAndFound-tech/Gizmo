@@ -1,6 +1,5 @@
 import os
 import json
-from typing import Optional
 
 # ── Tag map ───────────────────────────────────────────────────────────────────
 # Storage tags are tight and categorical.
@@ -139,17 +138,9 @@ def _write_json(_path: str, content: dict) -> None:
 def get_by_tags(name: str, query_tags: list[str], subfolder: str = "behaviors") -> dict:
     """
     Return a filtered slice of a person's behavior file matching the query tags.
-    Query tags are loose — expanded against TAG_MAP before matching.
-
-    Returns:
-        {
-            "name": "Jess",
-            "matched_tags": ["fashion", "appearance"],
-            "personality": { matched traits only },
-            "episodes": [ matched episodes only ]
-        }
+    Uses headmates/{name}/personality.json (new layout) with legacy fallback.
     """
-    data = _read_file(f"{subfolder}/{name.lower()}.json") or {}
+    data = _read_file(_behavior_path(name)) or {}
     if not data:
         return {"name": name, "matched_tags": [], "personality": {}, "episodes": []}
 
@@ -242,15 +233,34 @@ def _normalize_personality(personality: dict) -> dict:
     return personality
 
 
+def _behavior_path(name: str) -> str:
+    """
+    Single source of truth for where a person's personality/behavior data lives.
+    New layout: headmates/{name}/personality.json
+    Falls back to behaviors/{name}.json for legacy compatibility.
+    """
+    headmate_path = f"headmates/{name.lower()}/personality.json"
+    if _read_file(headmate_path) is not None:
+        return headmate_path
+    legacy_path = f"behaviors/{name.lower()}.json"
+    if _read_file(legacy_path) is not None:
+        return legacy_path
+    # Default to new layout for new subjects
+    return headmate_path
+
+
 def merge_behaviors(name: str, new_data: dict, subfolder: str = "behaviors") -> None:
     """
     Merge incoming behavior data for a person.
+
+    Reads/writes headmates/{name}/personality.json (new layout).
+    Falls back to behaviors/{name}.json for legacy subjects.
 
     - Personality  → weighted store with tags, count per trait, normalize after every merge
     - Episodes     → append action→reaction pairs with tags
     - Scalar fields → keep existing
     """
-    rel_path = f"{subfolder}/{name.lower()}.json"
+    rel_path = _behavior_path(name)
     existing = _read_file(rel_path) or {}
 
     for key, value in new_data.items():
@@ -302,42 +312,3 @@ def merge_behaviors(name: str, new_data: dict, subfolder: str = "behaviors") -> 
 
     _write_json(rel_path, existing)
     print(f"[librarian] merged behaviors for {name}")
-
-
-# ── Gizmo Taught / PerHeadmate writes ────────────────────────────────────────
-
-def write_taught(key: str, entry: dict) -> None:
-    """
-    Write a taught entry to behaviors/gizmo.json :: Taught.
-    Overwrites existing entry for this key — taught corrections always win.
-    """
-    data   = _read_file("behaviors/gizmo.json") or {}
-    taught = data.setdefault("Taught", {})
-    taught[key] = entry
-    _write_json("behaviors/gizmo.json", data)
-    print(f"[librarian] taught entry written: {key}")
-
-
-def write_per_headmate(headmate: str, key: str, entry: dict) -> None:
-    """
-    Write a per-headmate entry to behaviors/gizmo.json :: PerHeadmate.{headmate}.
-    Overwrites existing entry for this key.
-    """
-    data = _read_file("behaviors/gizmo.json") or {}
-    per  = data.setdefault("PerHeadmate", {})
-    hm   = per.setdefault(headmate.lower(), {})
-    hm[key] = entry
-    _write_json("behaviors/gizmo.json", data)
-    print(f"[librarian] per-headmate entry written: {headmate} → {key}")
-
-
-def get_taught(key: str) -> Optional[dict]:
-    """Return a specific taught entry, or None."""
-    data = _read_file("behaviors/gizmo.json") or {}
-    return data.get("Taught", {}).get(key)
-
-
-def get_per_headmate(headmate: str) -> dict:
-    """Return all per-headmate entries for a given headmate."""
-    data = _read_file("behaviors/gizmo.json") or {}
-    return data.get("PerHeadmate", {}).get(headmate.lower(), {})
