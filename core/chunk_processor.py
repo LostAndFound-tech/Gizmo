@@ -226,6 +226,30 @@ class ChunkProcessor:
         print(f"[DEBUG] chunk: {chunk}")
 
         # ── 2. Descriptors + behaviors + wellness in parallel ─────────────────
+
+        # Build structured exchanges for BehaviorCatcher.
+        # Lines prefixed "Gizmo:" are cause context; everything else is subject.
+        # Pairs consecutive lines where possible; unpaired lines get empty cause.
+        exchanges = []
+        pending_line = None
+        for line in chunk:
+            if line.startswith("Gizmo:"):
+                pending_line = line[len("Gizmo:"):].strip()
+            else:
+                exchanges.append({
+                    "gizmo":        pending_line or "",
+                    "subject":      line,
+                    "subject_name": self.host,
+                })
+                pending_line = None
+        # If chunk ends on a Gizmo line with no subject response yet, still pass it
+        if pending_line:
+            exchanges.append({
+                "gizmo":        pending_line,
+                "subject":      "",
+                "subject_name": self.host,
+            })
+
         descriptor_dict, behavior_results, wellness_signals = await asyncio.gather(
             describer.extract(
                 user_message=text,
@@ -234,7 +258,7 @@ class ChunkProcessor:
                 session_file=self.session_id,
             ),
             behavior.extract(
-                user_message=text,
+                exchanges=exchanges,
                 thread=text,
                 subject=self.host,
                 session_file=self.session_id,
