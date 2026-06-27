@@ -4,7 +4,7 @@ core/chunk_processor.py
 Per-chunk pipeline:
   1. Subject discovery   — who/what is named in this chunk
   2. Pronoun resolution  — match pronouns against the live registry
-  3. Descriptors + behaviors + wellness + knowledge in parallel via asyncio.gather
+  3. Descriptors + behaviors + wellness in parallel via asyncio.gather
   4. Action buffer       — unpaired actions held up to 3 chunks, then dropped
   5. Merge               — write resolved data into per-person files via librarian
 
@@ -25,8 +25,6 @@ from core.log import log_event, log_error
 from core.Descriptor_catcher import descriptor_catcher as describer
 from core.BehaviorCatcher import behaviorcatcher as behavior
 from core.wellness import wellness_collector as wellness
-from core.knowledge_writer import knowledge_writer
-from core.scheduler import scheduler
 import core.librarian as librarian
 
 
@@ -225,16 +223,10 @@ class ChunkProcessor:
         self._update_registry(subjects)
         self._apply_pronoun_resolutions(pronoun_resolutions)
         print(f"[DEBUG] registry after discovery: {self.registry}")
+        print(f"[DEBUG] chunk: {chunk}")
 
-        # ── 2. Known headmates for knowledge writer ───────────────────────────
-        known_headmates = [
-            k for k in self.registry
-            if self.registry[k].get("type") == "Person"
-            and k.lower() != "gizmo"
-        ]
-
-        # ── 3. Parallel passes ────────────────────────────────────────────────
-        descriptor_dict, behavior_results, wellness_signals, knowledge_entries, schedule_result = await asyncio.gather(
+        # ── 2. Descriptors + behaviors + wellness in parallel ─────────────────
+        descriptor_dict, behavior_results, wellness_signals = await asyncio.gather(
             describer.extract(
                 user_message=text,
                 thread=text,
@@ -242,7 +234,7 @@ class ChunkProcessor:
                 session_file=self.session_id,
             ),
             behavior.extract(
-                exchanges=text,
+                user_message=text,
                 thread=text,
                 subject=self.host,
                 session_file=self.session_id,
@@ -253,37 +245,23 @@ class ChunkProcessor:
                 chunk_id=chunk_id,
                 registry=self.registry,
             ),
-            knowledge_writer.extract(
-                user_message=text,
-                gizmo_response="",
-                speaker=self.host,
-                known_headmates=known_headmates,
-                session_id=self.session_id,
-            ),
-            scheduler.extract(
-                chunk=chunk,
-                speaker=self.host,
-                registry=self.registry,
-                session_id=self.session_id,
-            ),
         )
 
-        descriptor_dict   = descriptor_dict   or {}
-        behavior_results  = behavior_results  or []
-        wellness_signals  = wellness_signals  or []
-        knowledge_entries = knowledge_entries or []
+        descriptor_dict  = descriptor_dict  or {}
+        behavior_results = behavior_results or []
+        wellness_signals = wellness_signals or []
 
-        print(f"[ChunkProcessor] wellness signals: {len(wellness_signals)}")
-        print(f"[ChunkProcessor] knowledge entries: {len(knowledge_entries)}")
-
-        # ── 4. Merge descriptors ──────────────────────────────────────────────
+        # ── 3. Merge descriptors ──────────────────────────────────────────────
         if descriptor_dict:
             for name, data in descriptor_dict.items():
                 librarian.merge_descriptors(name, data)
 
-        # ── 5. Merge behaviors + update action buffer ─────────────────────────
+        # ── 4. Merge behaviors + update action buffer ─────────────────────────
         if behavior_results:
             for person in behavior_results:
+                if not isinstance(person, dict):
+                    print(f"[ChunkProcessor] skipping non-dict behavior entry: {type(person)}")
+                    continue
                 name = person.get("Subject")
                 if not name:
                     continue
@@ -294,16 +272,14 @@ class ChunkProcessor:
             self.action_buffer = _remove_matched(self.action_buffer, behavior_results)
 
         result = {
-            "chunk_id":        chunk_id,
-            "chunk":           chunk,
-            "partial":         partial,
-            "subjects":        [k for k in self.registry.keys() if not k.startswith("_")],
-            "descriptors":     descriptor_dict,
-            "behaviors":       behavior_results,
-            "wellness":        wellness_signals,
-            "knowledge":       knowledge_entries,
-            "schedule":        schedule_result,
-            "pending_buffer":  len(self.action_buffer),
+            "chunk_id":       chunk_id,
+            "chunk":          chunk,
+            "partial":        partial,
+            "subjects":       [k for k in self.registry.keys() if not k.startswith("_")],
+            "descriptors":    descriptor_dict,
+            "behaviors":      behavior_results,
+            "wellness":       wellness_signals,
+            "pending_buffer": len(self.action_buffer),
         }
 
         self.results.append(result)

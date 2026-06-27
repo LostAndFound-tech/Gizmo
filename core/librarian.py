@@ -312,3 +312,54 @@ def merge_behaviors(name: str, new_data: dict, subfolder: str = "behaviors") -> 
 
     _write_json(rel_path, existing)
     print(f"[librarian] merged behaviors for {name}")
+
+
+# ── Named accessors — used by wellness, knowledge, reflection, synthesis ──────
+# These provide stable method names so callers don't need to know file paths.
+
+def read_personality(name: str) -> Optional[dict]:
+    """Read personality/behavior file for a headmate. Uses _behavior_path."""
+    return _read_file(_behavior_path(name))
+
+
+def read_wellness(name: str) -> Optional[dict]:
+    """Read raw wellness signals file for a headmate."""
+    return _read_file(f"wellness/{name.lower()}.json")
+
+
+def read_wellness_classification(name: str) -> Optional[dict]:
+    """Read synthesized wellness classification for a headmate."""
+    return _read_file(f"wellness/classifications/{name.lower()}.json")
+
+
+def write_wellness_classification(name: str, classification: dict) -> None:
+    """Write wellness classification, archiving the previous one."""
+    path     = f"wellness/classifications/{name.lower()}.json"
+    existing = _read_file(path)
+    if existing:
+        from datetime import datetime, timezone
+        ts       = existing.get("last_synthesized", datetime.now(timezone.utc).isoformat())
+        ts_clean = ts.replace(":", "-").replace(".", "-")[:19]
+        _write_json(f"wellness/classifications/archive/{name.lower()}_{ts_clean}.json", existing)
+    _write_json(path, classification)
+    print(f"[librarian] wellness classification written for {name}")
+
+
+def read_knowledge_topic(name: str, topic: str) -> Optional[list]:
+    """Read a specific knowledge topic file for a headmate."""
+    return _read_file(f"headmates/{name.lower()}/knowledge/{topic}.json")
+
+
+def read_vocabulary() -> list:
+    """Read the shared tag vocabulary file."""
+    return _read_file("vocabulary.json") or []
+
+
+def write_vocabulary(vocabulary: list) -> None:
+    """Write the shared tag vocabulary file."""
+    _write_json("vocabulary.json", vocabulary)
+
+
+def read_gizmo_self() -> dict:
+    """Read Gizmo's self-reflection file."""
+    return _read_file("behaviors/gizmo_self.json") or {}

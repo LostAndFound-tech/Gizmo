@@ -87,6 +87,7 @@ async def get_relevant_tags(message: str, vocabulary: list[str]) -> list[str]:
             temperature=0.0,
             max_new_tokens=200,
         )
+        print(f"GETTING RELEVANT DATA:\n\n{raw}")
         if not raw or not raw.strip():
             return []
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
