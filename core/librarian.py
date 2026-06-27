@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Optional
 
 # ── Tag map ───────────────────────────────────────────────────────────────────
 # Storage tags are tight and categorical.
