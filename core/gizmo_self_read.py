@@ -262,7 +262,7 @@ class GizmoSelfRead:
         if not tags:
             print(f"[GizmoSelfRead] no tags extracted, skipping")
             return ""
-        dynamic = _read_dynamic(message, vocabulary)
+        dynamic = await _read_dynamic(message, vocabulary)
         print(f"GIZMO TAGS for dynamic {dynamic}:\n\n{tag_result}")
         episodes = _retrieve_episodes(name, tags)
         if not episodes:
