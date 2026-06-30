@@ -372,5 +372,5 @@ def write_vocabulary(vocabulary: list) -> None:
 
 
 def read_gizmo_self() -> dict:
-    """Read Gizmo's self-reflection file."""
-    return _read_file("behaviors/gizmo_self.json") or {}
+    """Read Gizmo's self-reflection file — keyed by headmate name, plus tag_vocabulary."""
+    return _read_file("headmates/gizmo/self.json") or {}
