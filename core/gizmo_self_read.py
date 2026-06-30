@@ -63,9 +63,16 @@ async def _tag_moment(message: str, dynamic: str, vocabulary: list[str]) -> dict
             temperature=0.0,
             max_new_tokens=200,
         )
+
+        dynamic_prompt = """
+            Based on the users message, provide a one work descriptor that describes the dynamic between the user and Gizmo.
+
+            Examples include 'friends', 'power-play', 'pet-play', 'colleagues', 'besties', 'GBF', 'catty'... Boil down to the
+            simplest form of how to two interact.
+        """.strip()
         dynamic = await llm.generate(
             messages = [{"role": "user", "content": message.strip()}],
-            system_prompt="What dynamic is the user hoping for considering their response?",
+            system_prompt=dynamic_prompt,
             temperature=.087,
             max_new_tokens=100,
         )
@@ -74,6 +81,7 @@ async def _tag_moment(message: str, dynamic: str, vocabulary: list[str]) -> dict
             return {"tags": [], "new_tags": []}
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
         result = json.loads(clean)
+        result["tags"].append(dynamic)
         return {
             "tags":     result.get("tags", []),
             "new_tags": result.get("new_tags", []),
