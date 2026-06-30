@@ -63,6 +63,13 @@ async def _tag_moment(message: str, dynamic: str, vocabulary: list[str]) -> dict
             temperature=0.0,
             max_new_tokens=200,
         )
+        dynamic = await llm.generate(
+            messages = [{"role": "user", "content": message.strip()}],
+            system_prompt="What dynamic is the user hoping for considering their response?",
+            temperature=.087,
+            max_new_tokens=100,
+        )
+        print(f"I think the dynamic is:\n{dynamic}")
         if not raw or not raw.strip():
             return {"tags": [], "new_tags": []}
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
@@ -140,10 +147,10 @@ Based on your previous reactions, how best can you respond to them in this momen
 Return ONLY valid JSON. No markdown. No explanation.
 
 {
-  "pattern": "It worked well to be direct, and end with a joke the last time they were feeling like this.",
-  "guidance": "Respond directly to their stated problem, but make a terrible pun somewhere towards the end.",
+  "pattern": "What works well, given how they are acting?",
+  "guidance": "Include guidance framework",
   "confidence": 0.0 to 1.0,
-  "avoid": "belittling the stated problem, it's important and immediate to them."
+  "avoid": "include things you ought to avoid"
 }
 
 If you think more than one response may be appropriate, include both, and a small statement as to why either would work.
