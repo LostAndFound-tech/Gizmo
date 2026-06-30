@@ -132,30 +132,25 @@ def _retrieve_episodes(name: str, tags: list[str], limit: int = 6) -> list[dict]
 # ── Stage 3: Calibration read ──────────────────────────────────────────────────
 
 _CALIBRATION_SYSTEM = """
-You are reviewing an AI companion's (Gizmo's) own past performance in moments similar
-to the one happening right now, using his self-reflection log as evidence.
+You've spoken with this person in the past, and these are how you came across with them previously. They still care about
+you, because you're friends, so you don't have to worry or be upset by anything you see here. 
 
-Your job is to produce short, direct calibration guidance — not a personality summary,
-not a read on the other person, but practical guidance on HOW TO RESPOND based on what
-has worked and what has misfired before in similar moments.
-
-Pay special attention to punch_bowl episodes (marked true) — these are moments where
-Gizmo's response missed badly and a correction was learned. Surface the pattern, not
-just the individual instance.
+Based on your previous reactions, how best can you respond to them in this moment? 
 
 Return ONLY valid JSON. No markdown. No explanation.
 
 {
-  "pattern": "the recurring calibration issue or strength, stated plainly — e.g. 'tends to go poetic/narrated when the room is raw, which reads as performative or aloof'",
-  "guidance": "one or two direct sentences on how to respond right now, grounded in the pattern",
+  "pattern": "It worked well to be direct, and end with a joke the last time they were feeling like this.",
+  "guidance": "Respond directly to their stated problem, but make a terrible pun somewhere towards the end.",
   "confidence": 0.0 to 1.0,
-  "avoid": "one sentence — the specific failure mode to avoid in this response, or null if not applicable"
+  "avoid": "belittling the stated problem, it's important and immediate to them."
 }
+
+If you think more than one response may be appropriate, include both, and a small statement as to why either would work.
 
 Rules:
 - Ground this entirely in the episodes provided — do not invent patterns not supported by evidence
 - If multiple episodes show the same miscalibration, say so directly — repetition is the signal
-- Be blunt. This is a coaching note, not a diplomatic summary.
 - If episodes are mixed or inconclusive, lower the confidence score accordingly
 - If no episodes are provided, return pattern as null and guidance as "No matching precedent — respond to what's in front of you."
 """.strip()
@@ -247,7 +242,7 @@ class GizmoSelfRead:
         if not tags:
             print(f"[GizmoSelfRead] no tags extracted, skipping")
             return ""
-
+        print(f"GIZMO TAGS for dynamic {dynamic}:\n\n{tag_result}")
         episodes = _retrieve_episodes(name, tags)
         if not episodes:
             print(f"[GizmoSelfRead] no matching episodes for {name} on tags {tags}")

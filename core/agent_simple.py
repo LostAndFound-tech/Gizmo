@@ -72,13 +72,11 @@ class AgentSimple:
 
             if "chat mode" in msg_lower:
                 _chat_mode = True
-                print("[AgentSimple] switched to chat mode")
                 yield "Chat mode on."
                 return
 
             if "passive mode" in msg_lower:
                 _chat_mode = False
-                print("[AgentSimple] switched to passive mode")
                 yield "Passive mode on."
                 return
 

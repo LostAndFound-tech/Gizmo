@@ -112,7 +112,6 @@ def _write(component: str, line: str) -> None:
     handle = _get_handle(resolved)
 
     # Always print to stdout so Render/systemd capture it
-    print(line)
 
     # Write to per-component file
     if handle is not None:
