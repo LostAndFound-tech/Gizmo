@@ -48,6 +48,25 @@ Rules:
   (e.g. raw distress, playful tease, vulnerable disclosure, scene/roleplay, system switch)
 """.strip()
 
+async def _read_dynamic(message: str, vocabulary: list[str]) -> Optional[str]:
+    try:
+        from core.llm import llm
+        dynamic_prompt = """
+            Based on the users message, provide a one work descriptor that describes the dynamic between the user and Gizmo.
+
+            Examples include 'friends', 'power-play', 'pet-play', 'colleagues', 'besties', 'GBF', 'catty'... Boil down to the
+            simplest form of how to two interact.
+        """.strip()
+        dynamic = await llm.generate(
+            messages = [{"role": "user", "content": message.strip()}],
+            system_prompt=dynamic_prompt,
+            temperature=0,
+            max_new_tokens=100,
+        )
+        print(f"I think the dynamic is:\n{dynamic}")
+        return dynamic.strip()
+    except Exception as e:
+        return e
 
 async def _tag_moment(message: str, dynamic: str, vocabulary: list[str]) -> dict:
     try:
@@ -63,20 +82,6 @@ async def _tag_moment(message: str, dynamic: str, vocabulary: list[str]) -> dict
             temperature=0.0,
             max_new_tokens=200,
         )
-
-        dynamic_prompt = """
-            Based on the users message, provide a one work descriptor that describes the dynamic between the user and Gizmo.
-
-            Examples include 'friends', 'power-play', 'pet-play', 'colleagues', 'besties', 'GBF', 'catty'... Boil down to the
-            simplest form of how to two interact.
-        """.strip()
-        dynamic = await llm.generate(
-            messages = [{"role": "user", "content": message.strip()}],
-            system_prompt=dynamic_prompt,
-            temperature=.087,
-            max_new_tokens=100,
-        )
-        print(f"I think the dynamic is:\n{dynamic}")
         if not raw or not raw.strip():
             return {"tags": [], "new_tags": []}
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
@@ -257,6 +262,7 @@ class GizmoSelfRead:
         if not tags:
             print(f"[GizmoSelfRead] no tags extracted, skipping")
             return ""
+        dynamic = _read_dynamic(message, vocabulary)
         print(f"GIZMO TAGS for dynamic {dynamic}:\n\n{tag_result}")
         episodes = _retrieve_episodes(name, tags)
         if not episodes:
