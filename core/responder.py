@@ -228,8 +228,7 @@ async def _assemble_brief(
         parts.append("\nSELF-CALIBRATION (from your own past responses):\n" + "\n\n".join(calibration_blocks))
 
     # Gizmo's own personality — prose, skipped once synthesis takes over
-    gizmo_data        = librarian.read_personality("gizmo") or {}
-    gizmo_personality = gizmo_data.get("Personality", {})
+    gizmo_personality = librarian.aggregate_gizmo_personality()
     print(f"[[GIZMO PERSONALITY]] | {gizmo_personality}")
     if gizmo_personality:
         from core.gizmo_synthesis import _read_synthesis

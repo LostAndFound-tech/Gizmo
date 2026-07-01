@@ -124,6 +124,39 @@ def _read_file(_path: str) -> dict | None:
     except Exception as e:
         print(f"[librarian] read failed: {e}")
         return None
+    
+# ── Gizmo aggregate personality (from self.json, cross-person) ────────────────
+
+def aggregate_gizmo_personality() -> dict:
+    """
+    Build Gizmo's stable personality trait store by tallying traits_reinforced
+    across every headmate's episode log in headmates/gizmo/self.json.
+
+    Deliberately excludes traits_adjusted / punch_bowl — those are situational
+    corrections, not identity. Identity is what consistently landed well,
+    across everyone, over time.
+
+    Used only pre-synthesis (see gizmo_synthesis._read_synthesis) — once trait
+    count crosses threshold, the prose portrait replaces this raw tally.
+    """
+    self_data = read_gizmo_self()
+    tally: dict[str, dict] = {}
+
+    for key, person in self_data.items():
+        if key == "tag_vocabulary" or not isinstance(person, dict):
+            continue
+        for ep in person.get("episodes", []):
+            for trait_entry in ep.get("traits_reinforced", []):
+                trait = trait_entry.get("trait")
+                if not trait:
+                    continue
+                tags = trait_entry.get("tags", [])
+                if trait not in tally:
+                    tally[trait] = {"count": 0, "weight": 1.0, "tags": []}
+                tally[trait]["count"] += 1
+                tally[trait]["tags"] = _safe_dedup(tally[trait]["tags"], tags)
+
+    return _normalize_personality(tally)
 
 def _write_json(_path: str, content: dict) -> None:
     try:
