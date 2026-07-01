@@ -230,6 +230,7 @@ async def _assemble_brief(
     # Gizmo's own personality — prose, skipped once synthesis takes over
     gizmo_data        = librarian.read_personality("gizmo") or {}
     gizmo_personality = gizmo_data.get("Personality", {})
+    print(f"[[GIZMO PERSONALITY]] | {gizmo_personality}")
     if gizmo_personality:
         from core.gizmo_synthesis import _read_synthesis
         synthesis_active = bool(_read_synthesis())
