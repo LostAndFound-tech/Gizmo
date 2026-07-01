@@ -146,17 +146,18 @@ async def _prose_for_gizmo(personality: dict) -> str:
     trait_lines = [f"- {t} (weight {v.get('weight', 0):.2f})" for t, v in top_traits]
 
     prompt = "Gizmo's traits:\n" + "\n".join(trait_lines)
-
+    print("TRAITS GOING INTO THIS PROMPT:", trait_lines)
     try:
         from core.llm import llm
         raw = await llm.generate(
             messages=[{"role": "user", "content": prompt}],
             system_prompt=_GIZMO_PROSE_SYSTEM,
-            temperature=0.3,
+            temperature=0.45,
             max_new_tokens=100,
         )
         prose = raw.strip() if raw and raw.strip() else ""
-    except Exception:
+    except Exception as E:
+        print(f"PROSE FOR GIZMO FAILED: ERROR: {E}")
         prose = ""
 
     _prose_cache["_gizmo"] = {"prose": prose, "trait_count": trait_count}
