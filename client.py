@@ -3,24 +3,30 @@ client.py
 Terminal client for texting Gizmo.
 
 Usage:
-    # Local:
-    python client.py
+    python client.py                                   # local server on :10000
+    python client.py --name alice                      # with identity
+    python client.py --host wss://your-app.onrender.com/ws --name alice
+    python client.py --new                             # fresh session instead of resuming
 
-    # Render:
-    python client.py --host wss://your-app.onrender.com
-
-    # With identity:
-    python client.py --host wss://your-app.onrender.com --name alice
+Sessions are stable per name (local-<name>) so history resumes between runs.
 """
 
+import argparse
 import asyncio
+import datetime
 import json
 import sys
-import argparse
 import uuid
-from core.timezone import tz_now as thisNow
 
-WS_HOST = "ws://localhost:8765"
+WS_HOST = "ws://localhost:10000/ws"
+
+
+def local_tz() -> str:
+    try:
+        from tzlocal import get_localzone
+        return str(get_localzone())
+    except Exception:
+        return datetime.datetime.now().astimezone().tzname() or "UTC"
 
 
 async def chat(host: str, name: str, session_id: str):
@@ -30,23 +36,11 @@ async def chat(host: str, name: str, session_id: str):
         print("pip install websockets")
         sys.exit(1)
 
-    # Detect local timezone
-    try:
-        import datetime
-        tz = datetime.datetime.now().astimezone().tzname()
-        # Get IANA timezone name if tzlocal is available, fall back to offset
-        try:
-            from tzlocal import get_localzone
-            tz = str(get_localzone())
-        except ImportError:
-            # Fall back to UTC offset string e.g. "UTC-06:00"
-            offset = datetime.datetime.now().astimezone().strftime("%z")
-            tz = f"UTC{offset[:3]}:{offset[3:]}" if offset else "UTC"
-    except Exception:
-        tz = "UTC"
+    name = name.strip().lower()
+    tz = local_tz()
 
     print(f"\nConnecting to Gizmo at {host}...")
-    print(f"Session: {session_id[:8]} | Identity: {name or 'unset'}")
+    print(f"Session: {session_id[:16]} | Identity: {name or 'unset'}")
     print("Type your message and press Enter. Ctrl+C to exit.\n")
 
     async with websockets.connect(host, ping_interval=20) as ws:
@@ -54,7 +48,7 @@ async def chat(host: str, name: str, session_id: str):
 
         while True:
             try:
-                message = await asyncio.get_event_loop().run_in_executor(
+                message = await asyncio.get_running_loop().run_in_executor(
                     None, lambda: input(f"{name or 'you'}: ")
                 )
             except (EOFError, KeyboardInterrupt):
@@ -64,50 +58,65 @@ async def chat(host: str, name: str, session_id: str):
             if not message.strip():
                 continue
 
-            payload = {
-                "message": message,
+            context = {"timezone": tz}
+            if name:
+                context["current_host"] = name
+                context["fronters"] = [name]
+
+            await ws.send(json.dumps({
+                "type":       "message",
+                "content":    message,
                 "session_id": session_id,
-                "context": {
-                    "current_host": name,
-                    "fronters": [name] if name else [],
-                    "timezone": tz,
-                } if name else {"timezone": tz},
-            }
+                "context":    context,
+            }))
 
-            await ws.send(json.dumps(payload))
-
-            # Stream response
             print("gizmo: ", end="", flush=True)
-            async for raw in ws:
-                msg = json.loads(raw)
-                t = msg.get("type")
+            try:
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    t = msg.get("type")
 
-                if t == "token":
-                    print(msg["data"], end="", flush=True)
+                    if t == "chunk":
+                        print(msg.get("content", ""), end="", flush=True)
 
-                elif t == "done":
-                    print()  # newline after response
-                    mood = msg.get("mood")
-                    if mood and mood.get("emotion") != "Neutral":
-                        print(f"  [{mood['emotion']}, {mood['intensity']:.0%}]\n")
-                    else:
-                        print()
+                    elif t == "done":
+                        print("\n")
+                        break
+
+                    elif t == "error":
+                        print(f"\n[error: {msg.get('message')}]\n")
+                        break
+
+                    # "thinking" / "pong" / anything else: ignore
+                else:
+                    print("\n[connection closed by server]")
                     break
-
-                elif t == "error":
-                    print(f"\n[error: {msg['data']}]\n")
-                    break
+            except websockets.ConnectionClosed:
+                print("\n[connection lost]")
+                break
 
 
 def main():
     parser = argparse.ArgumentParser(description="Text Gizmo")
-    parser.add_argument("--host", default=WS_HOST, help="WebSocket URL")
+    parser.add_argument("--host", default=WS_HOST, help="WebSocket URL (include /ws)")
     parser.add_argument("--name", default="", help="Your name / current fronter")
-    parser.add_argument("--session", default="", help="Session ID (auto-generated if omitted)")
+    parser.add_argument("--session", default="", help="Explicit session ID")
+    parser.add_argument("--new", action="store_true", help="Start a fresh session")
     args = parser.parse_args()
 
-    session_id = args.session or str(uuid.uuid4())
-    asyncio.run(chat(args.host, args.name, session_id))
+    if args.session:
+        session_id = args.session
+    elif args.new or not args.name:
+        session_id = f"local-{uuid.uuid4().hex[:12]}"
+    else:
+        session_id = f"local-{args.name.strip().lower()}"
+
+    try:
+        asyncio.run(chat(args.host, args.name, session_id))
+    except KeyboardInterrupt:
+        pass
+    except OSError as e:
+        print(f"Couldn't connect to {args.host}: {e}")
 
 
 if __name__ == "__main__":
