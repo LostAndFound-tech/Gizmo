@@ -1,94 +1,77 @@
 """
 core/agent_simple.py
-Bypass agent — one module, no orchestration.
+Bare-bones agent: message + history in, reply out. One LLM call via core.llm.
 
-Flow:
-  1. Receive message + history
-  2. Call the target module
-  3. Stream response back to caller
-
-Swap TARGET_MODULE and how you call it as you test each engine.
+No chunk pipeline, no modes, no lessons, no keyphrases — add those back
+one at a time once this loop is solid.
 """
 
-import asyncio
 import time
 from typing import AsyncGenerator, Optional
 
-from core.log import log_event, log_error
 from core.llm import llm
+from core.log import log_event, log_error
+
+MAX_TOKENS  = 1024
+TEMPERATURE = 0.8
+
+SYSTEM_PROMPT = """You are Gizmo, a warm, attentive AI companion for the BloodeStream, a plural system.
+Several headmates share one body and may take turns speaking with you.
+Speak naturally and concisely. Address whoever is currently talking by name.
+Don't assume you remember things that aren't in this conversation."""
 
 
-# ── Swap this out as you test each module ─────────────────────────────────────
-#
-# Current target: raw LLM — just message + history, nothing else.
-# Replace the body of _call_module() with whatever you're testing.
-from core.context_deductor import content_deductor as CD
-#
-# ─────────────────────────────────────────────────────────────────────────────
+def _build_system(ctx: dict) -> str:
+    system = SYSTEM_PROMPT
+    host = ctx.get("current_host")
+    if host:
+        system += f"\n\nCurrently speaking: {host.title()}."
+    fronters = [f for f in ctx.get("fronters", []) if f and f != host]
+    if fronters:
+        system += f" Also present: {', '.join(f.title() for f in fronters)}."
+    return system
 
-async def _call_module(
-    message: str,
-    history: list,
-    session_id: str,
-    context: dict,
-) -> str:
-    """
-    Drop your module call here.
-    Must return a string!
-    """
-    m = CD.extract(message)
-    messages = [
-        {"role": m["role"], "content": m["content"]}
-        for m in (history or [])
-    ]
-    messages.append({"role": "user", "content": message})
-
-    return await llm.generate(messages)
-
-
-# ── Agent ─────────────────────────────────────────────────────────────────────
 
 class AgentSimple:
 
-    async def run(
+    async def respond(
         self,
         user_message: str,
         history,
         session_id: str = "",
         context: Optional[dict] = None,
-        source: str = "user",
+        **_ignored,
     ) -> AsyncGenerator[str, None]:
         t_start = time.monotonic()
-        ctx = context or {}
+        ctx = context if context is not None else {}
+        log_event("AgentSimple", "RECEIVE", session=session_id[:8], preview=user_message[:60])
 
-        log_event("AgentSimple", "RECEIVE",
-            session=session_id[:8],
-            preview=user_message[:60],
+        messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in (history or [])
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+        messages.append({"role": "user", "content": user_message})
+
+        text = await llm.generate(
+            messages,
+            system_prompt=_build_system(ctx),
+            max_new_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
         )
 
-        try:
-            response_text = await _call_module(
-                message=user_message,
-                history=history,
-                session_id=session_id,
-                context=ctx,
-            )
-        except Exception as e:
-            log_error("AgentSimple", "module call failed", exc=e)
-            yield "Something went wrong."
-            return
+        # llm.generate returns "" after exhausting retries — surface it as an error
+        if not text.strip():
+            log_error("AgentSimple", "llm returned empty after retries", exc=None)
+            raise RuntimeError("LLM returned an empty response")
 
-        duration_ms = round((time.monotonic() - t_start) * 1000)
-        log_event("AgentSimple", "COMPLETE",
-            session=session_id[:8],
-            duration_ms=duration_ms,
-            words=len(response_text.split()),
-        )
+        log_event("AgentSimple", "COMPLETE", session=session_id[:8],
+                  duration_ms=round((time.monotonic() - t_start) * 1000))
+        yield text.strip()
 
-        chunk_size = 8
-        for i in range(0, len(response_text), chunk_size):
-            yield response_text[i:i + chunk_size]
+    def end_session(self, session_id: str) -> None:
+        """Called by the server on disconnect. Nothing to clean up yet."""
+        pass
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────────
 agent_simple = AgentSimple()
