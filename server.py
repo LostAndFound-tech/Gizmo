@@ -1,6 +1,22 @@
 """
 server.py
-Gizmo's WebSocket server. aiohttp version — this one works.
+Gizmo's WebSocket server — bare bones.
+
+Does: WebSocket chat, session persistence (JSON), short history, dedup,
+      chunked streaming back to the client, /health, /sessions endpoints.
+Does not: modes, safewords, scenes, intents, summaries, multi-speaker parsing.
+
+Client protocol (unchanged):
+  in : {"type": "message", "content": str, "session_id": str,
+        "context": {"current_host": str}}
+       {"type": "ping"}
+       {"type": "switch_host", "headmate": str}
+       {"type": "check_unsent", "headmate": str}
+  out: {"type": "thinking"}
+       {"type": "chunk", "content": str}
+       {"type": "done", "session_id": str, "current_host": str}
+       {"type": "error", "message": str}
+       {"type": "pong"}
 """
 
 from __future__ import annotations
@@ -8,25 +24,97 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
+import os
 import time
-from typing import Optional, Callable
-
 from pathlib import Path
+from typing import Optional
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from aiohttp import web, WSMsgType
+
 from core.log import log, log_event, log_error
-from core.timezone import tz_now
+
+DEDUP_WINDOW    = 5.0
+THINKING_DELAY  = 0.3
+CHUNK_SIZE      = 8
+MAX_MESSAGE_LEN = 8000
+HISTORY_LIMIT   = 12   # messages loaded from disk (6 pairs)
+
+# ── Session persistence ───────────────────────────────────────────────────────
+
+_DATA_DIR     = os.getenv("DATA_DIR", "./data")
+_SESSIONS_DIR = os.path.join(_DATA_DIR, "sessions")
 
 
-DEDUP_WINDOW     = 5.0
-THINKING_DELAY   = 0.3
-CHUNK_SIZE       = 8
-MAX_MESSAGE_LEN  = 8000
+def _session_path(session_id: str) -> str:
+    os.makedirs(_SESSIONS_DIR, exist_ok=True)
+    safe = "".join(c for c in session_id if c.isalnum() or c in "-_")
+    return os.path.join(_SESSIONS_DIR, f"{safe}.json")
 
-_SPEECH_RE   = re.compile(r'^\[?([A-Za-z][A-Za-z0-9_\- ]{0,30})\]?\s*:\s*(.+)', re.DOTALL)
-_ACTION_RE   = re.compile(r'^\*(.+)\*$', re.DOTALL)
-_DIRECTED_RE = re.compile(r'\b(to|at|@)\s+([A-Za-z][A-Za-z0-9_\- ]{0,20})\b', re.IGNORECASE)
 
-_seen_messages: dict[str, float] = {}
+def _load_session(session_id: str) -> Optional[dict]:
+    try:
+        with open(_session_path(session_id), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        log_error("Sessions", f"load failed {session_id[:8]}", exc=e)
+        return None
+
+
+def _save_session(session_id: str, data: dict) -> None:
+    try:
+        with open(_session_path(session_id), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log_error("Sessions", f"save failed {session_id[:8]}", exc=e)
+
+
+def _new_session(session_id: str) -> dict:
+    now = time.time()
+    return {
+        "session_id":  session_id,
+        "opened_at":   now,
+        "last_active": now,
+        "hosts":       [],
+        "messages":    [],
+    }
+
+
+def _list_sessions() -> list[dict]:
+    results = []
+    try:
+        os.makedirs(_SESSIONS_DIR, exist_ok=True)
+        for fname in os.listdir(_SESSIONS_DIR):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(_SESSIONS_DIR, fname), "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                results.append({
+                    "id":          d.get("session_id", fname[:-5]),
+                    "opened_at":   d.get("opened_at", 0),
+                    "last_active": d.get("last_active", 0),
+                    "hosts":       d.get("hosts", []),
+                    "summary":     d.get("summary"),
+                })
+            except Exception:
+                continue
+        results.sort(key=lambda x: x["last_active"], reverse=True)
+    except Exception as e:
+        log_error("Sessions", "list failed", exc=e)
+    return results
+
+
+# ── In-memory state ───────────────────────────────────────────────────────────
+
+_seen_messages: dict[str, float]   = {}
+_live_sockets:  dict[str, object]  = {}   # client session_id -> ws
+_server_to_client_sid: dict[str, str] = {}
+
 
 def _is_duplicate(session_id: str, content: str) -> bool:
     key = hashlib.md5(f"{session_id}:{content}".encode()).hexdigest()
@@ -38,242 +126,18 @@ def _is_duplicate(session_id: str, content: str) -> bool:
         del _seen_messages[k]
     return False
 
-def parse_exchange(raw: str, default_headmate: Optional[str] = None) -> list[dict]:
-    parts = []
-    lines = [l.strip() for l in raw.strip().split("\n") if l.strip()]
-    for line in lines:
-        action_match = _ACTION_RE.match(line)
-        if action_match:
-            action_text = action_match.group(1).strip()
-            actor = None
-            words = action_text.split()
-            if words and words[0][0].isupper() and len(words[0]) > 1:
-                actor = words[0].rstrip("'s")
-                action_text = " ".join(words[1:]) if len(words) > 1 else action_text
-            directed = None
-            d_match = _DIRECTED_RE.search(action_text)
-            if d_match:
-                directed = d_match.group(2).lower()
-            parts.append({"headmate": actor.lower() if actor else default_headmate, "content": action_text, "content_type": "action", "directed_at": directed})
-            continue
-        speech_match = _SPEECH_RE.match(line)
-        if speech_match:
-            name    = speech_match.group(1).strip().lower()
-            content = speech_match.group(2).strip()
-            directed = None
-            d_match  = _DIRECTED_RE.search(content)
-            if d_match:
-                directed = d_match.group(2).lower()
-                if directed in ("gizmo", "you"):
-                    directed = "gizmo"
-            inline_action = re.search(r'\*([^*]+)\*', content)
-            if inline_action:
-                action_text = inline_action.group(1)
-                speech_text = re.sub(r'\*[^*]+\*', '', content).strip()
-                if speech_text:
-                    parts.append({"headmate": name, "content": speech_text, "content_type": "speech", "directed_at": directed})
-                parts.append({"headmate": name, "content": action_text, "content_type": "action", "directed_at": None})
-            else:
-                parts.append({"headmate": name, "content": content, "content_type": "speech", "directed_at": directed})
-            continue
-        if line and default_headmate:
-            parts.append({"headmate": default_headmate.lower(), "content": line, "content_type": "speech", "directed_at": "gizmo"})
-    if not parts and raw.strip() and default_headmate:
-        parts.append({"headmate": default_headmate.lower(), "content": raw.strip(), "content_type": "speech", "directed_at": "gizmo"})
-    return parts
 
-def is_multi_part(raw: str) -> bool:
-    lines = [l.strip() for l in raw.strip().split("\n") if l.strip()]
-    if len(lines) < 2:
-        return False
-    return sum(1 for l in lines if _SPEECH_RE.match(l) or _ACTION_RE.match(l)) >= 2
-
-def assemble_scene_text(parts: list[dict]) -> str:
-    lines = []
-    for part in parts:
-        name    = (part.get("headmate") or "unknown").title()
-        content = part.get("content", "")
-        ctype   = part.get("content_type", "speech")
-        directed = part.get("directed_at")
-        if ctype == "action":
-            line = f"*{name} {content}*"
-        elif ctype == "presence":
-            line = f"[{name} is present]"
-        else:
-            suffix = f" (to {directed})" if directed and directed != "gizmo" else ""
-            line   = f"[{name}]{suffix}: {content}"
-        lines.append(line)
-    return "\n".join(lines)
-
-async def run_single_pipeline(message, session_id, headmate, context, history, llm) -> str:
-    from core.agent_simple import agent_simple as agent
-    try:
-        chunks = []
-        async for chunk in agent.respond(
-            user_message=message,
-            session_id=session_id,
-            context=context,
-            history=history,
-        ):
-            chunks.append(chunk)
-        return "".join(chunks)
-    except Exception as e:
-        import traceback
-        print(f"[SINGLE PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
-        raise
-
-def _get_known_headmates() -> set:
-    """
-    Build the set of known headmate names from the memory store.
-    Used by host_tracker.process_message() to validate identifications.
-    Cached loosely — rebuilds on each call but fast (filesystem glob).
-    """
-    try:
-        from core.memory.store import memory_store
-        memories_dir = memory_store.root / "memories"
-        if not memories_dir.exists():
-            return set()
-        return {p.name.lower() for p in memories_dir.iterdir() if p.is_dir()}
-    except Exception:
-        return set()
-
-def _add_known_headmate(name: str) -> None:
-    """
-    Ensure a headmate has a memories directory.
-    Anyone who appears in the speaker window is definitively a headmate.
-    Creates the directory if it doesn't exist — that's all it takes.
-    """
-    try:
-        from core.memory.store import memory_store
-        p = memory_store.root / "memories" / name.lower()
-        p.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
-def _extract_topics_from_parts(parts: list[dict]) -> list[str]:
-    try:
-        from core.agent import _classify_topics
-        all_text = " ".join(p.get("content", "") for p in parts if p.get("content"))
-        return _classify_topics(all_text) if all_text else ["general"]
-    except Exception:
-        return ["general"]
-
-def _time_of_day(hour: int) -> str:
-    if 5  <= hour < 12: return "morning"
-    if 12 <= hour < 17: return "afternoon"
-    if 17 <= hour < 21: return "evening"
-    return "night"
+def _history_from_saved(saved: Optional[dict]) -> list[dict]:
+    if not saved:
+        return []
+    return [
+        {"role": m["role"], "content": m["content"]}
+        for m in saved.get("messages", [])[-HISTORY_LIMIT:]
+        if m.get("role") in ("user", "assistant") and m.get("content", "").strip()
+    ]
 
 
-async def _world_hourly_tick(llm) -> None:
-    """
-    Coordinated hourly world tick.
-    On first run: starts inner_world (may trigger interview).
-    Subsequently: beats every hour.
-    """
-    from core.inner_world import inner_world
-    from core.culture import culture_engine
-    from core.media import media_engine
-
-    # First call — builds town or starts interview
-    first_question = await inner_world.start(llm)
-
-    if first_question:
-        # Interview needed — broadcast to all connected sessions
-        # Store the question so new connections pick it up
-        _pending_interview_question[0] = first_question
-        log_event("GizmoServer", "INTERVIEW_PENDING",
-            question=first_question[:60])
-
-    while True:
-        await asyncio.sleep(3600)
-        try:
-            if not inner_world._running:
-                continue   # Still in interview
-
-            await inner_world._beat()
-
-            last_hour_events = [
-                {**e.to_dict(), "current_scene": e.get_scene()}
-                for e in inner_world.active_events()
-            ]
-            await culture_engine.hourly_pass(last_hour_events, llm)
-            await media_engine.hourly_pass(culture_engine._threads, llm)
-
-            log_event("GizmoServer", "WORLD_TICK_COMPLETE",
-                events  = len(inner_world.active_events()),
-                threads = len([t for t in culture_engine._threads if not t.resolved]),
-            )
-        except Exception as e:
-            log_error("GizmoServer", "world tick failed", exc=e)
-
-
-# Holds a pending interview question to send on next connection
-_pending_interview_question = [None]
-
-# Last response per session — for training pair comparison
-_last_responses: dict = {}
-
-
-async def _save_training_pair(
-    session_id:         str,
-    headmate:           str,
-    original_sections:  dict,
-    corrected_sections: dict,
-    original_response:  str,
-    corrected_response: str,
-    original_thinking:  dict = None,
-    corrected_thinking: dict = None,
-) -> None:
-    """
-    Save a DPO training pair to /data/training/.
-
-    DPO format:
-      prompt:   assembled system prompt (corrected)
-      chosen:   corrected response
-      rejected: original response
-      metadata: headmate, register, thinking chain
-    """
-    import time as _time
-    try:
-        from pathlib import Path
-        from core.agent import _assemble_prompt_from_sections
-
-        training_dir = Path("/data/training")
-        training_dir.mkdir(parents=True, exist_ok=True)
-
-        # Assemble prompt string from corrected sections
-        prompt_str = _assemble_prompt_from_sections(corrected_sections)
-
-        pair = {
-            # DPO fields
-            "prompt":   prompt_str,
-            "chosen":   corrected_response,
-            "rejected": original_response,
-            # Metadata
-            "metadata": {
-                "session_id":          session_id,
-                "headmate":            headmate,
-                "timestamp":           _time.time(),
-                "original_thinking":   original_thinking or {},
-                "corrected_thinking":  corrected_thinking or {},
-                "original_sections":   original_sections,
-                "corrected_sections":  corrected_sections,
-            }
-        }
-
-        filename = f"{int(_time.time())}_{session_id[:8]}_{headmate or 'unknown'}.json"
-        (training_dir / filename).write_text(
-            json.dumps(pair, indent=2, ensure_ascii=False)
-        )
-        log_event("GizmoServer", "DPO_PAIR_SAVED",
-            session  = session_id[:8],
-            headmate = headmate,
-            file     = filename,
-        )
-    except Exception as e:
-        log_error("GizmoServer", f"DPO pair save failed: {e}", exc=e)
-
+# ── Server ────────────────────────────────────────────────────────────────────
 
 class GizmoServer:
 
@@ -282,129 +146,68 @@ class GizmoServer:
         log("GizmoServer", "initialised")
 
     async def start(self, host: str = "0.0.0.0", port: int = 10000) -> None:
-        from aiohttp import web
-        from pathlib import Path
-        from core.llm import llm
-        from core.session_manager import session_manager
-
-        await session_manager.start(llm=llm)
-
-        # ── World systems startup ──────────────────────────────────────────────
-        try:
-            from core.culture import culture_engine
-            from core.media import media_engine
-            from core.photo_seeds import photo_seed_engine  # noqa — loads queue
-
-            await culture_engine.start(llm)
-            await media_engine.start(llm)
-
-            # Coordinated world tick — inner_world starts inside this
-            # Returns first interview question if world needs building
-            asyncio.ensure_future(_world_hourly_tick(llm))
-            log_event("GizmoServer", "WORLD_SYSTEMS_STARTED")
-        except Exception as e:
-            log_error("GizmoServer", "world systems failed to start", exc=e)
-
-        # ── Scheduler — psych batch processor + any future cron jobs ──────────
-        try:
-            from apscheduler.schedulers.asyncio import AsyncIOScheduler
-            from core.psych_processor import psych_processor
-
-            scheduler = AsyncIOScheduler()
-            psych_processor.schedule(scheduler)
-            scheduler.start()
-            log_event("GizmoServer", "SCHEDULER_STARTED")
-        except Exception as e:
-            log_error("GizmoServer", "scheduler failed to start", exc=e)
-
         app = web.Application()
 
         async def handle_index(request):
             html_path = Path(__file__).parent / "index.html"
             if html_path.exists():
-                return web.Response(text=html_path.read_text(encoding="utf-8"), content_type="text/html")
+                return web.Response(text=html_path.read_text(encoding="utf-8"),
+                                    content_type="text/html")
             return web.Response(text="<h1>Gizmo</h1>", content_type="text/html")
 
         async def handle_health(request):
-            return web.Response(text='{"status":"ok"}', content_type="application/json")
+            return web.json_response({"status": "ok"})
 
         async def handle_sessions(request):
-            try:
-                from core.store import store
-                sessions = store.query("sessions", active=1, order_by="opened_at DESC", limit=50)
-                items = [{"id": s["id"], "opened_at": s.get("opened_at"), "mood": s.get("mood"),
-                          "topics": s.get("topics") or [], "hosts": s.get("hosts") or [],
-                          "summary": (s.get("summary") or "")[:100],
-                          "parent_session_id": s.get("parent_session_id")} for s in sessions]
-                return web.Response(text=json.dumps({"sessions": items}), content_type="application/json")
-            except Exception as e:
-                return web.Response(text=json.dumps({"sessions": [], "error": str(e)}), content_type="application/json")
+            return web.json_response({"sessions": _list_sessions()})
 
         async def handle_session_detail(request):
-            sid = request.match_info.get("session_id", "")
-            try:
-                from core.store import store
-                session = store.get("sessions", sid)
-                if not session:
-                    return web.Response(text=json.dumps({"error": "not found"}), content_type="application/json", status=404)
-                arc = store.query("emotion_log", session_id=sid, active=1, order_by="created_at ASC", limit=100)
-                session["emotion_arc"] = [{"valence": p.get("valence", 0), "intensity": p.get("intensity", 0), "register": p.get("register", "")} for p in arc]
-                return web.Response(text=json.dumps(session), content_type="application/json")
-            except Exception as e:
-                return web.Response(text=json.dumps({"error": str(e)}), content_type="application/json", status=500)
+            data = _load_session(request.match_info["session_id"])
+            if not data:
+                return web.json_response({"error": "not found"}, status=404)
+            return web.json_response(data)
 
         async def handle_ws(request):
-            ws = web.WebSocketResponse()
+            ws = web.WebSocketResponse(heartbeat=15.0)
             await ws.prepare(request)
-            session_id = f"sess_{id(ws):016x}"
-            self._connections[session_id] = ws
-            log_event("GizmoServer", "CONNECTION_OPENED", session=session_id[:8])
+            server_sid = f"sess_{id(ws):016x}"
+            self._connections[server_sid] = ws
+            log_event("GizmoServer", "CONNECTION_OPENED", session=server_sid[:8])
             try:
                 async for msg in ws:
-                    from aiohttp import WSMsgType
                     if msg.type == WSMsgType.TEXT:
-                        await self._handle_message(ws, session_id, msg.data)
+                        await self._handle_message(ws, server_sid, msg.data)
                     elif msg.type == WSMsgType.ERROR:
                         log_error("GizmoServer", f"ws error: {ws.exception()}", exc=None)
             finally:
-                self._connections.pop(session_id, None)
-                log_event("GizmoServer", "CONNECTION_CLOSED", session=session_id[:8])
-
-                # ── Flush world systems on disconnect ──────────────────────────
+                self._connections.pop(server_sid, None)
+                client_sid = _server_to_client_sid.pop(server_sid, None)
+                if client_sid and _live_sockets.get(client_sid) is ws:
+                    _live_sockets.pop(client_sid, None)
                 try:
-                    from core.llm import llm as _llm
-                    from core.session_telemetry import session_telemetry_manager
-                    from core.goal import goal_manager
-                    from core.directive import directive_engine
-                    from core.inner_world import world_reactor
-                    from core.culture import culture_engine
-
-                    asyncio.ensure_future(
-                        session_telemetry_manager.on_session_close(session_id, _llm)
-                    )
-                    asyncio.ensure_future(goal_manager.close_session(session_id))
-                    directive_engine.clear(session_id)
-                    world_reactor.close_session(session_id)
-                    culture_engine.close_session(session_id)
-                except Exception as e:
-                    log_error("GizmoServer", "session world flush failed", exc=e)
+                    from core.agent_simple import agent_simple
+                    agent_simple.end_session(client_sid or server_sid)
+                except Exception:
+                    pass
+                log_event("GizmoServer", "CONNECTION_CLOSED", session=server_sid[:8])
             return ws
 
-        app.router.add_get("/",                       handle_index)
-        app.router.add_get("/health",                 handle_health)
-        app.router.add_get("/ws",                     handle_ws)
-        app.router.add_get("/sessions",               handle_sessions)
-        app.router.add_get("/sessions/{session_id}",  handle_session_detail)
+        app.router.add_get("/",                      handle_index)
+        app.router.add_get("/health",                handle_health)
+        app.router.add_get("/sessions",              handle_sessions)
+        app.router.add_get("/sessions/{session_id}", handle_session_detail)
+        app.router.add_get("/ws",                    handle_ws)
 
         log_event("GizmoServer", "STARTING", host=host, port=port)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, host, port)
-        await site.start()
+        await web.TCPSite(runner, host, port).start()
         log_event("GizmoServer", "LISTENING", host=host, port=port)
         await asyncio.Future()
 
-    async def _handle_message(self, websocket, session_id: str, raw_msg: str) -> None:
+    # ── Message routing ───────────────────────────────────────────────────────
+
+    async def _handle_message(self, websocket, server_sid: str, raw_msg: str) -> None:
         try:
             msg = json.loads(raw_msg)
         except json.JSONDecodeError:
@@ -412,508 +215,178 @@ class GizmoServer:
             return
 
         msg_type = msg.get("type", "message")
-        sid      = msg.get("session_id", session_id)
+        sid = msg.get("session_id") or server_sid
+
+        _live_sockets[sid] = websocket
+        _server_to_client_sid[server_sid] = sid
 
         if msg_type == "ping":
             await self._send(websocket, {"type": "pong"})
-            return
-        if msg_type == "restore_session":
-            await self._handle_restore_session(websocket, msg)
-            return
-        if msg_type == "switch_host":
-            await self._handle_switch_host(sid, msg)
-            return
-        if msg_type == "add_fronter":
-            await self._handle_add_fronter(sid, msg)
-            return
-        if msg_type == "remove_fronter":
-            await self._handle_remove_fronter(sid, msg)
-            return
-        if msg_type == "regenerate":
-            await self._handle_regenerate(websocket, sid, msg)
-            return
-        if msg_type == "message":
+        elif msg_type == "message":
             await self._handle_chat_message(websocket, sid, msg)
+        elif msg_type == "switch_host":
+            hm = (msg.get("headmate") or "").strip().lower()
+            if hm:
+                log_event("GizmoServer", "HOST_SWITCH", session=sid[:8], headmate=hm)
+        elif msg_type == "check_unsent":
+            await self._handle_check_unsent(websocket, sid, msg)
+        elif msg_type == "received":
+            saved = _load_session(sid)
+            if saved:
+                saved.pop("pending_response", None)
+                saved.pop("pending_response_ts", None)
+                _save_session(sid, saved)
+        else:
+            log_event("GizmoServer", "MSG_TYPE_IGNORED", type=msg_type, session=sid[:8])
+
+    # ── Chat ──────────────────────────────────────────────────────────────────
 
     async def _handle_chat_message(self, websocket, session_id: str, msg: dict) -> None:
-        from core.llm import llm
-        from core.session_manager import session_manager
-        from core.host_tracker import host_tracker
-
         content  = msg.get("content", "")
-        context  = msg.get("context", {})
-        history  = session_manager.get_history(session_id)
+        context  = msg.get("context") or {}
+        headmate = (context.get("current_host") or msg.get("headmate") or "").strip().lower() or None
 
-        # ── Per-session world systems — spin up on first message ───────────────
-        try:
-            from core.session_telemetry import session_telemetry_manager
-            from core.goal import goal_manager
-            _headmate_hint = (
-                context.get("current_host") or
-                session_manager.get_session_context(session_id).get("current_host") or ""
+        if isinstance(content, list):
+            # Tolerate the old multi-part format: flatten to plain text
+            content = "\n".join(
+                str(p.get("content", "")) for p in content if isinstance(p, dict)
             )
-            if session_telemetry_manager.get(session_id) is None:
-                asyncio.ensure_future(
-                    session_telemetry_manager.open_session(
-                        session_id, _headmate_hint or None, llm
-                    )
-                )
-                if _headmate_hint:
-                    asyncio.ensure_future(
-                        goal_manager.open_session(session_id, _headmate_hint, llm)
-                    )
-        except Exception as e:
-            log_error("GizmoServer", "session world systems failed", exc=e)
-
-        # ── World setup interview — intercept messages if active ───────────────
-        try:
-            from core.inner_world import inner_world
-
-            # Send pending interview question to new connections
-            if _pending_interview_question[0]:
-                q = _pending_interview_question[0]
-                _pending_interview_question[0] = None
-                await ws.send_str(json.dumps({
-                    "type":    "message",
-                    "content": q,
-                    "source":  "gizmo",
-                }))
-                return   # don't process this message through agent yet
-
-            # Route to interview if active
-            if inner_world.interview and inner_world.interview.is_active():
-                async def _send_to_user(text: str) -> None:
-                    await ws.send_str(json.dumps({
-                        "type":    "message",
-                        "content": text,
-                        "source":  "gizmo",
-                    }))
-                await inner_world.receive_interview_answer(raw_text, _send_to_user)
-                return   # don't process through normal agent
-        except Exception as e:
-            log_error("GizmoServer", "interview routing failed", exc=e)
-
-        live_ctx = session_manager.get_session_context(session_id)
-        if live_ctx.get("current_host"):
-            context.setdefault("current_host", live_ctx["current_host"])
-        if live_ctx.get("fronters"):
-            context.setdefault("fronters", live_ctx["fronters"])
-
-        # ── Speaker window is ground truth ────────────────────────────────────
-        # context.current_host comes directly from the client UI speaker window.
-        # Trust it unconditionally. Register as known headmate immediately.
-        headmate = context.get("current_host") or ""
-        if headmate:
-            _add_known_headmate(headmate)
-            session_manager.set_host(session_id=session_id, headmate=headmate, confidence=1.0)
+        content = (content or "").strip()
 
         if not content:
             return
-        if isinstance(content, str) and len(content) > MAX_MESSAGE_LEN:
+        if len(content) > MAX_MESSAGE_LEN:
             await self._send(websocket, {"type": "error", "message": "message too long"})
             return
-
-        if isinstance(content, list):
-            parts    = content
-            raw_text = assemble_scene_text(parts)
-            multi    = len([p for p in parts if p.get("content_type") != "presence"]) > 1
-        else:
-            raw_text = content
-            parts    = parse_exchange(raw_text, default_headmate=headmate)
-            multi    = is_multi_part(raw_text)
-
-        if _is_duplicate(session_id, raw_text):
+        if _is_duplicate(session_id, content):
             return
 
-        # ── Host identification — natural speech patterns ─────────────────────
-        # Catches "it's Jess", "I'm Ara", "Jess here" etc.
-        # Fires before everything else so headmate is known for the full pipeline
-        _prev_headmate = headmate
-        try:
-            known = _get_known_headmates()
-            changes = host_tracker.process_message(session_id, raw_text, known)
-            if changes.get("host_identified"):
-                identified = changes["host_identified"].lower()
-                # Add to known headmates — anyone seen in speaker window is a headmate
-                _add_known_headmate(identified)
-                context["current_host"] = identified
-                headmate = identified
-                log_event("GizmoServer", "HOST_IDENTIFIED",
-                    session=session_id[:8], headmate=identified)
-        except Exception as e:
-            log_error("GizmoServer", "host identification failed", exc=e)
-
-        # ── Host change — hard reset session context ──────────────────────────
-        # If who we're talking to changed, tell Gizmo before he responds
-        _host_changed = (
-            headmate and _prev_headmate and
-            headmate.lower() != _prev_headmate.lower()
-        )
-
-        # ── Speaker detection from structured [Name]: format ──────────────────
-        speech_parts = [p for p in parts if p.get("content_type") == "speech"]
-        if speech_parts:
-            first_speaker = speech_parts[0].get("headmate")
-            if first_speaker and first_speaker != headmate:
-                session_manager.set_host(session_id=session_id, headmate=first_speaker, confidence=0.95)
-                context["current_host"] = first_speaker
-                headmate = first_speaker
-
-        all_speakers = list(dict.fromkeys(p["headmate"] for p in parts if p.get("headmate")))
-        if all_speakers:
-            session_manager.add_fronters(session_id, all_speakers)
-            context["fronters"] = list(set(context.get("fronters", []) + all_speakers))
-
-        fronters = context.get("fronters", [headmate] if headmate else [])
-
-        # ── Fallback — bare name answer ───────────────────────────────────────
-        if not headmate and not multi and len(parts) == 1:
-            c = parts[0].get("content", "").strip()
-            import re as _re
-            name_match = (
-                _re.match(r"^([A-Za-z][A-Za-z0-9_\- ]{0,20})$", c) or
-                _re.search(r"(?:it'?s|i'?m|this is|call me|my name is)\s+([A-Za-z][A-Za-z0-9_\- ]{0,20})", c, _re.IGNORECASE)
-            )
-            if name_match:
-                detected = name_match.group(1).strip().lower()
-                session_manager.set_host(session_id=session_id, headmate=detected, confidence=0.9)
-                context["current_host"] = detected
-                headmate = detected
-                fronters = [detected]
-                context["fronters"] = fronters
-
-        # ── Inject host change into context if switch detected ───────────────
-        if _host_changed:
-            context["host_changed"] = True
-            context["previous_host"] = _prev_headmate
-            log_event("GizmoServer", "HOST_SWITCH_DETECTED",
-                session=session_id[:8],
-                from_host=_prev_headmate,
-                to_host=headmate,
-            )
+        context["current_host"] = headmate
+        context["session_id"]   = session_id
 
         log_event("GizmoServer", "MESSAGE_RECEIVED",
-            session=session_id[:8], headmate=headmate or "unknown", multi=multi,
-            parts=len(parts), words=len(raw_text.split()))
+                  session=session_id[:8], headmate=headmate or "unknown",
+                  words=len(content.split()))
+
+        # History comes from disk (before we add this message)
+        saved   = _load_session(session_id) or _new_session(session_id)
+        history = _history_from_saved(saved)
+
+        # Persist the user message up front so a dropped connection can resend
+        now = time.time()
+        saved["last_active"] = now
+        saved["pipeline_running"] = True
+        if headmate and headmate not in saved["hosts"]:
+            saved["hosts"].append(headmate)
+        saved["messages"].append({
+            "role": "user", "speaker": headmate or "unknown",
+            "content": content, "ts": now,
+        })
+        _save_session(session_id, saved)
 
         await asyncio.sleep(THINKING_DELAY)
         await self._send(websocket, {"type": "thinking"})
 
         try:
-            response = await run_single_pipeline(
-                message=raw_text,
-                session_id=session_id,
-                headmate=headmate, context=context,
-                history=history, llm=llm,
-            )
+            response = await self._run_agent(content, session_id, context, history)
         except Exception as e:
-            import traceback
-            print(f"[PIPELINE ERROR]\n{traceback.format_exc()}", flush=True)
+            log_error("GizmoServer", "agent failed", exc=e)
+            saved = _load_session(session_id) or saved
+            saved.pop("pipeline_running", None)
+            _save_session(session_id, saved)
             await self._send(websocket, {"type": "error", "message": f"{type(e).__name__}: {e}"})
             return
 
-        for i in range(0, len(response), CHUNK_SIZE):
-            await self._send(websocket, {"type": "chunk", "content": response[i:i+CHUNK_SIZE]})
-            await asyncio.sleep(0)
+        saved = _load_session(session_id) or saved
+        saved.pop("pipeline_running", None)
+        saved["last_active"] = time.time()
+        saved["messages"].append({
+            "role": "assistant", "speaker": "gizmo",
+            "content": response, "ts": time.time(),
+        })
+        saved["pending_response"]    = response
+        saved["pending_response_ts"] = time.time()
+        _save_session(session_id, saved)
 
-        await self._send(websocket, {"type": "done", "session_id": session_id, "current_host": headmate or ""})
-
-        # Track last response for training pairs
-        _last_responses[session_id] = response
-
-        # ── Send prompt sections + thinking for inspector panel ───────────────
-        try:
-            from core.agent import _last_prompt_sections, _last_thinking
-            sections = _last_prompt_sections.get(session_id, {})
-            thinking = _last_thinking.get(session_id, {})
-            if sections or thinking:
-                await self._send(websocket, {
-                    "type":     "prompt_sections",
-                    "sections": sections,
-                    "thinking": thinking,
-                })
-        except Exception:
-            pass
-
-        # ── Session touch — correct signature (hosts + topics only) ──────────
-        session_manager.touch(
-            session_id = session_id,
-            hosts      = [headmate] if headmate else [],
-            topics     = _extract_topics_from_parts(parts),
-        )
-
-        # ── Telemetry exchange pass ───────────────────────────────────────────
-        try:
-            from core.session_telemetry import session_telemetry_manager
-            from core.llm import llm as _llm
-            from core.agent import _classify_register
-            _register = _classify_register(raw_text)
-            asyncio.ensure_future(
-                session_telemetry_manager.on_exchange(
-                    session_id = session_id,
-                    headmate   = headmate or None,
-                    user_msg   = raw_text,
-                    gizmo_msg  = response,
-                    llm        = _llm,
-                    register   = _register,
-                )
-            )
-        except Exception as e:
-            log_error("GizmoServer", "telemetry exchange failed to schedule", exc=e)
-
-        # ── Scene extraction — fire and forget after response ─────────────────
-        try:
-            from core.memory.session_context import session_context_manager
-            ctx = session_context_manager.get(session_id)
-            if ctx and session_context_manager.should_update_scene(session_id):
-                asyncio.ensure_future(
-                    session_context_manager.update_scene(
-                        session_id = session_id,
-                        assembled  = raw_text,
-                        parts      = parts,
-                        headmate   = headmate,
-                        llm        = llm,
-                    )
-                )
-        except Exception as e:
-            log_error("GizmoServer", "scene update failed to schedule", exc=e)
+        # The socket may have reconnected mid-generation; prefer the live one
+        live_ws = _live_sockets.get(session_id, websocket)
+        await self._stream(live_ws, response)
+        await self._send(live_ws, {"type": "done", "session_id": session_id,
+                                   "current_host": headmate or ""})
 
         log_event("GizmoServer", "RESPONSE_SENT",
-            session=session_id[:8], words=len(response.split()), multi=multi)
+                  session=session_id[:8], words=len(response.split()))
 
-    async def _handle_regenerate(
-        self,
-        websocket,
-        session_id: str,
-        msg:        dict,
-    ) -> None:
-        """
-        Receive corrected prompt sections and/or thinking JSON.
-        Regenerates response, replaces last message, saves DPO training pair.
-        Corrected sections update _last_prompt_sections for the rest of the session.
-        """
-        from core.llm import llm
-        from core.session_manager import session_manager
-        from core.agent import (
-            _last_prompt_sections, _last_thinking,
-            _assemble_prompt_from_sections,
-        )
-
-        sections = msg.get("sections", {})
-        thinking = msg.get("thinking", {})
-        context  = msg.get("context", {})
-
-        if not sections and not thinking:
+    async def _handle_check_unsent(self, websocket, session_id: str, msg: dict) -> None:
+        """On reconnect: deliver a response the client missed, or re-run an unanswered message."""
+        saved = _load_session(session_id)
+        if not saved:
             return
 
-        headmate = context.get("current_host") or ""
-        history  = session_manager.get_history(session_id)
+        headmate = (msg.get("headmate") or "").strip().lower()
+        if not headmate and saved.get("hosts"):
+            headmate = saved["hosts"][0].lower()
 
-        # Get originals for DPO pair
-        original_sections = _last_prompt_sections.get(session_id, {})
-        original_thinking = _last_thinking.get(session_id, {})
-        original_response = _last_responses.get(session_id, "")
-
-        # Update session prompt sections permanently for this session
-        if sections:
-            _last_prompt_sections[session_id] = sections
-
-        # Update thinking JSON if corrected
-        if thinking:
-            _last_thinking[session_id] = thinking
-
-        # Build corrected prompt
-        # If thinking was corrected, inject corrected response directly
-        corrected_response = ""
-        if thinking:
-            l4 = thinking.get("layer_4_plan", {})
-            corrected_response = l4.get("response", "").strip()
-
-        if not corrected_response:
-            # Regenerate from corrected prompt
-            try:
-                corrected_prompt = _assemble_prompt_from_sections(sections or original_sections)
-                corrected_prompt += f"\n\n[Message from {headmate or 'user'}]\n"
-
-                # Get last user message from history
-                try:
-                    msgs = history.as_messages("") or []
-                    user_msgs = [m for m in msgs if m.get("role") == "user"]
-                    if user_msgs:
-                        corrected_prompt += user_msgs[-1].get("content", "")
-                except Exception:
-                    pass
-
-                await self._send(websocket, {"type": "thinking"})
-
-                from core.llm import llm as _llm
-                messages = []
-                try:
-                    messages = history.as_messages("") or []
-                    if len(messages) > 5:
-                        messages = messages[-5:]
-                except Exception:
-                    pass
-
-                raw = await _llm.generate(
-                    messages,
-                    system_prompt  = corrected_prompt,
-                    max_new_tokens = 600,
-                    temperature    = 0.75,
-                )
-                raw = (raw or "").strip()
-
-                # Parse JSON if returned
-                try:
-                    import json as _json
-                    start = raw.find("{")
-                    end   = raw.rfind("}") + 1
-                    if start != -1 and end > 0:
-                        parsed = _json.loads(raw[start:end])
-                        corrected_response = parsed.get("layer_4_plan", {}).get("response", "").strip()
-                        if not corrected_response:
-                            corrected_response = raw
-                        # Update thinking store
-                        _last_thinking[session_id] = parsed
-                    else:
-                        corrected_response = raw
-                except Exception:
-                    corrected_response = raw
-
-            except Exception as e:
-                log_error("GizmoServer", f"regenerate failed: {e}", exc=e)
-                await self._send(websocket, {"type": "error", "message": "regenerate failed"})
-                return
-
-        if not corrected_response:
-            corrected_response = original_response
-
-        # Save DPO training pair
-        asyncio.ensure_future(
-            _save_training_pair(
-                session_id          = session_id,
-                headmate            = headmate,
-                original_sections   = original_sections,
-                corrected_sections  = sections or original_sections,
-                original_thinking   = original_thinking,
-                corrected_thinking  = thinking or original_thinking,
-                original_response   = original_response,
-                corrected_response  = corrected_response,
-            )
-        )
-
-        _last_responses[session_id] = corrected_response
-
-        await self._send(websocket, {
-            "type":     "regenerated",
-            "response": corrected_response,
-            "thinking": _last_thinking.get(session_id, {}),
-            "session_id": session_id,
-        })
-
-        log_event("GizmoServer", "REGENERATED",
-            session  = session_id[:8],
-            headmate = headmate,
-            words    = len(corrected_response.split()),
-        )
-
-    async def _handle_restore_session(self, websocket, msg: dict) -> None:
-        from core.store import store
-        from core.session_manager import session_manager
-        from core.llm import llm
-        import random, string, time as _time
-
-        sid = msg.get("session_id", "")
-        if not sid:
+        pending = (saved.get("pending_response") or "").strip()
+        if pending:
+            await self._stream(websocket, pending)
+            await self._send(websocket, {"type": "done", "session_id": session_id,
+                                         "current_host": headmate})
             return
 
-        session = store.get("sessions", sid)
-        if not session:
-            await self._send(websocket, {"type": "error", "message": "session not found"})
+        messages = saved.get("messages", [])
+        if not messages or messages[-1].get("role") != "user":
             return
 
-        suffix    = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
-        branch_id = f"{sid}_{suffix}"
+        last_text = messages[-1].get("content", "")
+        if not last_text:
+            return
 
-        now         = _time.time()
-        last_ts     = session.get("closed_at") or session.get("opened_at") or now
-        elapsed_hrs = (now - last_ts) / 3600
+        log_event("GizmoServer", "RESENDING_UNSENT", session=session_id[:8])
+        await self._send(websocket, {"type": "thinking"})
 
-        if elapsed_hrs < 0.5:  time_note = "just a few minutes ago"
-        elif elapsed_hrs < 2:  time_note = f"about {int(elapsed_hrs*60)} minutes ago"
-        elif elapsed_hrs < 24: time_note = f"about {int(elapsed_hrs)} hours ago"
-        elif elapsed_hrs < 48: time_note = "yesterday"
-        else:                  time_note = f"{int(elapsed_hrs/24)} days ago"
-
-        history   = session_manager.get_history(branch_id)
-        messages  = store.query("messages",  session_id=sid, active=1, order_by="created_at ASC", limit=20)
-        responses = store.query("responses", session_id=sid, active=1, order_by="created_at ASC", limit=20)
-
-        all_msgs = sorted(
-            [{"role": "user",      "content": m["content"], "ts": m.get("created_at", 0)} for m in messages  if m.get("content")] +
-            [{"role": "assistant", "content": r["content"], "ts": r.get("created_at", 0)} for r in responses if r.get("content")],
-            key=lambda x: x["ts"]
-        )
-        for m in all_msgs[-12:]:
-            try: history.add(m["role"], m["content"])
-            except: pass
-
-        hosts = session.get("hosts") or []
-        if hosts:
-            session_manager.set_host(session_id=branch_id, headmate=hosts[0], confidence=0.9, fronters=hosts)
-
-        store.write("sessions", {
-            "id": branch_id, "opened_at": now, "hosts": hosts, "fronters": hosts,
-            "parent_session_id": sid, "branch_point": now,
-            "headmate": hosts[0].lower() if hosts else None,
-            "source": "branch", "tags": "session,branch",
-        })
-
-        await self._send(websocket, {"type": "session_restored", "session_id": branch_id, "hosts": hosts})
-        log_event("GizmoServer", "SESSION_BRANCHED", parent=sid[:8], branch=branch_id[:8])
-
-        host_name     = hosts[0].title() if hosts else "you"
-        last_exchange = "\n".join(
-            f"{'User' if m['role']=='user' else 'Gizmo'}: {m['content'][:80]}"
-            for m in all_msgs[-3:]
-        )
+        history = [{"role": m["role"], "content": m["content"]} for m in messages[:-1][-HISTORY_LIMIT:]
+                   if m.get("role") in ("user", "assistant")]
+        context = {"current_host": headmate, "session_id": session_id}
 
         try:
-            await self._send(websocket, {"type": "thinking"})
-            opening = await llm.generate(
-                [{"role": "user", "content": (
-                    f"Reconnecting with {host_name} after {time_note}.\n"
-                    f"Last mood: {session.get('mood','unknown')}\n"
-                    f"Unresolved: {session.get('unresolved') or 'nothing'}\n"
-                    f"Last exchanges:\n{last_exchange or '(none)'}\n\n"
-                    f"Write ONE natural opening, 1-2 sentences. Acknowledge the time. Be present."
-                )}],
-                system_prompt=f"You are Gizmo. Reconnecting with {host_name} after {time_note}. Warm, present, 1-2 sentences.",
-                max_new_tokens=80, temperature=0.85,
-            )
-            if opening and opening.strip():
-                await self._send(websocket, {"type": "chunk", "content": opening.strip()})
-                await self._send(websocket, {"type": "done", "session_id": branch_id})
+            response = await self._run_agent(last_text, session_id, context, history)
         except Exception as e:
-            log_error("GizmoServer", "restore opening failed", exc=e)
+            log_error("GizmoServer", "resend failed", exc=e)
+            return
+        if not response:
+            return
 
-    async def _handle_switch_host(self, session_id: str, msg: dict) -> None:
-        from core.session_manager import session_manager
-        headmate = msg.get("headmate", "")
-        if headmate:
-            session_manager.set_host(session_id=session_id, headmate=headmate,
-                confidence=msg.get("confidence", 1.0), fronters=msg.get("fronters"))
+        saved["messages"].append({
+            "role": "assistant", "speaker": "gizmo",
+            "content": response, "ts": time.time(),
+        })
+        saved["last_active"] = time.time()
+        saved.pop("pipeline_running", None)
+        _save_session(session_id, saved)
 
-    async def _handle_add_fronter(self, session_id: str, msg: dict) -> None:
-        from core.session_manager import session_manager
-        names = msg.get("fronters", []) or [msg.get("headmate", "")]
-        session_manager.add_fronters(session_id, [n for n in names if n])
+        await self._stream(websocket, response)
+        await self._send(websocket, {"type": "done", "session_id": session_id,
+                                     "current_host": headmate})
 
-    async def _handle_remove_fronter(self, session_id: str, msg: dict) -> None:
-        from core.session_manager import session_manager
-        name = msg.get("headmate", "")
-        if name:
-            session_manager.remove_fronter(session_id, name)
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    async def _run_agent(self, message: str, session_id: str, context: dict, history: list) -> str:
+        from core.agent_simple import agent_simple
+        parts = []
+        async for chunk in agent_simple.respond(
+            user_message=message,
+            history=history,
+            session_id=session_id,
+            context=context,
+        ):
+            parts.append(chunk)
+        return "".join(parts)
+
+    async def _stream(self, websocket, text: str) -> None:
+        for i in range(0, len(text), CHUNK_SIZE):
+            await self._send(websocket, {"type": "chunk", "content": text[i:i + CHUNK_SIZE]})
+            await asyncio.sleep(0)
 
     async def _send(self, websocket, data: dict) -> None:
         try:
@@ -924,11 +397,13 @@ class GizmoServer:
 
 server = GizmoServer()
 
+
 async def main():
-    import os
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "10000"))
-    await server.start(host=host, port=port)
+    await server.start(
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "10000")),
+    )
+
 
 if __name__ == "__main__":
     asyncio.run(main())
